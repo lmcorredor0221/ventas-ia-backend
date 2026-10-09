@@ -1,0 +1,64 @@
+import express from 'express';
+import cors from 'cors';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { RUNTIME_CONFIG } from './config.js';
+import { JsonStore } from './store/jsonStore.js';
+import { EventService } from './services/events.js';
+import { ToolRegistry } from './services/toolRegistry.js';
+import { AgentRuntime } from './services/agentRuntime.js';
+import { createApiRouter } from './routes/api.js';
+import { createWhatsAppRouter } from './routes/whatsapp.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.resolve(__dirname, '..');
+
+export function createApp(overrides = {}) {
+  const config = { ...RUNTIME_CONFIG, ...overrides };
+  const store = new JsonStore(config.dataFile);
+  store.load();
+  const events = new EventService(store);
+  const tools = new ToolRegistry({ store, events, config });
+  const runtime = new AgentRuntime({ store, events, tools, config });
+
+  const app = express();
+  app.use(cors());
+  app.use(
+    express.json({
+      limit: '2mb',
+      verify: (req, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
+
+  app.get('/health', (_req, res) => {
+    res.json({ ok: true, service: 'ventas-ia-agent-backend', version: '0.1.0', time: new Date().toISOString() });
+  });
+  app.use('/api', createApiRouter({ store, events, runtime, tools }));
+  app.use('/webhooks', createWhatsAppRouter({ store, runtime }));
+
+  const distPath = path.join(rootDir, 'dist');
+  app.use(express.static(distPath));
+  app.get('*splat', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/webhooks')) return next();
+    return res.sendFile(path.join(distPath, 'index.html'));
+  });
+
+  app.use((error, _req, res, _next) => {
+    console.error(error);
+    res.status(500).json({ error: error.message ?? 'Internal server error' });
+  });
+
+  return { app, store, events, tools, runtime, config };
+}
+
+const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+const modulePath = fileURLToPath(import.meta.url);
+
+if (entryPath === modulePath) {
+  const { app, config } = createApp();
+  app.listen(config.port, config.host, () => {
+    console.log(`Ventas IA backend listening on http://${config.host}:${config.port}`);
+  });
+}
