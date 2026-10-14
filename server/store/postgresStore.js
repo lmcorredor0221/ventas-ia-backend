@@ -17,7 +17,9 @@ export class PostgresStore {
   constructor({ databaseUrl, ssl = 'auto', max = 5 }) {
     if (!databaseUrl) throw new Error('DATABASE_URL is required when STORAGE_DRIVER=postgres');
     this.pool = new Pool({
-      connectionString: databaseUrl,
+      // pg lets sslmode query parameters override the explicit SSL object.
+      // Normalize provider URLs so Render/Supabase use the policy below.
+      connectionString: normalizeDatabaseUrl(databaseUrl),
       max,
       ssl: resolveSsl(databaseUrl, ssl),
     });
@@ -1275,6 +1277,18 @@ function resolveSsl(databaseUrl, ssl) {
   if (ssl === 'require') return { rejectUnauthorized: false };
   if (databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1')) return false;
   return { rejectUnauthorized: false };
+}
+
+function normalizeDatabaseUrl(databaseUrl) {
+  try {
+    const url = new URL(databaseUrl);
+    for (const key of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert']) {
+      url.searchParams.delete(key);
+    }
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
 }
 
 function secretReferencesFromTenant(tenant) {
