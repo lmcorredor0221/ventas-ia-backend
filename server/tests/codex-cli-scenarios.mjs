@@ -95,6 +95,7 @@ try {
   server.close();
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
+
 function seedExtraProducts(products) {
   store.mutate((state) => {
     state.productsByTenant ??= {};
@@ -132,3 +133,4 @@ async function postJson(url, body) {
   assert.equal(response.ok, true, `${url} returned ${response.status}: ${text}`);
   return text ? JSON.parse(text) : {};
 }
+

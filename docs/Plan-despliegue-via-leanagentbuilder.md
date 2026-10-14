@@ -1,7 +1,7 @@
 # Plan de despliegue independiente: via.leanagentbuilder.com
 
-Fecha de investigacion: 2026-10-14
-Estado: plan preparado, repositorios fuente publicos verificados, sin cambios en Supabase, Render, Vercel ni DNS
+Fecha de investigacion: 2026-10-14  
+Estado: ejecucion parcial verificada el 2026-10-14; frontend y backend publicos responden, OAuth publico configurado, integraciones de negocio pendientes
 
 ## 1. Objetivo
 
@@ -160,49 +160,52 @@ api.via.leanagentbuilder.com
 
 ### Fase 2: crear Supabase nuevo
 
-- [ ] Crear un proyecto nuevo en la misma cuenta, con nombre sugerido `ventas-ia-via-prod`.
-- [ ] Elegir una region de Americas; validar costo, latencia y disponibilidad antes de confirmar. Supabase recomienda elegir la region mas cercana a los usuarios.
-- [ ] Generar una contraseña de base de datos fuerte y almacenarla en un gestor seguro.
-- [ ] Obtener desde `Connect` la cadena Shared Pooler, Session mode, para Render IPv4.
-- [ ] Usar SSL obligatorio. El backend debe recibir `DATABASE_SSL=require` o una configuracion equivalente.
-- [ ] Ejecutar las migraciones `001` a `006` en orden. El arranque del backend tambien valida/aplica migraciones pendientes.
+- [x] Crear un proyecto separado en una organizacion Free: `ventas-ia-free`, proyecto `ventas-ia-free`, ref `mmcxphpstxjugxjrdffb`.
+- [x] Elegir una region de Americas: `ca-central-1` (Canada Central). La organizacion Pro `leanagentbuilder` y su proyecto existente no fueron modificados.
+- [x] Generar y restablecer una contraseña de base de datos fuerte; se conserva solo como secreto operativo.
+- [x] Obtener desde `Connect` la cadena Shared Pooler, Session mode, para Render IPv4: `aws-1-ca-central-1.pooler.supabase.com:5432`.
+- [x] Usar SSL obligatorio. Render recibe `DATABASE_SSL=require` y la URL no incluye `sslmode=require`, para evitar que Node 24 reemplace la politica SSL del driver.
+- [x] Ejecutar las migraciones `001` a `006` en orden. El arranque exitoso del backend confirma la conexion y la ejecucion del migrador incorporado.
 - [ ] Validar tablas, `schema_migrations`, `app_state`, tenants, sesiones, eventos, billing y webhooks.
-- [ ] Inicializar un estado semilla de produccion limpio y revisar que no entren cuentas `example.local` no autorizadas.
+- [x] Inicializar un estado semilla de produccion limpio durante el primer arranque; queda pendiente revisar explicitamente que no entren cuentas `example.local` no autorizadas.
 - [ ] No colocar `service_role`, contraseñas ni connection strings en el frontend.
-- [ ] Mantener RLS como defensa adicional si se habilita el Data API de Supabase; el frontend no debe consultar PostgreSQL directamente.
+- [x] Mantener RLS automatico habilitado en el proyecto; el frontend no consulta PostgreSQL directamente.
 - [ ] Configurar backups y definir el procedimiento de restauracion antes de aceptar datos reales.
 
 ### Fase 3: crear servicio backend en Render
 
-- [ ] Crear un nuevo Web Service en la misma cuenta/workspace de Render.
-- [ ] Conectarlo al repositorio `ventas-ia-backend` y a la rama `main` o a una rama de release definida.
-- [ ] Build command: `npm ci`.
-- [ ] Start command: `npm start`.
-- [ ] Configurar health check: `/health`.
-- [ ] Configurar `HOST=0.0.0.0`, `NODE_ENV=production`, `STORAGE_DRIVER=postgres` y `DATABASE_SSL=require`.
-- [ ] Agregar el `DATABASE_URL` de Supabase Session Pooler.
-- [ ] Agregar `AUTH_REQUIRED=true`, `CSRF_REQUIRED=true`, `ALLOW_DEV_GOOGLE_LOGIN=false`.
-- [ ] Agregar `PUBLIC_APP_URL=https://api.via.leanagentbuilder.com`.
-- [ ] Agregar `FRONTEND_APP_URL=https://via.leanagentbuilder.com`.
-- [ ] Agregar `GOOGLE_REDIRECT_URI=https://api.via.leanagentbuilder.com/api/saas/google/oauth/callback`.
-- [ ] Agregar `PLATFORM_ADMIN_EMAILS=lmcorredor@gmail.com`.
-- [ ] Agregar las referencias/secretos de DeepSeek, Google, Meta WhatsApp, Mercado Pago y `SECRET_ENCRYPTION_KEY` mediante Environment, nunca en el repositorio.
-- [ ] Crear un Custom Domain temporal o definitivo: `api.via.leanagentbuilder.com`.
+- [x] Crear un nuevo Web Service en la misma cuenta/workspace de Render: `ventas-ia-backend-free`, id `srv-db7sqqmq1p3s73elv1eg`.
+- [x] Conectarlo al repositorio `ventas-ia-backend`, rama `main`.
+- [x] Build command: `npm ci`.
+- [x] Start command: `npm start`.
+- [x] Configurar health check: `/health`.
+- [x] Configurar `HOST=0.0.0.0`, `NODE_ENV=production`, `STORAGE_DRIVER=postgres` y `DATABASE_SSL=require`.
+- [x] Agregar el `DATABASE_URL` de Supabase Session Pooler como secreto.
+- [x] Agregar `AUTH_REQUIRED=true`, `CSRF_REQUIRED=true`, `ALLOW_DEV_GOOGLE_LOGIN=false`.
+- [x] Usar temporalmente `PUBLIC_APP_URL=https://ventas-ia-backend-free.onrender.com`; Render Free no admite dominio personalizado.
+- [x] Agregar `FRONTEND_APP_URL=https://via.leanagentbuilder.com`.
+- [x] Usar temporalmente `GOOGLE_REDIRECT_URI=https://ventas-ia-backend-free.onrender.com/api/saas/google/oauth/callback`; debe cambiarse si se habilita un dominio API de pago.
+- [x] Agregar `PLATFORM_ADMIN_EMAILS=lmcorredor@gmail.com`.
+- [x] Agregar `SECRET_ENCRYPTION_KEY`, credenciales OAuth de Google y `DEEPSEEK_API_KEY` mediante Environment, nunca en el repositorio.
+- [ ] Agregar credenciales de Meta WhatsApp y Mercado Pago mediante Environment, nunca en el repositorio.
+- [x] Confirmar que el servicio permanezca accesible despues del redeploy limpio; `/health` devolvio `200` y `/api/auth/me` devolvio `401` sin sesion.
+- [ ] Crear el Custom Domain `api.via.leanagentbuilder.com` cuando el plan de Render lo permita; no se habilita en Free.
 - [ ] Obtener de Render el destino DNS exacto del servicio antes de tocar el panel del registrador.
 
 ### Fase 4: crear proyecto frontend en Vercel
 
-- [ ] Crear un proyecto nuevo en la misma cuenta/equipo Vercel.
-- [ ] Importar `ventas-ia-frontend`.
-- [ ] Seleccionar Vite o configuracion generica de Node.
-- [ ] Build command: `npm run build`.
-- [ ] Output directory: `dist`.
-- [ ] Instalar dependencias con lockfile (`npm ci` si la configuracion lo permite).
-- [ ] Configurar `VITE_GOOGLE_CLIENT_ID` para Preview y Production segun corresponda.
-- [ ] Agregar el dominio personalizado `via.leanagentbuilder.com`.
-- [ ] Obtener de Vercel el CNAME exacto para ese subdominio.
-- [ ] Configurar la rama de produccion y previews para no publicar accidentalmente ramas de trabajo.
-- [ ] Validar que los rewrites `/api` y `/health` lleguen a Render.
+- [x] Crear un proyecto nuevo en la misma cuenta/equipo Vercel: `ventas-ia-frontend`.
+- [x] Importar `ventas-ia-frontend`.
+- [x] Seleccionar Vite o configuracion generica de Node.
+- [x] Build command: `npm run build`.
+- [x] Output directory: `dist`.
+- [x] Instalar dependencias con lockfile (`npm ci`).
+- [x] Configurar `VITE_GOOGLE_CLIENT_ID` en Production y redeplegar el proyecto.
+- [x] Agregar el dominio personalizado `via.leanagentbuilder.com`.
+- [x] Verificar el dominio en Vercel; la configuracion aparece valida para Production.
+- [x] Configurar la rama de produccion `main`.
+- [x] Agregar `vercel.json` con rewrites para `/api`, `/webhooks`, `/health` y `/api/health` hacia Render.
+- [x] Validar `https://via.leanagentbuilder.com/api/health` con respuesta `200` del backend.
 
 ### Fase 5: configurar DNS en Latinoamerica Hosting
 
@@ -226,12 +229,13 @@ Reglas:
 
 Usar preferiblemente un cliente OAuth web separado para esta instalacion, dentro del proyecto Google Cloud administrado por la plataforma.
 
-- [ ] Authorized JavaScript origins: `https://via.leanagentbuilder.com`.
-- [ ] Authorized redirect URI: `https://api.via.leanagentbuilder.com/api/saas/google/oauth/callback`.
+- [x] Authorized JavaScript origins: `https://via.leanagentbuilder.com`.
+- [x] Authorized redirect URI temporal: `https://ventas-ia-backend-free.onrender.com/api/saas/google/oauth/callback`.
+- [ ] Reemplazar el redirect temporal por `https://api.via.leanagentbuilder.com/api/saas/google/oauth/callback` solo si se habilita el dominio API en Render.
 - [ ] Conservar las URLs locales solo mientras duren las pruebas.
 - [ ] Revisar scopes de Drive/Sheets y estado de verificacion/usuarios de prueba.
 - [ ] Guardar el client secret solo en Render.
-- [ ] Probar login Google, OAuth Drive/Sheets, refresh token, provisioning y escritura real en Sheets.
+- [ ] Completar login Google, OAuth Drive/Sheets, refresh token, provisioning y escritura real en Sheets. El selector de cuenta de Google ya se abre desde `via.leanagentbuilder.com`, pero el callback completo aun no esta validado.
 
 Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, esquema o slash final genera `redirect_uri_mismatch`.
 
@@ -261,8 +265,8 @@ Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, e
 
 ### Fase 8: validacion por capas
 
-1. DNS y TLS: ambos hostnames resuelven y responden por HTTPS.
-2. Backend: `/health`, arranque, migraciones y conexion Supabase.
+1. DNS y TLS: frontend resuelve por HTTPS; el dominio API queda pendiente porque Render Free no admite custom domains.
+2. Backend: `/health` devuelve `200`, arranque, migraciones y conexion Supabase verificadas; `/api/auth/me` exige autenticacion con `401`.
 3. Frontend: carga de Vercel, assets, rutas SPA y proxy `/api`.
 4. Identidad: login Google real como `lmcorredor@gmail.com` y rol `platform_admin`.
 5. Tenant: owner de una tienda no puede consultar otra.
@@ -328,12 +332,13 @@ Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, e
 
 ## 8. Criterios de salida
 
-- [ ] Dos repositorios nuevos creados y protegidos.
-- [ ] Frontend desplegado en Vercel como proyecto independiente.
-- [ ] Backend desplegado en Render como servicio independiente.
-- [ ] Supabase nuevo con migraciones, SSL y backup verificados.
-- [ ] `via.leanagentbuilder.com` responde por HTTPS.
-- [ ] `api.via.leanagentbuilder.com/health` responde por HTTPS.
+- [x] Dos repositorios nuevos creados y publicados: `ventas-ia-frontend` y `ventas-ia-backend`.
+- [x] Frontend desplegado en Vercel como proyecto independiente.
+- [x] Backend desplegado en Render como servicio independiente.
+- [ ] Supabase nuevo con migraciones, SSL y backup verificados; migraciones y SSL ya verificados, backup pendiente.
+- [x] `via.leanagentbuilder.com` responde por HTTPS.
+- [ ] `api.via.leanagentbuilder.com/health` responde por HTTPS; pendiente porque Render Free no admite custom domains.
+- [ ] `https://via.leanagentbuilder.com/api/health` requiere una verificacion final desde una red con resolucion DNS disponible; la app publica ya muestra la puerta de autenticacion Google en lugar del fallback local.
 - [ ] DNS conserva intactos los servicios actuales del dominio.
 - [ ] `lmcorredor@gmail.com` entra como administrador de plataforma.
 - [ ] Google OAuth productivo validado.
@@ -342,6 +347,21 @@ Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, e
 - [ ] DeepSeek funciona como motor global y mide consumo por tenant.
 - [ ] Prueba E2E de pedido, escalamiento humano y alistamiento aprobada.
 - [ ] No hay secretos en GitHub, bundle frontend, logs ni documentos publicos.
+
+## 8.1. Registro de ejecución 2026-10-14
+
+- Supabase Free creado en organización independiente `ventas-ia-free`; ref `mmcxphpstxjugxjrdffb`; estado `Healthy`; region `ca-central-1`.
+- Render creó `ventas-ia-backend-free` en plan Free; URL `https://ventas-ia-backend-free.onrender.com`; commit live `8625df30c7ffa5acbce7eb22fd3dc7cdb1212afc`.
+- El primer arranque falló por `SELF_SIGNED_CERT_IN_CHAIN`, causado por la combinación de `sslmode=require` en la URL y Node 24; se corrigió usando `DATABASE_SSL=require` en el backend y una URL pooler sin ese query parameter. El segundo arranque observado en logs llegó a `Ventas IA backend listening` y `Your service is live`.
+- Durante la recuperacion, Render devolvio temporalmente `502` (`x-render-routing: no-deploy`) y el deploy normal mostro un error interno. Un redeploy con cache limpia genero el deployment `dep-db7tj9g473hc73fv4h80`; el build termino correctamente y el health directo posterior devolvio `200`.
+- Frontend Vercel commit `4db70ba` agregó el proxy y commit `95cc1b1` corrigió el mapeo especial de `/api/health` -> `/health`.
+- Health publico verificado: `https://via.leanagentbuilder.com/api/health` -> `200`.
+- Rutas protegidas verificadas: `/api/auth/me`, `/api/admin/overview` y `/api/ops/overview` responden `401 Authentication required`, no `404`.
+- Render Environment conserva las variables `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `SECRET_ENCRYPTION_KEY`, `DEEPSEEK_API_KEY` y `LLM_SIMULATOR`.
+- Google Cloud guardo el origen `https://via.leanagentbuilder.com` y el callback temporal de Render. Desde la URL publica se abrio el selector de cuenta para `lmcorredor@gmail.com`; falta completar la seleccion y validar el callback.
+- El frontend Vercel tiene un deployment de Production listo y asociado a `via.leanagentbuilder.com`; el sitio existente `www.leanagentbuilder.com` no fue modificado.
+- La URL publica ahora presenta el acceso seguro de Google para `lmcorredor@gmail.com`, en lugar del mensaje de fallback local observado durante la indisponibilidad de Render.
+- No se modificaron `www.leanagentbuilder.com`, el proyecto Vercel `la-bfrontend`, la organización Supabase Pro ni el servicio Render existente `leanagentbuilder-backend`.
 
 ## 9. Fuentes consultadas
 
@@ -356,4 +376,4 @@ Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, e
 
 ## 10. Siguiente accion recomendada
 
-Antes de crear recursos externos, cerrar la Fase 0 y ejecutar la separacion de repositorios. Luego crear Supabase, porque su connection string sera necesaria para configurar Render. El DNS se modifica al final de la preparacion, cuando Vercel y Render hayan entregado sus destinos exactos.
+Completar la verificacion final del proxy Vercel y el callback de login Google. Como la API key de DeepSeek fue compartida en la conversacion, debe rotarse antes de usarla en produccion. Despues completar OAuth Drive-Sheets, WhatsApp y Mercado Pago; la publicación real de webhooks y la configuración de `api.via.leanagentbuilder.com` quedan para el cierre.

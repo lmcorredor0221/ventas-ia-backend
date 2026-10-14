@@ -1,4 +1,5 @@
 import express from 'express';
+import { mergeTenantConfig, sanitizeOwnerConfigPatch } from '../services/tenantConfigPolicy.js';
 
 export function createApiRouter({ store, events, runtime, tools, controlPlane, usage, auth }) {
   const router = express.Router();
@@ -127,20 +128,23 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
   router.patch('/tenants/:tenantId/config', (req, res, next) => {
     try {
     auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+    const configPatch = sanitizeOwnerConfigPatch(req.body ?? {});
     let tenant;
     store.mutate((state) => {
       tenant = state.tenants.find((item) => item.id === req.params.tenantId);
       if (!tenant) return;
-      tenant.config = mergeConfig(tenant.config, req.body ?? {});
+      tenant.config = mergeTenantConfig(tenant.config, configPatch);
     });
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-    if (req.body?.whatsapp?.phoneNumberId) controlPlane?.completeOnboardingStep(req.params.tenantId, 'whatsapp');
     events.emit({ type: 'tool.binding.changed', tenantId: tenant.id, detail: 'Tenant configuration updated' });
     auth.recordTenantAction(req, {
       tenantId: tenant.id,
       action: 'tenant.config.update',
       resource: 'tenant.config',
-      metadata: { sections: Object.keys(req.body ?? {}) },
+      metadata: {
+        sections: Object.keys(configPatch),
+        fields: Object.fromEntries(Object.entries(configPatch).map(([key, value]) => [key, Object.keys(value)])),
+      },
     });
     return res.json(tenant);
     } catch (error) {
@@ -307,10 +311,3 @@ function enrichPendingRequests(requests, state) {
   });
 }
 
-function mergeConfig(base, patch) {
-  const output = { ...base };
-  for (const [key, value] of Object.entries(patch)) {
-    output[key] = value && typeof value === 'object' && !Array.isArray(value) ? mergeConfig(output[key] ?? {}, value) : value;
-  }
-  return output;
-}

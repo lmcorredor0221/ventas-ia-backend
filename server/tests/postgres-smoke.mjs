@@ -10,7 +10,7 @@ const suffix = Date.now().toString(36);
 const testTenantName = `Tienda PG Smoke ${suffix}`;
 const testOwnerEmail = `pg-smoke-${suffix}@example.com`;
 
-const { app, store } = await createAppAsync({
+const { app, store, controlPlane } = await createAppAsync({
   storageDriver: 'postgres',
   databaseUrl,
   databaseSsl: process.env.DATABASE_SSL ?? 'disable',
@@ -114,20 +114,19 @@ try {
   const oauthStart = await getJson(`${base}/api/saas/tenants/${tenantId}/google/oauth/start`);
   await getJson(`${base}/api/saas/google/oauth/callback?state=${oauthStart.state}&code=dev-mock-code&mockAccountEmail=${encodeURIComponent(testOwnerEmail)}`);
   await postJson(`${base}/api/saas/tenants/${tenantId}/google/provision`, {});
-  await patchJson(`${base}/api/tenants/${tenantId}/config`, {
-    whatsapp: {
-      phoneNumberId: `pg-smoke-phone-${suffix}`,
-      phoneNumberIdRef: `${tenantId.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
-      accessTokenRef: `${tenantId.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,
-      verifyTokenRef: 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
-      appSecretRef: 'WHATSAPP_APP_SECRET_REF',
-    },
-  });
+  const whatsappBinding = controlPlane.saveWhatsAppBinding(tenantId, {
+    phoneNumberId: `pg-smoke-phone-${suffix}`,
+    phoneNumberIdRef: `${tenantId.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
+    accessTokenRef: `${tenantId.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,
+    verifyTokenRef: 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
+    appSecretRef: 'WHATSAPP_APP_SECRET_REF',
+  }, { verifiedByProvider: true });
+  assert.equal(whatsappBinding.tenant.config.whatsapp.phoneNumberId, `pg-smoke-phone-${suffix}`);
 
   const validation = await postJson(`${base}/api/saas/tenants/${tenantId}/validate`, {});
   assert.equal(validation.readyForActivation, true);
 
-  const activated = await postJson(`${base}/api/saas/tenants/${tenantId}/activate`, {});
+  const activated = await postJson(`${base}/api/admin/tenants/${tenantId}/activate`, {});
   assert.equal(activated.status.readyForOperation, true);
   await store.flush();
 

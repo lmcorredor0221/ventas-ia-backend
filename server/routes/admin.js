@@ -5,6 +5,7 @@ import {
   summarizeWebhookEvents,
   updatePlatformSettings,
 } from '../services/platformService.js';
+import { mergeTenantConfig, sanitizeAdminConfigPatch } from '../services/tenantConfigPolicy.js';
 
 export function createAdminRouter({ store, usage, auth, controlPlane }) {
   const router = express.Router();
@@ -199,6 +200,59 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
     }
   });
 
+  router.post('/tenants/:tenantId/validate', (req, res, next) => {
+    try {
+      const result = controlPlane.validateTenantSetup(req.params.tenantId);
+      auth.recordTenantAction(req, {
+        tenantId: req.params.tenantId,
+        action: 'tenant.validation.admin_requested',
+        resource: 'tenant_validation',
+      });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/activate', (req, res, next) => {
+    try {
+      const result = controlPlane.activateTenant(req.params.tenantId);
+      auth.recordTenantAction(req, {
+        tenantId: req.params.tenantId,
+        action: 'tenant.activation.admin_requested',
+        resource: 'tenant',
+      });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/tenants/:tenantId/config', (req, res, next) => {
+    try {
+      const tenantId = req.params.tenantId;
+      const configPatch = sanitizeAdminConfigPatch(req.body ?? {});
+      let tenant;
+      store.mutate((state) => {
+        tenant = state.tenants.find((item) => item.id === tenantId);
+        if (tenant) tenant.config = mergeTenantConfig(tenant.config, configPatch);
+      });
+      if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+      auth.recordTenantAction(req, {
+        tenantId,
+        action: 'tenant.config.admin_update',
+        resource: 'tenant.config',
+        metadata: {
+          sections: Object.keys(configPatch),
+          fields: Object.fromEntries(Object.entries(configPatch).map(([key, value]) => [key, isPlainObject(value) ? Object.keys(value) : []])),
+        },
+      });
+      return res.json(tenant);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/billing/funnel', (_req, res, next) => {
     try {
       res.json(controlPlane.getBillingFunnel());
@@ -216,6 +270,10 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
   });
 
   return router;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 async function tenantAdminSummary({ tenant, store, usage, controlPlane }) {

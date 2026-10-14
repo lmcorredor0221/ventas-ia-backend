@@ -7,7 +7,7 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "test": "npm run test:backend",
-    "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs",
+    "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs && node server/tests/whatsapp-embedded-signup-contract.mjs",
     "test:colombia": "node server/tests/colombia-scenarios.mjs",
     "test:codex-cli": "node server/tests/codex-cli-scenarios.mjs",
     "test:deepseek-real": "node scripts/run-with-env.mjs .env.google.local node server/tests/deepseek-real-scenarios.mjs",

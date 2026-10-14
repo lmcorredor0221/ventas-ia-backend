@@ -59,6 +59,19 @@ try {
   const afterCreate = await getJson(`${base}/api/tenants`, { cookie });
   assert.ok(afterCreate.body.some((tenant) => tenant.id === created.body.tenant.id));
 
+  await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    agentPolicy: { humanEscalation: false },
+  }, { cookie, csrfToken, expectedStatus: 403 });
+
+  await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    whatsapp: { phoneNumberId: 'should-not-bind' },
+  }, { cookie, csrfToken, expectedStatus: 403 });
+
+  const ownerConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    googleSheets: { catalogRange: 'Catalogo!A1:J1000' },
+  }, { cookie, csrfToken });
+  assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:J1000');
+
   const state = store.getState();
   assert.ok(state.auditEvents.some((event) => event.action === 'auth.login'));
   assert.ok(state.auditEvents.some((event) => event.action === 'tenant.create'));
@@ -127,4 +140,19 @@ async function postJson(url, body, { cookie, csrfToken, expectedStatus = 200 } =
     headers: response.headers,
     cookie: response.headers.get('set-cookie') ?? '',
   };
+}
+
+async function patchJson(url, body, { cookie, csrfToken, expectedStatus = 200 } = {}) {
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      ...(cookie ? { cookie } : {}),
+      ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  assert.equal(response.status, expectedStatus, `${url} returned ${response.status}: ${text}`);
+  return { body: text ? JSON.parse(text) : {}, headers: response.headers };
 }

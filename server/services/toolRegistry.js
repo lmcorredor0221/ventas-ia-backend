@@ -433,7 +433,7 @@ export class ToolRegistry {
   async sendLiveWhatsAppMessage({ tenant, payload }) {
     const phoneNumberId = tenant?.config?.whatsapp?.phoneNumberId;
     const tokenRef = tenant?.config?.whatsapp?.accessTokenRef;
-    const accessToken = this.secretVault?.readSecret(tokenRef) ?? process.env.WHATSAPP_ACCESS_TOKEN;
+    const accessToken = this.secretVault?.readSecret(tokenRef);
     if (!phoneNumberId || !accessToken) {
       const error = new Error('WhatsApp live mode requires tenant phoneNumberId and access token');
       error.statusCode = 428;

@@ -9,6 +9,7 @@ if (!apiKey) {
   console.log('DeepSeek real scenario tests skipped: DEEPSEEK_API_KEY is not configured');
   process.exit(0);
 }
+
 const selectedScenarioIds = [
   'categoria_jugos',
   'real_supermarket_saludo_solo_domicilio',
@@ -164,3 +165,4 @@ async function postJson(url, body) {
   assert.equal(response.ok, true, `${url} returned ${response.status}: ${text}`);
   return text ? JSON.parse(text) : {};
 }
+

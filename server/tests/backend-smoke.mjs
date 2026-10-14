@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createAppAsync } from '../index.js';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-backend-'));
-const { app, store, events } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
+const { app, store, events, controlPlane } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
 const server = app.listen(0, '127.0.0.1');
 
 try {
@@ -535,6 +535,9 @@ try {
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Catalogo'));
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Clientes'));
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Pedidos'));
+  const repeatedProvision = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/provision`, {});
+  assert.equal(repeatedProvision.reused, true);
+  assert.equal(repeatedProvision.workspace.spreadsheet.id, provision.workspace.spreadsheet.id);
 
   const googleReadyOverview = await getJson(`${base}/api/ops/overview?tenantId=${createdTenant.tenant.id}`);
   const googleTools = googleReadyOverview.tools.filter((tool) => tool.name.startsWith('google_'));
@@ -562,12 +565,18 @@ try {
   assert.equal(whatsappStart.mode, 'guided_manual');
   assert.ok(whatsappStart.manualSteps.some((step) => step.key === 'phone'));
 
-  const whatsappBinding = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/whatsapp/binding`, {
+  await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/whatsapp/binding`, {
     phoneNumberId: '200000000001',
     phoneNumberIdRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
     accessTokenRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,
     wabaId: '300000000001',
-  });
+  }, { expectedStatus: 428 });
+  const whatsappBinding = controlPlane.saveWhatsAppBinding(createdTenant.tenant.id, {
+    phoneNumberId: '200000000001',
+    phoneNumberIdRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
+    accessTokenRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,
+    wabaId: '300000000001',
+  }, { verifiedByProvider: true });
   assert.equal(whatsappBinding.tenant.config.whatsapp.phoneNumberId, '200000000001');
   assert.equal(whatsappBinding.whatsappOnboarding.status, 'connected');
 
@@ -580,7 +589,7 @@ try {
   const validation = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/validate`, {});
   assert.equal(validation.readyForActivation, true);
 
-  const activated = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/activate`, {});
+  const activated = await postJson(`${base}/api/admin/tenants/${createdTenant.tenant.id}/activate`, {});
   assert.equal(activated.status.readyForOperation, true);
 
   const activatedRun = await postJson(`${base}/api/agent/run`, {

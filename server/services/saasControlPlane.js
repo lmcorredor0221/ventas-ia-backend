@@ -445,6 +445,15 @@ export class SaasControlPlane {
       error.statusCode = 428;
       throw error;
     }
+    const existingWorkspace = this.store.getState().googleWorkspacesByTenant?.[tenantId];
+    if (existingWorkspace?.status === 'provisioned') {
+      this.audit(tenantId, 'google.workspace.provisioning_reused', 'google_workspace', {
+        mode: existingWorkspace.mode,
+        rootFolderId: existingWorkspace.rootFolder?.id,
+        spreadsheetId: existingWorkspace.spreadsheet?.id,
+      });
+      return { workspace: existingWorkspace, status: this.getOnboardingStatus(tenantId), reused: true };
+    }
     const workspace = connection.mode === 'live'
       ? await this.provisionLiveGoogleWorkspace({ tenant, connection })
       : sandboxWorkspaceForTenant(tenant, connection.mode);
@@ -1129,9 +1138,98 @@ export class SaasControlPlane {
     };
   }
 
-  saveWhatsAppBinding(tenantId, payload = {}) {
+  async completeWhatsAppEmbeddedSignup(tenantId, payload = {}) {
+    this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_embedded_signup');
+    const code = String(payload.code ?? '').trim();
+    const wabaId = String(payload.wabaId ?? '').trim();
+    const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
+    const appId = String(process.env.META_APP_ID ?? '').trim();
+    const appSecret = String(process.env.META_APP_SECRET ?? process.env.WHATSAPP_APP_SECRET ?? '').trim();
+    const configId = String(process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID ?? '').trim();
+
+    if (!code || !wabaId || !phoneNumberId) {
+      const error = new Error('Embedded Signup debe entregar code, wabaId y phoneNumberId.');
+      error.statusCode = 422;
+      error.code = 'whatsapp_embedded_signup_payload_incomplete';
+      throw error;
+    }
+    if (!appId || !appSecret || !configId) {
+      const error = new Error('Meta Embedded Signup no esta configurado en la plataforma.');
+      error.statusCode = 428;
+      error.code = 'meta_embedded_signup_not_configured';
+      throw error;
+    }
+
+    const tokenUrl = new URL(`https://graph.facebook.com/${this.config.whatsappGraphVersion}/oauth/access_token`);
+    tokenUrl.searchParams.set('client_id', appId);
+    tokenUrl.searchParams.set('client_secret', appSecret);
+    tokenUrl.searchParams.set('code', code);
+    const tokenPayload = await fetchGraphJson(tokenUrl, { method: 'GET' }, 'whatsapp_embedded_signup_token_exchange');
+    const accessToken = String(tokenPayload.access_token ?? '').trim();
+    if (!accessToken) {
+      const error = new Error('Meta no devolvio un access token para la tienda.');
+      error.statusCode = 502;
+      error.code = 'whatsapp_embedded_signup_token_missing';
+      throw error;
+    }
+
+    const phone = await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name`,
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      'whatsapp_phone_validation',
+    );
+    if (String(phone.id ?? '') !== phoneNumberId) {
+      const error = new Error('El numero seleccionado por Meta no coincide con el identificador recibido.');
+      error.statusCode = 422;
+      error.code = 'whatsapp_phone_mismatch';
+      throw error;
+    }
+
+    const wabaPhones = await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id`,
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      'whatsapp_waba_validation',
+    );
+    if (!(wabaPhones.data ?? []).some((item) => String(item.id ?? '') === phoneNumberId)) {
+      const error = new Error('El numero no pertenece a la cuenta WhatsApp Business seleccionada.');
+      error.statusCode = 422;
+      error.code = 'whatsapp_phone_not_in_waba';
+      throw error;
+    }
+
+    const accessTokenRef = this.secretVault.saveSecret({
+      tenantId,
+      name: 'WHATSAPP_ACCESS_TOKEN',
+      value: accessToken,
+      provider: 'meta_whatsapp_cloud_api',
+      purpose: 'WhatsApp Cloud API token obtenido por Embedded Signup',
+    });
+    const result = this.saveWhatsAppBinding(tenantId, {
+      phoneNumberId,
+      wabaId,
+      displayPhoneNumber: phone.display_phone_number ?? payload.displayPhoneNumber,
+      verifiedName: phone.verified_name ?? payload.verifiedName,
+      accessTokenRef,
+    }, { verifiedByProvider: true });
+    this.audit(tenantId, 'whatsapp.embedded_signup.completed', 'whatsapp_connection', {
+      wabaId,
+      phoneNumberId,
+      accessTokenRef,
+      configId,
+    });
+    return result;
+  }
+
+  saveWhatsAppBinding(tenantId, payload = {}, { verifiedByProvider = false } = {}) {
     const tenant = this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_binding');
+    if (!verifiedByProvider) {
+      const error = new Error('La conexion de WhatsApp solo puede marcarse activa despues de validarla con Meta.');
+      error.statusCode = 428;
+      error.code = 'whatsapp_provider_validation_required';
+      throw error;
+    }
     const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
     if (!phoneNumberId) {
       const error = new Error('phoneNumberId is required');
@@ -1927,6 +2025,19 @@ function parseEmailFromIdToken(idToken) {
   } catch {
     return null;
   }
+}
+
+async function fetchGraphJson(url, options = {}, operation = 'whatsapp_graph_request') {
+  const response = await fetch(url, options);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(`Meta Graph API fallo durante ${operation}: ${response.status}`);
+    error.statusCode = 502;
+    error.code = `${operation}_failed`;
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
 }
 
 function parseMercadoPagoSignature(header) {

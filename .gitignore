@@ -1,7 +1,8 @@
 node_modules/
+dist/
 server/data/runtime-store.json
+test-results-*.png
+.analysis/
 .env
 .env.*
 !.env.example
-test-results-*.png
-.analysis/

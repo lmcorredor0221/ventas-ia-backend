@@ -136,6 +136,17 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
+  router.post('/tenants/:tenantId/whatsapp/embedded-signup/complete', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.completeWhatsAppEmbeddedSignup(req.params.tenantId, req.body ?? {});
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.completed', resource: 'whatsapp_connection' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/tenants/:tenantId/whatsapp/binding', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
@@ -152,17 +163,6 @@ export function createSaasRouter({ controlPlane, auth }) {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
       const result = controlPlane.validateTenantSetup(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'tenant.validation.requested', resource: 'tenant_validation' });
-      res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/tenants/:tenantId/activate', (req, res, next) => {
-    try {
-      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.activateTenant(req.params.tenantId);
-      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'tenant.activation.requested', resource: 'tenant' });
       res.json(result);
     } catch (error) {
       next(error);

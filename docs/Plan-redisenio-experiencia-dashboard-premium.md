@@ -513,3 +513,10 @@ El redisenio se considera exitoso cuando:
 - DeepSeek queda configurado como motor global de la plataforma.
 - Google y WhatsApp quedan claramente configurados por tienda.
 - La interfaz se percibe moderna, clara, premium y facil de entender.
+
+## Ajuste aplicado 2026-10-13
+
+- Se redujo la escala tipografica operativa en cabeceras, metricas y navegacion para evitar sensacion de interfaz sobredimensionada en desktop, manteniendo legibilidad en movil.
+- Configuracion ahora separa Google en un tab propio editable, con estado de Sheets/Drive, rangos de Catalogo, Clientes y Pedidos, referencias avanzadas de Drive y accion `Guardar Google`.
+- Los rangos Google se retiraron del tab Agente para evitar duplicidad conceptual: Agente queda para criterio conversacional; Google queda para datos operativos del cliente.
+- Onboarding > Google ahora funciona como guia de 3 pasos: autorizar Drive/Sheets, crear estructura en Drive y completar datos base en Google Sheets. Se removio la mezcla visual con WhatsApp y Motor IA para que el usuario entienda que Google es el repositorio operativo por tienda.
