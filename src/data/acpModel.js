@@ -3,7 +3,7 @@ export const tenants = [
     id: 'andina',
     name: 'Comercial Andina',
     industry: 'Retail B2B',
-    plan: 'Production pilot',
+    plan: 'Piloto productivo',
     status: 'sandbox_ready',
     accent: '#d49a41',
     whatsappNumber: '+57 300 120 4501',
@@ -14,7 +14,7 @@ export const tenants = [
     id: 'norte',
     name: 'Distribuidora Norte',
     industry: 'Repuestos',
-    plan: 'Design binding',
+    plan: 'Conexión en curso',
     status: 'needs_binding',
     accent: '#63c7ad',
     whatsappNumber: '+57 301 880 0042',
@@ -25,7 +25,7 @@ export const tenants = [
     id: 'aurora',
     name: 'Aurora Hogar',
     industry: 'Catálogo hogar',
-    plan: 'Human review',
+    plan: 'Revisión asistida',
     status: 'approval_required',
     accent: '#ea6f5a',
     whatsappNumber: '+57 302 550 1290',
@@ -37,91 +37,102 @@ export const tenants = [
 export const storeZones = [
   {
     id: 'whatsapp',
-    label: 'WhatsApp',
+    label: 'Mensaje del cliente',
     short: 'Entrada',
-    x: 9,
-    y: 47,
-    w: 16,
-    h: 24,
+    x: 7,
+    y: 39,
+    w: 14,
+    h: 16,
     kind: 'entry',
-    source: 'ACP/webhooks/whatsapp-business-webhook.yaml',
+    source: 'Canal WhatsApp',
   },
   {
     id: 'agent',
-    label: 'Ventas IA',
-    short: 'Agente',
-    x: 31,
-    y: 39,
-    w: 15,
-    h: 31,
+    label: 'Motor IA',
+    short: 'IA',
+    x: 29,
+    y: 43,
+    w: 14,
+    h: 17,
     kind: 'agent',
-    source: 'ACP/architecture/topology.yaml',
+    source: 'Razonamiento comercial',
   },
   {
     id: 'catalog',
-    label: 'Catálogo Sheets',
+    label: 'Catálogo',
     short: 'Productos',
-    x: 55,
+    x: 44,
     y: 18,
-    w: 18,
-    h: 24,
+    w: 21,
+    h: 18,
     kind: 'tool',
-    source: 'ACP/tools/external/tool-google-sheets-read-table.yaml',
+    source: 'Inventario y precios',
   },
   {
     id: 'drive',
-    label: 'Fichas Drive',
-    short: 'Soportes',
-    x: 77,
-    y: 18,
-    w: 15,
-    h: 24,
-    kind: 'tool',
-    source: 'ACP/tools/external/tool-google-drive-file-picker.yaml',
+    label: 'Soportes',
+    short: 'Ficha',
+    x: 58,
+    y: 38,
+    w: 18,
+    h: 16,
+    kind: 'support',
+    source: 'Documentos de tienda',
+  },
+  {
+    id: 'freezer',
+    label: 'Zona de tienda',
+    short: 'Congelador',
+    x: 74,
+    y: 17,
+    w: 14,
+    h: 17,
+    kind: 'freezer',
+    source: 'Configuración visual',
   },
   {
     id: 'quote',
-    label: 'Cotización',
-    short: 'Oferta',
+    label: 'Canasta',
+    short: 'Pedido',
     x: 55,
-    y: 53,
-    w: 18,
-    h: 22,
+    y: 61,
+    w: 15,
+    h: 14,
     kind: 'memory',
-    source: 'ACP/memory/strategy.yaml',
+    source: 'Pedido en preparación',
   },
   {
     id: 'approval',
     label: 'Aprobación',
-    short: 'Humano',
-    x: 78,
-    y: 54,
-    w: 15,
-    h: 22,
+    short: 'Equipo',
+    x: 82,
+    y: 53,
+    w: 12,
+    h: 20,
     kind: 'approval',
-    source: 'ACP/governance/approval-matrix.yaml',
+    source: 'Escalamiento humano',
   },
   {
     id: 'payment',
     label: 'Pedido / Pago',
     short: 'Cierre',
-    x: 33,
-    y: 79,
-    w: 22,
-    h: 14,
+    x: 37,
+    y: 72,
+    w: 16,
+    h: 15,
     kind: 'write',
-    source: 'ACP/tools/external/tool-transactional-write.yaml',
+    source: 'Registro del pedido',
   },
   {
     id: 'observability',
-    label: 'Observabilidad',
+    label: 'Eventos',
     short: 'Eventos',
-    x: 7,
-    y: 78,
-    w: 18,
-    h: 15,
+    x: 11,
+    y: 69,
+    w: 16,
+    h: 14,
     kind: 'event',
-    source: 'ACP/observability/event-model.yaml',
+    source: 'Actividad reciente',
   },
 ];
 
@@ -134,7 +145,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: true,
     requiredSecrets: ['WHATSAPP_ACCESS_TOKEN_REF', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', 'WHATSAPP_APP_SECRET_REF'],
-    source: 'ACP/tools/external/tool-whatsapp-business-messaging.yaml',
+    source: 'Canal WhatsApp oficial',
   },
   {
     key: 'google-sheets-read-table',
@@ -144,7 +155,7 @@ export const tools = [
     risk: 'low',
     sideEffects: false,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-google-sheets-read-table.yaml',
+    source: 'Catálogo en Google Sheets',
   },
   {
     key: 'google-drive-file-picker',
@@ -154,7 +165,37 @@ export const tools = [
     risk: 'low',
     sideEffects: false,
     requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-google-drive-file-picker.yaml',
+    source: 'Documentos en Google Drive',
+  },
+  {
+    key: 'customer-profile-lookup',
+    name: 'google_sheets_customer_profile_lookup',
+    purpose: 'Busca el cliente por número de WhatsApp en la hoja Clientes.',
+    status: 'needs_binding',
+    risk: 'low',
+    sideEffects: false,
+    requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
+    source: 'Clientes en Google Sheets',
+  },
+  {
+    key: 'customer-profile-upsert',
+    name: 'google_sheets_customer_profile_upsert',
+    purpose: 'Crea o actualiza nombre y dirección del cliente en la hoja Clientes.',
+    status: 'needs_binding',
+    risk: 'medium',
+    sideEffects: true,
+    requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
+    source: 'Actualización de clientes',
+  },
+  {
+    key: 'google-sheets-order-write',
+    name: 'google_sheets_order_write',
+    purpose: 'Registra pedidos confirmados en Google Sheets antes de escalar preparación y entrega.',
+    status: 'needs_binding',
+    risk: 'high',
+    sideEffects: true,
+    requiredSecrets: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN_REF'],
+    source: 'Pedidos en Google Sheets',
   },
   {
     key: 'approval-gate',
@@ -164,7 +205,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: false,
     requiredSecrets: [],
-    source: 'ACP/tools/internal/tool-approval-gate.yaml',
+    source: 'Aprobación humana',
   },
   {
     key: 'transactional-write',
@@ -174,7 +215,7 @@ export const tools = [
     risk: 'high',
     sideEffects: true,
     requiredSecrets: ['TARGET_WRITE_TOKEN_REF'],
-    source: 'ACP/tools/external/tool-transactional-write.yaml',
+    source: 'Registro operativo',
   },
   {
     key: 'human-handoff',
@@ -184,7 +225,7 @@ export const tools = [
     risk: 'medium',
     sideEffects: false,
     requiredSecrets: [],
-    source: 'ACP/tools/internal/tool-human-handoff.yaml',
+    source: 'Escalamiento humano',
   },
 ];
 
@@ -243,7 +284,7 @@ export const conversations = [
     progress: 36,
     need: 'Envió imagen para identificar producto.',
     nextStep: 'Asesor humano debe clasificar la imagen y reanudar el flujo.',
-    humanReason: 'El ACP exige escalar imágenes a humano.',
+    humanReason: 'La política operativa exige escalar imágenes a humano.',
     lastTool: 'human_handoff',
     avatar: 'MP',
     path: ['whatsapp', 'agent', 'approval'],
@@ -273,9 +314,9 @@ export const conversations = [
     status: 'needs_binding',
     value: '$2.130.000',
     progress: 31,
-    need: 'Catálogo no conectado para este tenant.',
-    nextStep: 'Configurar spreadsheet, rango, columnas y refresh token.',
-    humanReason: 'Binding Google Sheets incompleto.',
+    need: 'Catálogo no conectado para esta tienda.',
+    nextStep: 'Configurar hoja de cálculo, rango, columnas y referencia de acceso.',
+    humanReason: 'Conexión de Google Sheets incompleta.',
     lastTool: 'google_sheets_read_table',
     avatar: 'NF',
     path: ['whatsapp', 'agent', 'catalog'],
@@ -298,6 +339,61 @@ export const conversations = [
   },
 ];
 
+export function createConversationLoadFixture(size = 10, tenantId = 'andina') {
+  const total = Number.isFinite(Number(size)) ? Math.max(1, Math.min(Number(size), 1000)) : 10;
+  const base = conversations.filter((conversation) => conversation.tenantId === tenantId);
+  const source = base.length ? base : conversations;
+  const stages = ['catalog', 'approval', 'handoff', 'payment', 'binding', 'off_hours'];
+  const statuses = ['live', 'live', 'live', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
+  const needs = [
+    'Consulta producto y disponibilidad para domicilio.',
+    'Pregunta por presentaciones similares antes de confirmar.',
+    'Solicita cotizacion con varios productos de catalogo.',
+    'Requiere validacion humana por descuento o ambiguedad.',
+    'Necesita confirmar datos de entrega antes de registrar pedido.',
+  ];
+
+  return Array.from({ length: total }, (_, index) => {
+    const seed = source[index % source.length];
+    const status = index < 3
+      ? ['approval_required', 'blocked', 'degraded'][index]
+      : statuses[index % statuses.length];
+    const stage = status === 'approval_required' || status === 'blocked'
+      ? 'approval'
+      : stages[index % stages.length];
+    const path = stage === 'payment'
+      ? ['whatsapp', 'agent', 'catalog', 'quote', 'payment']
+      : stage === 'binding'
+        ? ['whatsapp', 'agent', 'catalog']
+        : stage === 'off_hours'
+          ? ['whatsapp', 'agent', 'observability', 'approval']
+          : stage === 'approval' || stage === 'handoff'
+            ? ['whatsapp', 'agent', 'catalog', 'quote', 'approval']
+            : ['whatsapp', 'agent', 'catalog', 'drive', 'quote', 'payment'];
+    const serial = String(index + 1).padStart(4, '0');
+    return {
+      ...seed,
+      id: `load-${total}-${serial}`,
+      tenantId,
+      customer: `Cliente ${serial}`,
+      stage,
+      zone: path[path.length - 1],
+      status,
+      value: index % 5 === 0 ? 'Pendiente' : `$${(18000 + index * 7300).toLocaleString('es-CO')}`,
+      progress: Math.min(96, 20 + ((index * 7) % 76)),
+      need: needs[index % needs.length],
+      nextStep: status === 'approval_required' || status === 'blocked'
+        ? 'Escalar a humano con contexto completo antes de responder.'
+        : 'Continuar flujo del agente con herramienta correspondiente.',
+      humanReason: status === 'approval_required' || status === 'blocked'
+        ? 'Fixture de carga: caso critico para validar priorizacion visual.'
+        : '',
+      avatar: `C${(index % 99) + 1}`,
+      path,
+    };
+  });
+}
+
 export const pendingRequests = [
   {
     id: 'hitl-881',
@@ -316,18 +412,28 @@ export const pendingRequests = [
     title: 'Clasificar imagen de producto',
     urgency: 'Crítica',
     type: 'human_handoff',
-    context: 'El cliente envió una imagen. El ACP define que este caso debe escalarse a humano.',
+    context: 'El cliente envió una imagen. La política operativa define que este caso debe escalarse a humano.',
     consequence: 'Al responder, el agente retomará búsqueda de catálogo con el producto identificado.',
+  },
+  {
+    id: 'hitl-884',
+    conversationId: 'wa-1045',
+    tenantId: 'andina',
+    title: 'Confirmar escritura del pedido',
+    urgency: 'Alta',
+    type: 'decision.requested',
+    context: 'El agente identificó confirmación de pago recibida por WhatsApp y requiere aprobación antes de registrar la escritura transaccional del pedido.',
+    consequence: 'Al aprobar, el pedido quedará registrado y subirá a preparación humana para despacho.',
   },
   {
     id: 'hitl-883',
     conversationId: 'wa-2041',
     tenantId: 'norte',
-    title: 'Completar binding de Google Sheets',
+    title: 'Completar conexión de Google Sheets',
     urgency: 'Media',
     type: 'tool.binding.changed',
-    context: 'Faltan spreadsheet_id, rango, esquema de columnas y referencia de refresh token.',
-    consequence: 'Al guardar referencias, el tenant pasará a sandbox_ready para lectura de catálogo.',
+    context: 'Faltan la hoja principal de Google, el rango, las columnas y la referencia segura de acceso.',
+    consequence: 'Al guardar referencias, la tienda quedará lista para lectura de catálogo.',
   },
 ];
 

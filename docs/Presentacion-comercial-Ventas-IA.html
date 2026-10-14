@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ventas IA - Presentacion comercial</title>
+  <style>
+    @page {
+      size: 13.333in 7.5in;
+      margin: 0;
+    }
+
+    :root {
+      --ink: #142033;
+      --muted: #647084;
+      --paper: #fffaf1;
+      --mist: #eef7f2;
+      --green: #10b981;
+      --mint: #67d5c2;
+      --gold: #f59e0b;
+      --blue: #2563eb;
+      --line: rgba(20, 32, 51, 0.14);
+      --shadow: 0 22px 60px rgba(20, 32, 51, 0.16);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      background: #dfe7e2;
+      color: var(--ink);
+      font-family: "Aptos Display", "Segoe UI", Arial, sans-serif;
+    }
+
+    body {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    .slide {
+      position: relative;
+      width: 13.333in;
+      height: 7.5in;
+      page-break-after: always;
+      overflow: hidden;
+      padding: 0.62in 0.74in;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(103, 213, 194, 0.2), transparent 26%),
+        radial-gradient(circle at 86% 18%, rgba(245, 158, 11, 0.16), transparent 24%),
+        linear-gradient(135deg, #fbf8f2 0%, #eef7f2 55%, #f8fbff 100%);
+    }
+
+    .slide.dark {
+      color: var(--paper);
+      background:
+        radial-gradient(circle at 72% 20%, rgba(103, 213, 194, 0.22), transparent 28%),
+        radial-gradient(circle at 18% 78%, rgba(245, 158, 11, 0.18), transparent 28%),
+        linear-gradient(135deg, #111827 0%, #142033 56%, #20344d 100%);
+    }
+
+    .kicker {
+      color: var(--gold);
+      font-size: 0.16in;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 7.8in;
+      margin-top: 0.22in;
+      font-size: 0.76in;
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      max-width: 8.2in;
+      margin-top: 0.14in;
+      font-size: 0.48in;
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      font-size: 0.24in;
+      line-height: 1.12;
+    }
+
+    .lead {
+      max-width: 6.4in;
+      margin-top: 0.28in;
+      color: var(--muted);
+      font-size: 0.22in;
+      line-height: 1.35;
+    }
+
+    .dark .lead,
+    .dark .note,
+    .dark .mini,
+    .dark .body {
+      color: rgba(255, 250, 241, 0.76);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.13in;
+      font-weight: 900;
+    }
+
+    .brand-mark {
+      width: 0.48in;
+      height: 0.48in;
+      display: grid;
+      place-items: center;
+      border-radius: 0.1in;
+      color: #17120f;
+      background: var(--gold);
+      font-size: 0.26in;
+      box-shadow: 0 18px 38px rgba(245, 158, 11, 0.26);
+    }
+
+    .cover-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 4.2in;
+      gap: 0.45in;
+      align-items: end;
+      height: 100%;
+    }
+
+    .store-window {
+      position: relative;
+      min-height: 4.8in;
+      border: 1px solid rgba(255, 250, 241, 0.16);
+      border-radius: 0.18in;
+      background: rgba(255, 250, 241, 0.08);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .store-window img,
+    .screenshot img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+
+    .store-window::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, transparent 42%, rgba(20, 32, 51, 0.58));
+      pointer-events: none;
+    }
+
+    .cover-caption {
+      position: absolute;
+      left: 0.3in;
+      right: 0.3in;
+      bottom: 0.28in;
+      z-index: 2;
+      font-size: 0.18in;
+      line-height: 1.3;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 4.9in minmax(0, 1fr);
+      gap: 0.56in;
+      align-items: center;
+      height: 5.5in;
+    }
+
+    .reverse {
+      grid-template-columns: minmax(0, 1fr) 4.9in;
+    }
+
+    .point-list {
+      display: grid;
+      gap: 0.18in;
+      margin-top: 0.36in;
+    }
+
+    .point {
+      display: grid;
+      grid-template-columns: 0.34in minmax(0, 1fr);
+      gap: 0.13in;
+      align-items: start;
+      padding-bottom: 0.14in;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .point b {
+      font-size: 0.19in;
+    }
+
+    .point span {
+      display: block;
+      margin-top: 0.04in;
+      color: var(--muted);
+      font-size: 0.15in;
+      line-height: 1.32;
+    }
+
+    .icon {
+      width: 0.32in;
+      height: 0.32in;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: rgba(16, 185, 129, 0.12);
+      color: var(--green);
+      font-weight: 900;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.13in;
+      margin-top: 0.46in;
+    }
+
+    .flow-step {
+      min-height: 1.78in;
+      padding: 0.18in;
+      border: 1px solid var(--line);
+      border-radius: 0.11in;
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: 0 12px 28px rgba(20, 32, 51, 0.08);
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-top: 0.14in;
+      font-size: 0.18in;
+      line-height: 1.15;
+    }
+
+    .flow-step span {
+      display: block;
+      margin-top: 0.08in;
+      color: var(--muted);
+      font-size: 0.13in;
+      line-height: 1.3;
+    }
+
+    .screenshot {
+      border: 1px solid rgba(20, 32, 51, 0.12);
+      border-radius: 0.16in;
+      background: white;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .screenshot.large {
+      height: 4.78in;
+    }
+
+    .screenshot.tall {
+      height: 5.35in;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.18in;
+      margin-top: 0.44in;
+    }
+
+    .metric {
+      padding: 0.22in;
+      border: 1px solid var(--line);
+      border-radius: 0.12in;
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 0.34in;
+      line-height: 1;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 0.08in;
+      color: var(--muted);
+      font-size: 0.13in;
+      line-height: 1.25;
+    }
+
+    .diagram {
+      position: relative;
+      height: 4.6in;
+      margin-top: 0.35in;
+      border-radius: 0.18in;
+      background:
+        linear-gradient(135deg, rgba(16, 185, 129, 0.14), rgba(37, 99, 235, 0.08)),
+        rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .lane {
+      position: absolute;
+      left: 0.56in;
+      right: 0.56in;
+      height: 0.9in;
+      display: grid;
+      grid-template-columns: 1.7in 1fr;
+      gap: 0.22in;
+      align-items: center;
+      padding: 0.12in 0.18in;
+      border-radius: 0.12in;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(20, 32, 51, 0.1);
+    }
+
+    .lane:nth-child(1) { top: 0.48in; }
+    .lane:nth-child(2) { top: 1.64in; }
+    .lane:nth-child(3) { top: 2.8in; }
+
+    .lane b {
+      font-size: 0.2in;
+    }
+
+    .lane span {
+      color: var(--muted);
+      font-size: 0.15in;
+      line-height: 1.28;
+    }
+
+    .tagline {
+      position: absolute;
+      left: 0.74in;
+      right: 0.74in;
+      bottom: 0.45in;
+      display: flex;
+      justify-content: space-between;
+      gap: 0.16in;
+      color: var(--muted);
+      font-size: 0.13in;
+    }
+
+    .business-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.18in;
+      margin-top: 0.42in;
+    }
+
+    .business-cell {
+      min-height: 1.58in;
+      padding: 0.2in;
+      border: 1px solid var(--line);
+      border-radius: 0.12in;
+      background: rgba(255, 255, 255, 0.74);
+    }
+
+    .business-cell strong {
+      display: block;
+      font-size: 0.2in;
+      line-height: 1.15;
+    }
+
+    .business-cell span {
+      display: block;
+      margin-top: 0.09in;
+      color: var(--muted);
+      font-size: 0.14in;
+      line-height: 1.32;
+    }
+
+    .cta {
+      position: absolute;
+      left: 0.74in;
+      right: 0.74in;
+      bottom: 0.58in;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.28in;
+      align-items: center;
+      padding: 0.22in 0.28in;
+      border-radius: 0.16in;
+      background: var(--ink);
+      color: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .cta strong {
+      display: block;
+      font-size: 0.24in;
+    }
+
+    .cta span {
+      color: rgba(255, 250, 241, 0.74);
+      font-size: 0.15in;
+    }
+
+    .button {
+      padding: 0.16in 0.24in;
+      border-radius: 999px;
+      color: #17120f;
+      background: var(--green);
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .footer {
+      position: absolute;
+      left: 0.74in;
+      right: 0.74in;
+      bottom: 0.24in;
+      display: flex;
+      justify-content: space-between;
+      color: rgba(100, 112, 132, 0.78);
+      font-size: 0.11in;
+    }
+
+    .dark .footer {
+      color: rgba(255, 250, 241, 0.58);
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 0.14in;
+      line-height: 1.35;
+    }
+
+    .mini {
+      color: var(--muted);
+      font-size: 0.13in;
+      line-height: 1.3;
+    }
+
+    @media print {
+      body {
+        background: white;
+      }
+
+      .slide {
+        page-break-after: always;
+      }
+    }
+  </style>
+</head>
+<body>
+  <section class="slide dark">
+    <div class="cover-grid">
+      <div>
+        <div class="brand">
+          <div class="brand-mark">IA</div>
+          <div>
+            <div class="kicker">Ventas IA Ops Store</div>
+            <div style="font-size:0.19in;font-weight:800;color:rgba(255,250,241,.7)">Micro app SaaS para tiendas que venden por WhatsApp</div>
+          </div>
+        </div>
+        <h1>El WhatsApp de la tienda convertido en operacion comercial</h1>
+        <p class="lead">Un agente IA consulta catalogo, arma pedidos, registra clientes y escala al tendero cuando hace falta criterio humano.</p>
+      </div>
+      <div class="store-window">
+        <img src="commercial-deck-assets/tienda-viva.png" alt="Vista Tienda viva de Ventas IA" />
+        <div class="cover-caption">Tienda viva muestra conversaciones, zonas y casos criticos como actividad operativa.</div>
+      </div>
+    </div>
+    <div class="footer"><span>Brief comercial</span><span>2026</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Problema</span>
+    <div class="two-col">
+      <div>
+        <h2>La venta por WhatsApp crece, pero la operacion sigue manual</h2>
+        <p class="lead">El tendero lee mensajes, recuerda precios, valida stock, pide direccion, confirma pago y prepara pedidos al mismo tiempo.</p>
+      </div>
+      <div class="point-list">
+        <div class="point"><div class="icon">1</div><div><b>Respuestas lentas</b><span>Los clientes esperan mientras alguien revisa catalogo, precios o disponibilidad.</span></div></div>
+        <div class="point"><div class="icon">2</div><div><b>Pedidos incompletos</b><span>Faltan cantidades, direccion, presentacion o forma de entrega.</span></div></div>
+        <div class="point"><div class="icon">3</div><div><b>Poca trazabilidad</b><span>La tienda no ve claramente que se confirmo, que falta y quien debe alistar.</span></div></div>
+        <div class="point"><div class="icon">4</div><div><b>Datos dispersos</b><span>Catalogo, clientes, pagos y conversaciones viven en lugares separados.</span></div></div>
+      </div>
+    </div>
+    <div class="footer"><span>Ventas IA</span><span>02</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Solucion</span>
+    <h2>Una micro app para operar pedidos de tienda desde WhatsApp</h2>
+    <p class="lead">Ventas IA combina agente comercial, Google Sheets, control humano y tableros SaaS en una sola experiencia.</p>
+    <div class="flow">
+      <div class="flow-step"><div class="icon">W</div><strong>WhatsApp</strong><span>El cliente escribe como siempre, con lenguaje natural.</span></div>
+      <div class="flow-step"><div class="icon">IA</div><strong>Agente</strong><span>Interpreta intencion, productos, cantidad y datos faltantes.</span></div>
+      <div class="flow-step"><div class="icon">G</div><strong>Google Sheets</strong><span>Consulta catalogo, clientes, stock y pedidos.</span></div>
+      <div class="flow-step"><div class="icon">H</div><strong>Humano</strong><span>Decide cuando hay ambiguedad, reclamo, pago o preparacion.</span></div>
+      <div class="flow-step"><div class="icon">$</div><strong>SaaS</strong><span>Administra suscripcion, consumo, errores y estado por tienda.</span></div>
+    </div>
+    <div class="footer"><span>Flujo comercial</span><span>03</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Tienda viva</span>
+    <div class="two-col reverse">
+      <div class="screenshot large">
+        <img src="commercial-deck-assets/tienda-viva.png" alt="Mapa operativo Tienda viva" />
+      </div>
+      <div>
+        <h2>Un gemelo visual para entender que pasa ahora</h2>
+        <p class="lead">La tienda se ve como una operacion viva: conversaciones, zonas, casos agrupados y alertas humanas.</p>
+        <div class="point-list">
+          <div class="point"><div class="icon">A</div><div><b>Alertas accionables</b><span>Los casos que requieren apoyo humano quedan visibles y se pueden abrir.</span></div></div>
+          <div class="point"><div class="icon">Z</div><div><b>Zonas operativas</b><span>Entrada, catalogo, pedido, cierre y aprobacion ayudan a leer el flujo.</span></div></div>
+          <div class="point"><div class="icon">L</div><div><b>Niveles de detalle</b><span>La vista se adapta cuando hay muchas conversaciones activas.</span></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer"><span>Digital twin comercial</span><span>04</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Agente comercial</span>
+    <h2>Razonamiento de tendero, no solo palabras clave</h2>
+    <p class="lead">El agente infiere productos, busca similares, valida con herramientas y pregunta cuando falta informacion.</p>
+    <div class="diagram">
+      <div class="lane"><b>Cliente</b><span>"Buenas, para un domicilio, me regalas 3 chocorramos y una gaseosa"</span></div>
+      <div class="lane"><b>Motor IA</b><span>Identifica pedido, cliente por WhatsApp, productos, cantidades y faltantes.</span></div>
+      <div class="lane"><b>Herramientas</b><span>Consulta catalogo en Sheets, guarda cliente, escribe pedido y crea handoff humano.</span></div>
+      <div class="tagline"><span>Consulta antes de afirmar</span><span>Disponibilidad parcial</span><span>Escala si no hay certeza</span></div>
+    </div>
+    <div class="footer"><span>DeepSeek global administrado por la plataforma</span><span>05</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Conversaciones</span>
+    <div class="two-col">
+      <div>
+        <h2>Conversaciones supervisables desde la plataforma</h2>
+        <p class="lead">El tendero puede revisar la conversacion, abrir WhatsApp y resolver solicitudes sin perder el contexto del pedido.</p>
+        <div class="point-list">
+          <div class="point"><div class="icon">C</div><div><b>Historial completo</b><span>Mensajes del cliente y respuestas del agente en un solo expediente.</span></div></div>
+          <div class="point"><div class="icon">R</div><div><b>Respuesta humana</b><span>Permite resolver desde la plataforma o continuar por WhatsApp.</span></div></div>
+          <div class="point"><div class="icon">P</div><div><b>Pedido claro</b><span>El humano ve que debe alistar, para quien y hacia donde.</span></div></div>
+        </div>
+      </div>
+      <div class="screenshot large">
+        <img src="commercial-deck-assets/conversaciones.png" alt="Bandeja de conversaciones" />
+      </div>
+    </div>
+    <div class="footer"><span>Operacion diaria</span><span>06</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Onboarding</span>
+    <div class="two-col reverse">
+      <div class="screenshot tall">
+        <img src="commercial-deck-assets/onboarding.png" alt="Onboarding guiado" />
+      </div>
+      <div>
+        <h2>Activacion guiada para usuarios sin perfil tecnico</h2>
+        <p class="lead">El cliente paga, conecta Google, crea Drive/Sheets, configura WhatsApp y prueba la operacion antes de publicar.</p>
+        <div class="point-list">
+          <div class="point"><div class="icon">G</div><div><b>Google del cliente</b><span>Catalogo, clientes y pedidos viven en el Drive de cada tienda.</span></div></div>
+          <div class="point"><div class="icon">W</div><div><b>WhatsApp por tienda</b><span>La app guia si el cliente ya tiene Cloud API, Business App o empieza desde cero.</span></div></div>
+          <div class="point"><div class="icon">V</div><div><b>Validacion antes de operar</b><span>La tienda se activa solo cuando cumple las conexiones minimas.</span></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer"><span>Autoservicio premium</span><span>07</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Centro de control</span>
+    <div class="two-col">
+      <div>
+        <h2>Control SaaS para administrar clientes y operacion</h2>
+        <p class="lead">La plataforma permite ver tiendas activas, pagos, consumo, estado de Google/WhatsApp, errores y Motor IA.</p>
+        <div class="metrics">
+          <div class="metric"><strong>37</strong><span>clientes en radar comercial</span></div>
+          <div class="metric"><strong>30</strong><span>tiendas activas</span></div>
+          <div class="metric"><strong>25,4k</strong><span>tokens IA trazables</span></div>
+          <div class="metric"><strong>1</strong><span>evento reciente revisable</span></div>
+        </div>
+        <p class="note" style="margin-top:.3in">Los numeros corresponden a datos de prueba locales del tablero actual.</p>
+      </div>
+      <div class="screenshot large">
+        <img src="commercial-deck-assets/centro-control.png" alt="Centro de control" />
+      </div>
+    </div>
+    <div class="footer"><span>Administracion de plataforma</span><span>08</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Modelo comercial</span>
+    <h2>Suscripcion mensual con consumo controlado por tienda</h2>
+    <p class="lead">La plataforma cobra por uso de Ventas IA. WhatsApp Business/Meta lo paga cada cliente por separado.</p>
+    <div class="business-grid">
+      <div class="business-cell"><strong>Plan inicial</strong><span>1.000 domicilios y 5.000 interacciones por ciclo.</span></div>
+      <div class="business-cell"><strong>Pago recurrente</strong><span>Mercado Pago gestiona la suscripcion mensual y el estado de acceso.</span></div>
+      <div class="business-cell"><strong>DeepSeek global</strong><span>La plataforma administra el modelo y mide consumo por tienda.</span></div>
+      <div class="business-cell"><strong>Prueba configurable</strong><span>El periodo de prueba se puede activar desde administracion.</span></div>
+      <div class="business-cell"><strong>Gracia y bloqueo</strong><span>El acceso se controla por pago, uso, excepciones y estado operativo.</span></div>
+      <div class="business-cell"><strong>Planes editables</strong><span>Soporta varios planes, upgrade inmediato y downgrade al siguiente ciclo.</span></div>
+    </div>
+    <div class="footer"><span>SaaS mensual</span><span>09</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Alcance actual</span>
+    <h2>Base funcional lista para piloto controlado</h2>
+    <p class="lead">El repo ya cubre backend, frontend, agente, Google, WhatsApp contract-first, Mercado Pago contract-first, PostgreSQL y pruebas locales.</p>
+    <div class="business-grid">
+      <div class="business-cell"><strong>Validado localmente</strong><span>Backend, build, auth, Google contract, WhatsApp contract y 50 escenarios Colombia.</span></div>
+      <div class="business-cell"><strong>Google live local</strong><span>OAuth y Sheets reales probados en entorno local con tenant piloto.</span></div>
+      <div class="business-cell"><strong>Handoff humano</strong><span>El pedido confirmado se registra y sube a humano para preparar y entregar.</span></div>
+      <div class="business-cell"><strong>Pendiente publico</strong><span>URL HTTPS, webhooks reales de WhatsApp y Mercado Pago, redirect productivo.</span></div>
+      <div class="business-cell"><strong>Seguridad productiva</strong><span>Secret manager, alertas, retencion y hardening antes de escala.</span></div>
+      <div class="business-cell"><strong>Piloto recomendado</strong><span>Una tienda, catalogo en Sheets, WhatsApp conectado y casos reales medidos.</span></div>
+    </div>
+    <div class="footer"><span>Estado real del producto</span><span>10</span></div>
+  </section>
+
+  <section class="slide">
+    <span class="kicker">Por que comprar</span>
+    <h2>La tienda gana velocidad sin perder control humano</h2>
+    <div class="business-grid">
+      <div class="business-cell"><strong>Menos mensajes repetitivos</strong><span>El agente atiende consultas comunes, arma canastas y pide datos faltantes.</span></div>
+      <div class="business-cell"><strong>Datos en herramientas conocidas</strong><span>Google Sheets reduce friccion y evita adoptar un ERP pesado al inicio.</span></div>
+      <div class="business-cell"><strong>Control operativo visible</strong><span>Conversaciones, aprobaciones, pedidos y errores quedan supervisables.</span></div>
+      <div class="business-cell"><strong>Escalamiento prudente</strong><span>Pagos, imagenes, reclamos y ambiguedades pasan a humano.</span></div>
+      <div class="business-cell"><strong>Arquitectura multi-cliente</strong><span>Cada tienda tiene sus conexiones, datos y consumo aislados.</span></div>
+      <div class="business-cell"><strong>Experiencia diferenciada</strong><span>Tienda viva comunica la operacion como un negocio en movimiento.</span></div>
+    </div>
+    <div class="footer"><span>Diferenciadores</span><span>11</span></div>
+  </section>
+
+  <section class="slide dark">
+    <span class="kicker">Siguiente paso</span>
+    <h2>Primer piloto con una tienda real</h2>
+    <p class="lead">El objetivo del piloto es validar calidad de respuesta, flujo de pedido, handoff humano y adopcion operativa antes de ampliar a mas tiendas.</p>
+    <div class="business-grid" style="margin-top:.5in">
+      <div class="business-cell"><strong>Semana 1</strong><span>Catalogo en Sheets, Google OAuth, configuracion de tienda y casos de prueba.</span></div>
+      <div class="business-cell"><strong>Semana 2</strong><span>WhatsApp con URL publica, mensajes reales, handoff y ajustes de prompt.</span></div>
+      <div class="business-cell"><strong>Criterio de exito</strong><span>Pedidos reales trazables, respuesta clara y humano preparado para alistar.</span></div>
+    </div>
+    <div class="cta">
+      <div><strong>Ventas IA</strong><span>WhatsApp conectado a una operacion comercial inteligente.</span></div>
+      <div class="button">Piloto controlado</div>
+    </div>
+    <div class="footer"><span>ventas-ia-ops-store</span><span>12</span></div>
+  </section>
+</body>
+</html>

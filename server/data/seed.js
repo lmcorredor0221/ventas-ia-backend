@@ -1,4 +1,5 @@
 import { conversations, pendingRequests, tenants, tools } from '../../src/data/acpModel.js';
+import { colombiaDriveFiles, colombiaProducts20 } from './colombiaProducts.js';
 
 const now = () => new Date().toISOString();
 
@@ -21,13 +22,36 @@ export function createSeedState() {
         googleSheets: {
           spreadsheetIdRef: `${tenant.id.toUpperCase()}_CATALOG_SPREADSHEET_ID_REF`,
           range: 'Catalogo!A1:H500',
+          catalogRange: 'Catalogo!A1:H500',
+          customerProfilesRange: 'Clientes!A1:F500',
+          ordersRange: 'Pedidos!A1:K500',
           primaryKey: 'sku',
           refreshPolicy: 'short_ttl',
         },
         googleDrive: {
           filePolicyRef: `${tenant.id.toUpperCase()}_DRIVE_FILE_POLICY_REF`,
+          customerProfileFolderRef: `${tenant.id.toUpperCase()}_CUSTOMER_PROFILE_FOLDER_REF`,
           allowedMimeTypes: ['application/pdf', 'image/png', 'image/jpeg'],
           refreshMode: 'on_demand',
+        },
+        llm: {
+          provider: 'deepseek',
+          model: 'deepseek-chat',
+          mode: 'json_schema',
+          simulator: 'codex',
+          apiKeyRef: `${tenant.id.toUpperCase()}_DEEPSEEK_API_KEY_REF`,
+          baseUrlRef: `${tenant.id.toUpperCase()}_DEEPSEEK_BASE_URL_REF`,
+          temperature: 0,
+          responseLanguage: 'es-CO',
+          allowedTasks: ['intent_classification', 'order_parser', 'tool_router', 'response_composer'],
+        },
+        orderPolicy: {
+          customerIdentifier: 'whatsapp_wa_id',
+          customerRequiredFields: ['name', 'defaultAddress'],
+          missingQuantity: 'ask',
+          customerProfileStore: 'google_sheets',
+          confirmedOrderStore: 'google_sheets',
+          confirmedOrderHandoff: 'preparation_and_delivery',
         },
         secretsPolicy: 'references_only_no_plaintext_values',
       },
@@ -43,6 +67,7 @@ export function createSeedState() {
         { sku: 'AND-MOS-12', name: 'Mostrador modular 12U', price: 1280000, stock: 18, category: 'mobiliario', driveFileId: 'drv-and-mos-12' },
         { sku: 'AND-VIT-04', name: 'Vitrina comercial LED', price: 890000, stock: 9, category: 'exhibicion', driveFileId: 'drv-and-vit-04' },
         { sku: 'AND-TER-02', name: 'Terminal punto de pago', price: 4650000, stock: 4, category: 'pos', driveFileId: 'drv-and-ter-02' },
+        ...colombiaProducts20,
       ],
       norte: [
         { sku: 'NOR-REP-33', name: 'Kit repuesto premium', price: 2130000, stock: 7, category: 'repuestos', driveFileId: 'drv-nor-rep-33' },
@@ -56,6 +81,7 @@ export function createSeedState() {
       andina: [
         { fileId: 'drv-and-mos-12', name: 'Ficha mostrador modular.pdf', mimeType: 'application/pdf', summary: 'Dimensiones, colores y capacidad del mostrador modular.' },
         { fileId: 'drv-and-vit-04', name: 'Vitrina LED imagen.png', mimeType: 'image/png', summary: 'Imagen aprobada para soporte comercial.' },
+        ...colombiaDriveFiles,
       ],
       norte: [
         { fileId: 'drv-nor-rep-33', name: 'Ficha kit repuesto.pdf', mimeType: 'application/pdf', summary: 'Compatibilidad y garantia del kit.' },
@@ -64,6 +90,21 @@ export function createSeedState() {
         { fileId: 'drv-aur-hog-09', name: 'Catalogo hogar.pdf', mimeType: 'application/pdf', summary: 'Ficha comercial del set Aurora.' },
       ],
     },
+    customerProfilesByTenant: {
+      andina: {
+        '573009998877': {
+          driveFileId: 'drv-customer-andina-573009998877',
+          phone: '573009998877',
+          name: 'Prueba Local',
+          defaultAddress: 'Carrera 15 # 88-20, Bogotá',
+          addresses: [{ label: 'casa', address: 'Carrera 15 # 88-20, Bogotá', notes: 'Portería principal' }],
+          preferences: { channel: 'whatsapp', deliveryDefault: true },
+          createdAt: now(),
+          updatedAt: now(),
+        },
+      },
+    },
+    ordersByTenant: {},
     conversations: conversations.map((conversation) => ({
       ...conversation,
       waId: conversation.id.replace('wa-', '57'),
@@ -83,8 +124,8 @@ export function createSeedState() {
       type: index % 2 === 0 ? 'agent.started' : 'tool.call.completed',
       tenantId: conversation.tenantId,
       conversationId: conversation.id,
-      detail: `${conversation.lastTool} registrado desde seed ACP`,
-      metadata: { source: 'seed' },
+      detail: `${conversation.lastTool} registrado desde datos iniciales`,
+      metadata: { source: 'initial_seed' },
     })),
     processedMessages: [],
     transactions: [],

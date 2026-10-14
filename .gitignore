@@ -3,3 +3,6 @@ dist/
 server/data/runtime-store.json
 test-results-*.png
 .analysis/
+.env
+.env.*
+!.env.example
