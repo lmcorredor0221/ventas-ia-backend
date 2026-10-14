@@ -221,16 +221,24 @@ export class AgentRuntime {
       });
     }
 
-    const selectedRows = orderItems.map((item) => item.product).filter(Boolean);
+    const currentConversation = await this.getConversation(conversationId);
+    const previousDraft = currentConversation?.orderDraft;
+    const effectiveOrderItems = previousDraft && isAdditiveOrderText(normalized.text)
+      ? mergeOrderItems(previousDraft.items ?? [], orderItems)
+      : orderItems;
+
+    const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
     const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
       file_ids: selectedRows.map((row) => row.driveFileId).filter(Boolean),
       refresh_mode: 'on_demand',
       reason: selectedRows.length ? 'validate_order_product_files' : 'verify_catalog_context_for_missing_order_items',
     });
 
-    const missingFields = [...(plan.missingFields ?? [])];
-    for (const item of orderItems) {
+    const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
+    if (!effectiveOrderItems.length) missingFields.push('order_items');
+    for (const item of effectiveOrderItems) {
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
+      if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
       if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
       if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
@@ -238,11 +246,11 @@ export class AgentRuntime {
       }
     }
 
-    const subtotal = orderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     const requiresHumanResolution = needsHumanProductResolution(missingFields);
     const reply = requiresHumanResolution
-      ? buildHumanResolutionReply({ orderItems, missingFields, customerProfile })
-      : buildOrderReply({ orderItems, missingFields, customerProfile, subtotal });
+      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile })
+      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields, customerProfile, subtotal });
     const canQuote = missingFields.length === 0;
 
     await this.patchConversation(conversationId, {
@@ -255,8 +263,8 @@ export class AgentRuntime {
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: 'google_drive_file_picker',
       orderDraft: {
-        delivery: plan.order?.delivery ?? false,
-        items: orderItems,
+        delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
+        items: effectiveOrderItems,
         missingFields: [...new Set(missingFields)],
         subtotal,
         driveRefs: drive.source_refs ?? [],
@@ -270,8 +278,8 @@ export class AgentRuntime {
         urgency: 'Alta',
         assigned_team: 'ventas',
         context_snapshot: {
-          summary: buildHumanResolutionSummary({ orderItems, missingFields, customerProfile, text: normalized.text }),
-          orderItems,
+          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields, customerProfile, text: normalized.text }),
+          orderItems: effectiveOrderItems,
           missingFields: [...new Set(missingFields)],
           customerProfile,
           driveStatus: drive.status,
@@ -317,14 +325,27 @@ export class AgentRuntime {
       status: 'pending_human_preparation',
     });
 
+    const confirmedItems = (orderDraft.items ?? []).map((item) => ({
+      name: item.product?.name ?? item.catalogQuery ?? item.skuHint ?? 'Producto por validar',
+      quantity: item.quantity ?? 1,
+      unitPrice: item.product?.price ?? null,
+      lineTotal: item.lineTotal ?? null,
+    }));
+    const deliveryAddress = customerProfile?.defaultAddress ?? 'Dirección pendiente por confirmar';
     await this.tools.call('human_handoff', tenantId, conversationId, {
-      reason: 'Preparar y llevar pedido confirmado',
+      reason: 'Alistar domicilio confirmado',
       urgency: 'Alta',
       assigned_team: 'operaciones',
       context_snapshot: {
         summary: 'Pedido confirmado por WhatsApp; requiere preparacion y entrega humana.',
         orderId: order.order.id,
         subtotal: orderDraft.subtotal,
+        action: 'prepare_delivery_order',
+        customerName: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
+        customerWaId: normalized.waId,
+        deliveryAddress,
+        items: confirmedItems,
+        paymentMethod: orderDraft.paymentMethod ?? customerProfile?.preferredPaymentMethod ?? null,
       },
     });
 
@@ -342,7 +363,7 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: `Pedido confirmado y registrado. El equipo humano lo prepara y coordina la entrega. Referencia: ${order.order.id}.`,
+      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
     });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
@@ -423,27 +444,89 @@ export class AgentRuntime {
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
   }
 
-  resolveHumanRequest(requestId, { outcome, note, approverId = 'local-admin' }) {
+  async resolveHumanRequest(requestId, { outcome, note, approverId = 'local-admin', responseMode = 'none' }) {
+    const normalizedNote = String(note ?? '').trim();
+    const normalizedMode = ['platform', 'whatsapp'].includes(responseMode) ? responseMode : 'none';
+    const shouldReplyToCustomer = Boolean(normalizedNote && normalizedMode !== 'none');
+    const currentState = this.store.getState();
+    const currentRequest = currentState.pendingRequests.find((item) => item.id === requestId);
+    const currentConversation = currentRequest
+      ? currentState.conversations.find((item) => item.id === currentRequest.conversationId)
+      : null;
+    const currentReplyWaId = currentRequest ? resolveHumanReplyWaId(currentState, currentRequest, currentConversation) : null;
+    if (shouldReplyToCustomer && normalizedMode === 'whatsapp' && !currentReplyWaId) {
+      const error = new Error('WhatsApp response requires a conversation with waId');
+      error.statusCode = 428;
+      error.code = 'human_reply_missing_wa_id';
+      throw error;
+    }
     let request;
+    let conversationSnapshot;
+    const now = new Date().toISOString();
     this.store.mutate((state) => {
       request = state.pendingRequests.find((item) => item.id === requestId);
       if (!request) throw new Error(`Request not found: ${requestId}`);
       request.status = outcome === 'approved' ? 'resolved' : 'denied';
-      request.resolvedAt = new Date().toISOString();
-      request.resolutionNote = note ?? '';
+      request.resolvedAt = now;
+      request.resolutionNote = normalizedNote;
       request.approverId = approverId;
+      request.responseMode = normalizedMode;
       request.approvalToken = outcome === 'approved' ? `APPROVED-${crypto.randomUUID()}` : null;
       const conversation = state.conversations.find((item) => item.id === request.conversationId);
       if (conversation) {
+        conversationSnapshot = { id: conversation.id, waId: resolveHumanReplyWaId(state, request, conversation) };
         conversation.status = outcome === 'approved' ? 'live' : 'blocked';
         conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
         conversation.progress = outcome === 'approved' ? Math.max(conversation.progress ?? 0, 78) : conversation.progress;
-        conversation.nextStep = outcome === 'approved' ? 'Flujo reanudado con aprobacion humana.' : 'Operacion rechazada; revisar alternativa.';
-        conversation.updatedAt = new Date().toISOString();
+        conversation.nextStep = outcome === 'approved'
+          ? 'Flujo reanudado con aprobacion humana.'
+          : 'Operacion rechazada; revisar alternativa.';
+        if (shouldReplyToCustomer && normalizedMode === 'platform') {
+          conversation.messages.push({
+            id: `human-${crypto.randomUUID()}`,
+            role: 'human',
+            text: normalizedNote,
+            channel: 'platform',
+            requestId,
+            createdAt: now,
+          });
+          request.customerReply = {
+            mode: 'platform',
+            text: normalizedNote,
+            savedAt: now,
+            approverId,
+          };
+        }
+        conversation.updatedAt = now;
       }
     });
     this.store.persistPendingRequest?.(requestId);
     this.store.persistConversation?.(request.conversationId);
+    let responseDelivery = null;
+    if (shouldReplyToCustomer && normalizedMode === 'whatsapp') {
+      responseDelivery = await this.tools.call('whatsapp_business_messaging', request.tenantId, request.conversationId, {
+        action: 'send_human_message',
+        wa_id: conversationSnapshot?.waId ?? currentReplyWaId,
+        text: normalizedNote,
+        senderRole: 'human',
+        request_id: requestId,
+      });
+      const sentAt = new Date().toISOString();
+      this.store.mutate((state) => {
+        const stored = state.pendingRequests.find((item) => item.id === requestId);
+        if (stored) {
+          stored.customerReply = {
+            mode: 'whatsapp',
+            text: normalizedNote,
+            sentAt,
+            approverId,
+            deliveryStatus: responseDelivery.delivery_status,
+            providerMessageId: responseDelivery.provider_message_id,
+          };
+        }
+      });
+      this.store.persistPendingRequest?.(requestId);
+    }
     this.store.mutate((state) => {
       appendAuditEvent(state, {
         tenantId: request.tenantId,
@@ -453,18 +536,42 @@ export class AgentRuntime {
         metadata: {
           requestId,
           conversationId: request.conversationId,
-          note: note ?? '',
+          note: normalizedNote,
+          responseMode: normalizedMode,
         },
       });
+      if (shouldReplyToCustomer) {
+        appendAuditEvent(state, {
+          tenantId: request.tenantId,
+          actorId: approverId,
+          action: normalizedMode === 'whatsapp' ? 'human_response.whatsapp_sent' : 'human_response.platform_saved',
+          resource: 'pending_request',
+          metadata: {
+            requestId,
+            conversationId: request.conversationId,
+            responseMode: normalizedMode,
+            providerMessageId: responseDelivery?.provider_message_id,
+          },
+        });
+      }
     });
     this.events.emit({
       type: outcome === 'approved' ? 'approval.granted' : 'approval.denied',
       tenantId: request.tenantId,
       conversationId: request.conversationId,
       detail: request.title,
-      metadata: { requestId, approverId },
+      metadata: { requestId, approverId, responseMode: normalizedMode },
     });
-    return request;
+    if (shouldReplyToCustomer) {
+      this.events.emit({
+        type: normalizedMode === 'whatsapp' ? 'human.response.whatsapp_sent' : 'human.response.platform_saved',
+        tenantId: request.tenantId,
+        conversationId: request.conversationId,
+        detail: normalizedMode === 'whatsapp' ? 'Respuesta humana enviada por WhatsApp' : 'Respuesta humana guardada en plataforma',
+        metadata: { requestId, approverId, responseMode: normalizedMode },
+      });
+    }
+    return this.store.getState().pendingRequests.find((item) => item.id === requestId) ?? request;
   }
 
   async ensureConversation(tenantId, normalized) {
@@ -581,6 +688,65 @@ function deliveryItemFiltersFromPlan(plan, item, index) {
   return item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(item.catalogQuery ?? item.rawName);
 }
 
+function isAdditiveOrderText(text) {
+  const normalized = normalizeText(text);
+  return containsAny(normalized, [
+    'agrega',
+    'agregame',
+    'agrégame',
+    'anade',
+    'añade',
+    'sumale',
+    'súmale',
+    'tambien',
+    'también',
+    'y me regalas',
+    'y manda',
+    'y mandame',
+    'y mándame',
+    'y adiciona',
+  ]);
+}
+
+function mergeOrderItems(previousItems = [], nextItems = []) {
+  const byKey = new Map();
+  for (const item of previousItems) {
+    byKey.set(orderItemKey(item), item);
+  }
+  for (const item of nextItems) {
+    const key = orderItemKey(item);
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, item);
+      continue;
+    }
+    const quantity = Number(current.quantity ?? 0) + Number(item.quantity ?? 0);
+    byKey.set(key, {
+      ...current,
+      ...item,
+      quantity: quantity || (item.quantity ?? current.quantity),
+      lineTotal: item.product && quantity ? item.product.price * quantity : item.lineTotal ?? current.lineTotal,
+      available: item.product && quantity ? item.product.stock >= quantity : item.available ?? current.available,
+    });
+  }
+  return [...byKey.values()];
+}
+
+function resolveHumanReplyWaId(state, request, conversation) {
+  if (conversation?.waId) return conversation.waId;
+  if (request?.contextSnapshot?.customerWaId) return request.contextSnapshot.customerWaId;
+  if (request?.context_snapshot?.customerWaId) return request.context_snapshot.customerWaId;
+  if (request?.customerWaId) return request.customerWaId;
+  const order = (state.ordersByTenant?.[request?.tenantId] ?? []).find((item) => (
+    item.conversationId === request?.conversationId || item.id === request?.contextSnapshot?.orderId || item.id === request?.context_snapshot?.orderId
+  ));
+  return order?.waId ?? null;
+}
+
+function orderItemKey(item) {
+  return normalizeText(item.product?.sku ?? item.skuHint ?? item.catalogQuery ?? item.rawName);
+}
+
 function inferCatalogFilter(text) {
   const normalized = normalizeText(text);
   if (normalized.includes('chocoramo') || normalized.includes('chocorramo')) return { query: 'chocoramo' };
@@ -595,7 +761,8 @@ function inferCatalogFilter(text) {
   if (containsAny(normalized, ['carnes frias', 'mortadela'])) return { category: 'Carnes frias' };
   if (containsAny(normalized, ['cerveza', 'club colombia', 'sixpack', 'six pack'])) return { query: normalized };
   if (containsAny(normalized, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return { query: normalized };
-  if (containsAny(normalized, ['jugo', 'jugos', 'bebida', 'bebidas', 'sed', 'tomar', 'gaseosa', 'coca', 'frio', 'fria'])) return { category: 'bebidas' };
+  if (containsAny(normalized, ['jugo', 'jugos'])) return { query: 'jugo' };
+  if (containsAny(normalized, ['bebida', 'bebidas', 'sed', 'tomar', 'gaseosa', 'coca', 'frio', 'fria'])) return { category: 'bebidas' };
   if (containsAny(normalized, ['mecato', 'snack', 'snacks', 'dulce', 'antojo', 'galleta', 'papas', 'barato', 'economico', 'economica', 'lonchera', 'refrigerio', 'picar'])) return { category: 'snacks' };
   if (containsAny(normalized, ['cafe', 'cafes', 'tinto', 'tintico'])) return { category: 'cafe' };
   if (containsAny(normalized, ['aseo', 'limpieza', 'jabon', 'shampoo', 'papel'])) return { category: 'aseo' };
@@ -622,6 +789,23 @@ function removeResolvedProductMissingFields(missingFields, item) {
     const looksLikeProductGap = field.startsWith('product:') || containsAny(normalizedField, ['producto', 'referencia', 'presentacion']);
     if (!looksLikeProductGap) continue;
     const missing = normalizeText(field.replace('product:', ''));
+    if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
+      missingFields.splice(index, 1);
+    }
+  }
+}
+
+function removeResolvedBudgetMissingFields(missingFields, item) {
+  const candidates = [
+    item.rawName,
+    item.catalogQuery,
+    item.product?.name,
+    ...(item.product?.aliases ?? []),
+  ].map(normalizeText).filter(Boolean);
+  for (let index = missingFields.length - 1; index >= 0; index -= 1) {
+    const field = missingFields[index];
+    if (!field.startsWith('quantity:') && !field.startsWith('presentation:')) continue;
+    const missing = normalizeText(field.replace(/^quantity:|^presentation:/, ''));
     if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
       missingFields.splice(index, 1);
     }
@@ -912,6 +1096,15 @@ function confirmsPresentation(text, productName) {
 
 function formatCurrency(value) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value);
+}
+
+function formatOrderItems(items = []) {
+  const lines = (items ?? [])
+    .filter((item) => item?.name)
+    .map((item) => `${item.quantity ?? 1} x ${item.name}`);
+  if (!lines.length) return 'pedido registrado';
+  if (lines.length <= 3) return lines.join(', ');
+  return `${lines.slice(0, 3).join(', ')} y ${lines.length - 3} producto(s) mas`;
 }
 
 function initials(value) {

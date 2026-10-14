@@ -14,7 +14,7 @@ export const colombiaProducts20 = [
     aliases: ['cifrut de granadilla', 'cifrut granadilla', 'cifru granadilla', 'cifru granadila'],
     price: 2200,
     stock: 30,
-    category: 'bebidas',
+    category: 'jugos',
     driveFileId: 'drv-and-cif-gra',
   },
   {
@@ -23,7 +23,7 @@ export const colombiaProducts20 = [
     aliases: ['hit mango', 'jugo de mango', 'jugos hit', 'jugo hit'],
     price: 2600,
     stock: 24,
-    category: 'bebidas',
+    category: 'jugos',
     driveFileId: 'drv-and-hit-man',
   },
   {

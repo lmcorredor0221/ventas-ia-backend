@@ -335,7 +335,11 @@ export class ToolRegistry {
       urgency: payload.urgency ?? 'Critica',
       type: 'human_handoff',
       context: payload.context_snapshot?.summary ?? 'Caso fuera de contrato autonomo.',
-      consequence: 'Al responder, el agente retomara el flujo desde el checkpoint guardado.',
+      consequence: payload.context_snapshot?.action === 'prepare_delivery_order'
+        ? 'Al marcarlo listo, el tendero toma el pedido para alistarlo y coordinar la entrega.'
+        : 'Al responder, el agente retomara el flujo desde el checkpoint guardado.',
+      action: payload.context_snapshot?.action ?? 'resolve_handoff',
+      contextSnapshot: payload.context_snapshot ?? {},
       status: 'pending',
       createdAt: new Date().toISOString(),
       resolvedAt: null,
@@ -401,8 +405,10 @@ export class ToolRegistry {
       if (conversation) {
         conversation.messages.push({
           id: providerMessageId,
-          role: 'agent',
+          role: payload.senderRole ?? 'agent',
           text: payload.text ?? payload.template_name ?? 'Mensaje enviado',
+          channel: liveConfig ? 'whatsapp_live' : 'whatsapp_mock',
+          action: payload.action ?? payload.template_name ?? 'session_message',
           createdAt: new Date().toISOString(),
         });
         conversation.updatedAt = new Date().toISOString();
@@ -479,9 +485,23 @@ function filterRows(rows, filters = {}) {
       if (key === 'query') {
         return rankRowsByQuery([row], value).length > 0;
       }
+      if (key === 'category') {
+        return categoryMatches(row.category, value);
+      }
       return normalizeText(row[key]).includes(normalizeText(value));
     }),
   );
+}
+
+function categoryMatches(actual, expected) {
+  const normalizedActual = normalizeText(actual);
+  const normalizedExpected = normalizeText(expected);
+  if (!normalizedExpected) return true;
+  if (normalizedActual.includes(normalizedExpected)) return true;
+  if (normalizedExpected === 'bebidas') {
+    return ['jugos', 'gaseosas', 'aguas'].some((alias) => normalizedActual.includes(alias));
+  }
+  return false;
 }
 
 function parseCatalogRows(values = []) {

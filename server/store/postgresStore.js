@@ -23,6 +23,7 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
+    this.snapshotSaveQueued = null;
   }
 
   async load() {
@@ -336,7 +337,15 @@ export class PostgresStore {
   }
 
   queueSave() {
-    return this.queueWrite(() => this.save(), 'save');
+    if (this.snapshotSaveQueued) return this.snapshotSaveQueued;
+    this.snapshotSaveQueued = this.queueWrite(async () => {
+      try {
+        await this.save();
+      } finally {
+        this.snapshotSaveQueued = null;
+      }
+    }, 'save');
+    return this.snapshotSaveQueued;
   }
 
   queueWrite(operation, label) {

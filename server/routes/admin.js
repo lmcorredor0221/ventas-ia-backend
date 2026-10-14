@@ -21,7 +21,7 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
   router.get('/overview', async (req, res, next) => {
     try {
       const tenants = await readTenants(store);
-      const tenantSummaries = await Promise.all(tenants.map(async (tenant) => tenantAdminSummary({ tenant, store, usage })));
+      const tenantSummaries = await Promise.all(tenants.map(async (tenant) => tenantAdminSummary({ tenant, store, usage, controlPlane })));
       const webhooks = await readWebhookEvents(store, { limit: 200 });
       const summary = summarizeWebhookEvents(webhooks);
       res.json({
@@ -124,9 +124,12 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
     }
   });
 
-  router.post('/billing/tenants/:tenantId/sync', (req, res, next) => {
+  router.post('/billing/tenants/:tenantId/sync', async (req, res, next) => {
     try {
-      res.json(controlPlane.syncMercadoPagoSubscription(req.params.tenantId, { actor: req.auth?.user }));
+      res.json(await controlPlane.syncMercadoPagoSubscription(req.params.tenantId, {
+        actor: req.auth?.user,
+        force: Boolean(req.body?.force),
+      }));
     } catch (error) {
       next(error);
     }
@@ -140,9 +143,41 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
     }
   });
 
+  router.get('/billing/tenants/:tenantId/discounts', (req, res, next) => {
+    try {
+      res.json({ discounts: controlPlane.listBillingDiscounts(req.params.tenantId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/billing/tenants/:tenantId/discounts/:discountId/revoke', (req, res, next) => {
+    try {
+      res.json(controlPlane.revokeBillingDiscount(req.params.tenantId, req.params.discountId, { actor: req.auth?.user }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/billing/tenants/:tenantId/exceptions', (req, res, next) => {
     try {
       res.status(201).json(controlPlane.createBillingAccessException(req.params.tenantId, req.body ?? {}, { actor: req.auth?.user }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/billing/tenants/:tenantId/exceptions', (req, res, next) => {
+    try {
+      res.json({ exceptions: controlPlane.listBillingAccessExceptions(req.params.tenantId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch('/billing/tenants/:tenantId/exceptions/:exceptionId/revoke', (req, res, next) => {
+    try {
+      res.json(controlPlane.revokeBillingAccessException(req.params.tenantId, req.params.exceptionId, { actor: req.auth?.user }));
     } catch (error) {
       next(error);
     }
@@ -183,7 +218,7 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
   return router;
 }
 
-async function tenantAdminSummary({ tenant, store, usage }) {
+async function tenantAdminSummary({ tenant, store, usage, controlPlane }) {
   const state = store.getState();
   const subscription = state.subscriptionsByTenant?.[tenant.id] ?? null;
   const googleConnection = state.googleConnectionsByTenant?.[tenant.id] ?? null;
@@ -191,6 +226,7 @@ async function tenantAdminSummary({ tenant, store, usage }) {
   const webhooks = await readWebhookEvents(store, { tenantId: tenant.id, limit: 50 });
   const events = store.listEvents ? await store.listEvents({ tenantId: tenant.id, limit: 30 }) : state.events.filter((event) => event.tenantId === tenant.id).slice(0, 30);
   const usageSummary = await usage.summary(tenant.id);
+  const billingStatus = controlPlane.getBillingStatus(tenant.id);
   const lastError = [...webhooks, ...events]
     .find((event) => ['failed', 'rejected', 'blocked'].includes(event.status) || String(event.type ?? '').includes('failed') || event.errorCode);
   return {
@@ -200,6 +236,13 @@ async function tenantAdminSummary({ tenant, store, usage }) {
     plan: tenant.plan,
     ownerEmail: tenant.lifecycle?.ownerEmail ?? subscription?.payerEmail ?? null,
     subscriptionStatus: subscription?.status ?? 'missing',
+    billingNotices: billingStatus.notices ?? [],
+    paymentHistoryCount: billingStatus.paymentHistory?.length ?? 0,
+    activeDiscounts: billingStatus.activeDiscounts?.length ?? 0,
+    activeDiscountsDetail: billingStatus.activeDiscounts ?? [],
+    activeAccessExceptions: billingStatus.activeAccessExceptions?.length ?? 0,
+    activeAccessExceptionsDetail: billingStatus.activeAccessExceptions ?? [],
+    checkoutRecovery: billingStatus.checkoutRecovery,
     access: tenant.lifecycle?.access ?? 'blocked',
     googleStatus: googleConnection?.status ?? 'missing',
     googleWorkspaceStatus: googleWorkspace?.status ?? 'missing',

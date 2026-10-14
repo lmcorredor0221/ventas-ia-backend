@@ -71,8 +71,9 @@ export class UsageService {
     return this.incrementMetric(tenantId, 'llm_total_tokens', totalTokens, metadata);
   }
 
-  async summary(tenantId, { period = currentPeriod() } = {}) {
-    const counters = await this.getCounters(tenantId, period);
+  async summary(tenantId, { period } = {}) {
+    const resolvedPeriod = period ?? billingPeriodForTenant(this.store.getState(), tenantId);
+    const counters = await this.getCounters(tenantId, resolvedPeriod);
     const tenant = await this.getTenant(tenantId);
     const limits = limitsForTenant(tenant);
     const metrics = {
@@ -86,7 +87,7 @@ export class UsageService {
     };
     return {
       tenantId,
-      period,
+      period: resolvedPeriod,
       planCode: tenant?.config?.saas?.planCode ?? 'ventas_ia_1000_domicilios',
       limits,
       metrics,
@@ -100,17 +101,18 @@ export class UsageService {
     };
   }
 
-  async getCounters(tenantId, period = currentPeriod()) {
+  async getCounters(tenantId, period) {
+    const resolvedPeriod = period ?? billingPeriodForTenant(this.store.getState(), tenantId);
     const state = this.store.getState();
-    const memoryCounters = { ...(state.usageCountersByTenant?.[tenantId]?.[period] ?? {}) };
+    const memoryCounters = { ...(state.usageCountersByTenant?.[tenantId]?.[resolvedPeriod] ?? {}) };
     if (!this.store.getUsageCounters) return memoryCounters;
-    const persistedCounters = await this.store.getUsageCounters(tenantId, period);
+    const persistedCounters = await this.store.getUsageCounters(tenantId, resolvedPeriod);
     return { ...persistedCounters, ...memoryCounters };
   }
 
   incrementMetric(tenantId, metric, amount = 1, metadata = {}) {
     if (!tenantId || !metric || !Number.isFinite(Number(amount)) || Number(amount) <= 0) return null;
-    const period = metadata.period ?? currentPeriod();
+    const period = metadata.period ?? billingPeriodForTenant(this.store.getState(), tenantId);
     let nextValue = 0;
     let emittedThreshold = null;
     let thresholdLimit = null;
@@ -121,6 +123,7 @@ export class UsageService {
       const current = Number(state.usageCountersByTenant[tenantId][period][metric] ?? 0);
       nextValue = current + Number(amount);
       state.usageCountersByTenant[tenantId][period][metric] = nextValue;
+      syncBillingUsageCycleMetric(state, tenantId, metric, Number(amount));
 
       const tenant = state.tenants?.find((item) => item.id === tenantId);
       const limit = limitForMetric(metric, limitsForTenant(tenant));
@@ -168,12 +171,12 @@ export class UsageService {
       tenantId,
       conversationId,
       detail: `${metric} excedio el limite mensual`,
-      metadata: { metric, limit, current, period: currentPeriod() },
+      metadata: { metric, limit, current, period: billingPeriodForTenant(this.store.getState(), tenantId) },
     });
     const error = new Error(`Tenant usage limit exceeded for ${metric}`);
     error.statusCode = 402;
     error.code = 'tenant_usage_limit_exceeded';
-    error.status = { tenantId, metric, limit, current, period: currentPeriod() };
+    error.status = { tenantId, metric, limit, current, period: billingPeriodForTenant(this.store.getState(), tenantId) };
     return error;
   }
 }
@@ -185,6 +188,12 @@ export function ensureUsageState(state) {
 
 export function currentPeriod(date = new Date()) {
   return date.toISOString().slice(0, 7);
+}
+
+export function billingPeriodForTenant(state, tenantId, date = new Date()) {
+  const subscription = state.subscriptionsByTenant?.[tenantId];
+  if (subscription?.currentPeriodStart) return subscription.currentPeriodStart.slice(0, 10);
+  return currentPeriod(date);
 }
 
 export function limitsForTenant(tenant) {
@@ -238,4 +247,16 @@ function positiveNumber(value, fallback) {
 function numberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function syncBillingUsageCycleMetric(state, tenantId, metric, amount) {
+  const subscription = state.subscriptionsByTenant?.[tenantId];
+  const cycles = state.billingUsageCyclesByTenant?.[tenantId] ?? [];
+  const cycle = cycles.find((item) => item.periodStart === subscription?.currentPeriodStart) ?? cycles[0];
+  if (!cycle) return;
+  if (metric === 'agent_interactions') cycle.interactionsUsed = Number(cycle.interactionsUsed ?? 0) + amount;
+  if (metric === 'deliveries_confirmed') cycle.deliveriesUsed = Number(cycle.deliveriesUsed ?? 0) + amount;
+  if (metric === 'llm_total_tokens') cycle.llmTokensUsed = Number(cycle.llmTokensUsed ?? 0) + amount;
+  if (metric === 'tool_calls') cycle.toolCallsUsed = Number(cycle.toolCallsUsed ?? 0) + amount;
+  cycle.updatedAt = new Date().toISOString();
 }

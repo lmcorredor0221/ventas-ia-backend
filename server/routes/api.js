@@ -50,7 +50,7 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
     try {
       const scope = authorizeTenantQuery(auth, req, req.query.tenantId);
       const requests = await readPendingRequests(store, { tenantId: req.query.tenantId });
-      res.json(filterTenantScoped(requests, scope));
+      res.json(enrichPendingRequests(filterTenantScoped(requests, scope), store.getState()));
     } catch (error) {
       next(error);
     }
@@ -71,16 +71,16 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
     }
   });
 
-  router.post('/pending-requests/:id/resolve', (req, res, next) => {
+  router.post('/pending-requests/:id/resolve', async (req, res, next) => {
     try {
       const request = store.getState().pendingRequests.find((item) => item.id === req.params.id);
       if (request) auth.authorizeTenant(req, request.tenantId, { roles: ['owner', 'operator'] });
-      const resolved = runtime.resolveHumanRequest(req.params.id, req.body ?? {});
+      const resolved = await runtime.resolveHumanRequest(req.params.id, req.body ?? {});
       auth.recordTenantAction(req, {
         tenantId: resolved.tenantId,
         action: 'pending_request.resolve',
         resource: req.params.id,
-        metadata: { outcome: req.body?.outcome, approverId: req.body?.approverId },
+        metadata: { outcome: req.body?.outcome, approverId: req.body?.approverId, responseMode: req.body?.responseMode },
       });
       res.json(resolved);
     } catch (error) {
@@ -95,8 +95,12 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
       const tenantId = req.query.tenantId ?? visibleTenants[0]?.id;
       if (tenantId) auth.authorizeTenant(req, tenantId);
       const conversations = await readConversations(store, { tenantId });
-      const pendingRequests = (await readPendingRequests(store, { tenantId })).filter((item) => item.status === 'pending');
+      const pendingRequests = enrichPendingRequests(
+        (await readPendingRequests(store, { tenantId })).filter((item) => item.status === 'pending'),
+        store.getState(),
+      );
       const filteredEvents = await events.list({ tenantId, limit: 50 });
+      const state = store.getState();
       const usageSummary = tenantId ? await usage.summary(tenantId) : null;
       res.json({
       tenants: visibleTenants,
@@ -105,7 +109,7 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
       pendingRequests,
       events: filteredEvents,
       usage: usageSummary,
-      tools: store.getState().tools,
+      tools: deriveTenantToolStatuses(state, tenantId),
       metrics: {
         active: conversations.filter((item) => ['live', 'degraded'].includes(item.status)).length,
         completed: conversations.filter((item) => item.status === 'completed').length,
@@ -187,6 +191,59 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
   return router;
 }
 
+function deriveTenantToolStatuses(state, tenantId) {
+  if (!tenantId) return state.tools;
+  const tenant = state.tenants.find((item) => item.id === tenantId);
+  const googleConnection = state.googleConnectionsByTenant?.[tenantId];
+  const googleWorkspace = state.googleWorkspacesByTenant?.[tenantId];
+  const whatsappBinding = state.whatsappBindingsByTenant?.[tenantId];
+  const googleReady = googleConnection?.status === 'connected' && googleWorkspace?.status === 'provisioned';
+  const googleStatus = googleReady
+    ? googleWorkspace?.mode === 'live' || googleConnection?.mode === 'live'
+      ? 'production_ready'
+      : 'sandbox_ready'
+    : 'needs_binding';
+  const whatsappReady = Boolean(tenant?.config?.whatsapp?.phoneNumberId || whatsappBinding?.phoneNumberId);
+  const whatsappStatus = whatsappReady ? 'production_ready' : 'needs_binding';
+  const googleToolNames = new Set([
+    'google_sheets_read_table',
+    'google_drive_file_picker',
+    'google_sheets_customer_profile_lookup',
+    'google_sheets_customer_profile_upsert',
+    'google_sheets_order_write',
+    'google_drive_customer_profile_lookup',
+    'google_drive_customer_profile_upsert',
+  ]);
+
+  return state.tools.map((tool) => {
+    if (googleToolNames.has(tool.name)) {
+      return {
+        ...tool,
+        status: googleStatus,
+        providerMode: googleReady ? googleWorkspace?.mode ?? googleConnection?.mode ?? tool.providerMode : tool.providerMode,
+        source: googleReady ? tenantToolSource(tool, googleWorkspace) : tool.source,
+      };
+    }
+    if (tool.name === 'whatsapp_business_messaging') {
+      return {
+        ...tool,
+        status: whatsappStatus,
+        providerMode: whatsappReady ? 'tenant_binding' : tool.providerMode,
+        source: whatsappReady ? 'WhatsApp Business conectado' : tool.source,
+      };
+    }
+    return tool;
+  });
+}
+
+function tenantToolSource(tool, googleWorkspace) {
+  const spreadsheetId = googleWorkspace?.spreadsheet?.id;
+  const rootFolderId = googleWorkspace?.rootFolder?.id;
+  if (tool.name.includes('drive')) return rootFolderId ? `Drive ${rootFolderId}` : 'Drive aprovisionado';
+  if (tool.name.includes('sheets')) return spreadsheetId ? `Sheets ${spreadsheetId}` : 'Sheets aprovisionado';
+  return tool.source;
+}
+
 async function readTenants(store) {
   return store.listTenants ? store.listTenants() : store.getState().tenants;
 }
@@ -221,6 +278,33 @@ function authorizeTenantQuery(auth, req, tenantId) {
 function filterTenantScoped(records, scope) {
   if (!scope) return records;
   return records.filter((item) => scope.has(item.tenantId));
+}
+
+function enrichPendingRequests(requests, state) {
+  return requests.map((request) => {
+    if (request.contextSnapshot?.items?.length || request.context_snapshot?.items?.length) return request;
+    const title = String(request.title ?? '').toLowerCase();
+    const looksLikeDelivery = request.assignedTeam === 'operaciones' || title.includes('pedido') || title.includes('domicilio');
+    if (!looksLikeDelivery) return request;
+    const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.conversationId === request.conversationId);
+    if (!order) return request;
+    return {
+      ...request,
+      action: 'prepare_delivery_order',
+      title: request.title?.toLowerCase().includes('alistar') ? request.title : 'Alistar domicilio confirmado',
+      consequence: 'El tendero toma el pedido para alistarlo y coordinar la entrega.',
+      contextSnapshot: {
+        ...(request.contextSnapshot ?? request.context_snapshot ?? {}),
+        action: 'prepare_delivery_order',
+        orderId: order.id,
+        subtotal: order.subtotal,
+        customerName: order.customerName,
+        customerWaId: order.waId,
+        deliveryAddress: order.deliveryAddress ?? 'Dirección pendiente por confirmar',
+        items: order.items ?? [],
+      },
+    };
+  });
 }
 
 function mergeConfig(base, patch) {

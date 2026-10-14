@@ -13,6 +13,9 @@ export const RUNTIME_CONFIG = {
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 1200),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
+  allowDevGoogleLogin: process.env.ALLOW_DEV_GOOGLE_LOGIN
+    ? process.env.ALLOW_DEV_GOOGLE_LOGIN === 'true'
+    : !process.env.GOOGLE_CLIENT_ID,
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? 'ventas_ia_session',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS ?? 168),
 };

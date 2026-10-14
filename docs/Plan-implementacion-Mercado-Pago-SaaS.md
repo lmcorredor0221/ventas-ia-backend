@@ -1,6 +1,6 @@
 # Plan tecnico de implementacion Mercado Pago SaaS
 
-Actualizado: 2026-10-10.
+Actualizado: 2026-10-11.
 
 ## Objetivo
 
@@ -31,7 +31,7 @@ Nota de gobierno: este documento es anexo tecnico. El tablero rector de priorida
 
 ## Estado de ejecucion
 
-Actualizado: 2026-10-10.
+Actualizado: 2026-10-11.
 
 Ejecutado local:
 
@@ -48,13 +48,23 @@ Ejecutado local:
 - UI admin para crear, editar, activar/desactivar planes, marcar plan principal, parametrizar trial/gracia y ejecutar conciliacion local.
 - Endpoints `/api/admin/billing/*` montados antes del router generico `/api` para evitar precedencia incorrecta.
 - Job local `POST /api/admin/billing/jobs/run` para vencer checkouts, iniciar gracia, suspender por gracia vencida, cancelar al fin de periodo y expirar descuentos/excepciones.
+- Avisos de facturacion en owner/admin para checkout pendiente, trial, gracia, estados bloqueantes, consumo 80/90/100, descuentos, excepciones e historial vacio.
+- Historial de pagos expuesto en `GET /api/billing/payments` y dentro de `/api/billing/status` como `paymentHistory`, con etiqueta de comprobante/referencia cuando existe.
+- Recuperacion de checkout abandonado expuesta como `checkoutRecovery` con accion recomendada, vigencia y dias restantes.
+- Descuentos y excepciones con gestion completa local: crear, listar, mostrar en Centro de control y revocar con auditoria.
+- Excepciones activas permiten operar temporalmente sin cambiar el estado real de Mercado Pago, siempre que el tenant este activado.
+- Ciclo de consumo alineado al aniversario de facturacion: `UsageService` usa `currentPeriodStart` y sincroniza contadores con `billing_usage_cycles`.
+- Sincronizacion manual Mercado Pago con rate limit de 60 segundos, auditoria, modo contrato local y consulta real a `preapproval` cuando existe token y `mercadoPagoPreapprovalId`.
+- Runner local `npm run billing:maintenance` para ejecutar conciliacion sin publicar.
+- Runner `npm run test:mercadopago-sandbox` preparado; si falta `MERCADOPAGO_ACCESS_TOKEN`, se salta sin fallar.
+- Separacion pre/post pago aplicada: antes de suscripcion activa solo se permite cuenta, diagnostico y checkout; OAuth Drive/Sheets, provisioning Google, Embedded Signup operativo y binding WhatsApp devuelven `subscription_required_for_setup`.
+- Reglas comerciales probadas en smoke: cancelacion al fin de ciclo, upgrade inmediato, downgrade al siguiente ciclo y sin devoluciones.
 
 Pendiente:
 
-- Consulta real Mercado Pago en sincronizacion manual.
-- Cron productivo de reconciliacion y consulta real al proveedor.
-- Historial completo de pagos con comprobante real.
-- Pruebas sandbox reales con credenciales Mercado Pago.
+- Cron productivo de reconciliacion y consulta masiva real al proveedor.
+- Comprobante real enriquecido cuando Mercado Pago devuelva `receiptUrl`/payment id en sandbox o produccion.
+- Pruebas sandbox reales con credenciales Mercado Pago (`MERCADOPAGO_ACCESS_TOKEN` y, si aplica, `MERCADOPAGO_PREAPPROVAL_PLAN_ID`).
 - Webhooks reales con URL publica.
 
 ## Modelo de datos

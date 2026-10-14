@@ -59,7 +59,11 @@ if (-not $secretKey) {
 
 $lines = @(
   "# Local Google OAuth pilot config. Do not commit.",
+  "AUTH_REQUIRED=true",
+  "CSRF_REQUIRED=true",
+  "ALLOW_DEV_GOOGLE_LOGIN=false",
   "GOOGLE_CLIENT_ID=$($client.client_id)",
+  "VITE_GOOGLE_CLIENT_ID=$($client.client_id)",
   "GOOGLE_CLIENT_SECRET=$($client.client_secret)",
   "GOOGLE_REDIRECT_URI=$redirectUri",
   "SECRET_ENCRYPTION_KEY=$secretKey",

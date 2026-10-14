@@ -94,34 +94,39 @@ export class LLMPlanner {
     let parsed;
     let providerMetadata = null;
     try {
-      const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
-      parsed = apiResult.plan;
-      providerMetadata = apiResult.providerMetadata;
-      executionMode = 'provider_api';
-    } catch (error) {
       if (provider === 'deepseek' && config.simulator === 'codex_cli') {
         const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) });
-        parsed = cliResult.plan;
+        parsed = {
+          ...cliResult.plan,
+          simulatedBy: 'codex_cli',
+          simulationScope: 'desktop_test_only',
+          reasoningNotes: buildCodexReasoningNotes({ text, plan: cliResult.plan, customerProfile }),
+        };
         providerMetadata = cliResult.providerMetadata;
         executionMode = 'codex_cli_simulated_deepseek';
       } else if (provider === 'deepseek' && config.simulator === 'codex') {
         parsed = this.codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products });
+        providerMetadata = { simulated: true, simulator: 'codex' };
         executionMode = 'codex_simulated_deepseek';
       } else {
-        parsed = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
-        executionMode = provider === 'mock' ? 'mock_structured' : 'mock_structured_fallback';
+        const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
+        parsed = apiResult.plan;
+        providerMetadata = apiResult.providerMetadata;
+        executionMode = 'provider_api';
       }
+    } catch (error) {
+      parsed = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
+      executionMode = provider === 'mock' ? 'mock_structured' : 'mock_structured_fallback';
       this.events.emit({
-        type: executionMode.includes('simulated_deepseek') ? 'llm.plan.simulated' : 'llm.plan.fallback',
+        type: 'llm.plan.fallback',
         tenantId,
         conversationId,
-        detail: executionMode.includes('simulated_deepseek')
-          ? `Codex simulated ${provider}: ${error.message}`
-          : `${provider} unavailable: ${error.message}`,
+        detail: `${provider} unavailable: ${error.message}`,
         metadata: { provider, model: config.model, simulator: config.simulator },
       });
     }
-    const enriched = enrichPlannerOutput(parsed, text);
+    const coerced = coercePlanWithConversation(parsed, { text, conversation });
+    const enriched = enrichPlannerOutput(coerced, text);
     const plan = {
       schemaVersion: 'ventas-ia-llm-plan.v2',
       provider,
@@ -228,6 +233,15 @@ export class LLMPlanner {
       };
     }
 
+    if (isComplaintOrDeliveryIssue(normalized)) {
+      return {
+        intent: 'human_handoff',
+        recommendedTools: ['human_handoff', 'whatsapp_business_messaging'],
+        missingFields: [],
+        confidence: 0.94,
+      };
+    }
+
     if (containsAny(normalized, ['descuento', 'rebaja', 'rebajita', 'excepcion'])) {
       return {
         intent: 'discount_request',
@@ -272,7 +286,7 @@ export class LLMPlanner {
       if (!customerProfile?.name) missingFields.push('customer_name');
       if (delivery && !customerProfile?.defaultAddress) missingFields.push('delivery_address');
       for (const item of items) {
-        if (!item.quantity) missingFields.push(`quantity:${item.catalogQuery}`);
+        if (!item.quantity && !item.budgetAmount) missingFields.push(`quantity:${item.catalogQuery}`);
         const variants = findPresentationVariants(item, products);
         if (variants.length > 1) {
           item.catalogQuery = item.rawName;
@@ -327,6 +341,7 @@ function extractItems(text, products) {
       return {
         rawName: match.alias,
         quantity: inferQuantity(before),
+        budgetAmount: inferBudgetAmount(before),
         catalogQuery: product.name,
         skuHint: product.sku,
         confidence: 0.92,
@@ -507,6 +522,7 @@ function extractCatalogCandidates(text, products) {
     { terms: ['jamon', 'jamón'], catalogQuery: 'jamon' },
     { terms: ['queso'], catalogQuery: 'queso' },
     { terms: ['pan'], catalogQuery: 'pan' },
+    { terms: ['jugo', 'jugos'], catalogQuery: 'jugo' },
   ];
   for (const concept of concepts) {
     if (!containsAny(text, concept.terms)) continue;
@@ -526,6 +542,11 @@ function inferQuantity(fragment) {
   if (number) return Number(number);
   const word = fragment.split(/\s+/).filter(Boolean).at(-1);
   return NUMBER_WORDS[word] ?? null;
+}
+
+function inferBudgetAmount(fragment) {
+  const match = normalize(fragment).match(/\b(\d{4,7})\s+de\s*$/);
+  return match ? Number(match[1]) : null;
 }
 
 function findPresentationVariants(item, products) {
@@ -569,11 +590,28 @@ function isConfirmation(text) {
 }
 
 function isRemovalRequest(text) {
-  return containsAny(text, ['sin ese', 'sin esa', 'quitale', 'quítale', 'quita', 'no lo mandes', 'no la mandes']);
+  return containsAny(text, ['sin ese', 'sin esa', 'sin el', 'sin la', 'sin los', 'sin las', 'quitale', 'quítale', 'quita', 'no lo mandes', 'no la mandes']);
 }
 
 function isPaymentMethodPreference(text) {
   return containsAny(text, ['pago con tarjeta', 'tarjeta debito', 'tarjeta débito', 'datafono', 'datáfono', 'efectivo', 'nequi', 'daviplata']);
+}
+
+function isComplaintOrDeliveryIssue(text) {
+  return containsAny(text, [
+    'por que me enviaron',
+    'por que llego',
+    'por que no llego',
+    'me enviaron solo',
+    'me llego solo',
+    'me falto',
+    'faltante',
+    'no llego',
+    'llego mal',
+    'producto equivocado',
+    'pedido incompleto',
+    'reclamo',
+  ]);
 }
 
 function inferPaymentMethod(text) {
@@ -638,6 +676,7 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
     'Si un termino parece mal escrito, conserva rawName original y usa catalogQuery con la mejor hipotesis razonada; si no estas seguro, marca confidence bajo y ambiguityReason.',
     'Si el cliente pide "5000 de X", no lo trates como 5000 unidades: usa budgetAmount 5000 y quantity null o 1 segun contexto.',
     'Si el cliente indica forma de pago ("tarjeta debito", "datafono", "efectivo", "Nequi"), registralo como preferencia de pago; no lo clasifiques como pago confirmado sin comprobante.',
+    'Si el cliente reclama un faltante, entrega equivocada, demora, producto danado o pregunta por que llego incompleto, usa human_handoff con contexto operativo.',
     'El identificador del cliente es wa_id; no inventes nombre ni direccion.',
     'Para pedido confirmado completo recomienda google_sheets_order_write, human_handoff y whatsapp_business_messaging.',
     JSON.stringify({
@@ -660,6 +699,7 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
     'Para cada item usa rawName original, catalogQuery inferido, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
     'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
+    'Si el cliente reclama entrega incompleta, producto equivocado, demora o faltante, escala a humano con human_handoff.',
     'Usa google_sheets_read_table para validar cada item; usa query generica razonada cuando haya duda.',
     'Si hay producto ambiguo o presentacion no confirmada, responde con estrategia ask_clarification o handoff: reconoce lo que entendiste, explica la duda sin afirmar disponibilidad y pide nombre/direccion si faltan.',
     'El tono esperado para respuesta al cliente es tendero colombiano amable: claro, breve, cercano, tipo "Claro, veci. Te entiendo..." sin exagerar confianza ni inventar stock.',
@@ -858,6 +898,102 @@ function normalizeProviderPlan(plan) {
   }, customerUnderstanding.rawNeed ?? '');
 }
 
+function coercePlanWithConversation(plan, { text, conversation }) {
+  const normalized = normalize(text);
+  if (isComplaintOrDeliveryIssue(normalized)) {
+    return {
+      ...plan,
+      intent: 'human_handoff',
+      recommendedTools: ['human_handoff', 'whatsapp_business_messaging'],
+      responseStrategy: 'handoff',
+      missingFields: [],
+      confidence: Math.max(Number(plan.confidence ?? 0.8), 0.9),
+    };
+  }
+  if (
+    conversation?.orderDraft &&
+    isPaymentMethodPreference(normalized) &&
+    !isPaymentProofOrConfirmation(normalized)
+  ) {
+    return {
+      ...plan,
+      intent: 'order_clarification',
+      order: {
+        ...conversation.orderDraft,
+        paymentMethod: inferPaymentMethod(normalized),
+      },
+      recommendedTools: ['whatsapp_business_messaging'],
+      missingFields: conversation.orderDraft.missingFields ?? [],
+      responseStrategy: 'quote',
+      confidence: Math.min(Number(plan.confidence ?? 0.8), 0.86),
+    };
+  }
+  const intent = normalizeProviderIntent(plan.intent);
+  if (isAvailabilityOrOptionsQuestion(normalized) && intent === 'delivery_order') {
+    return {
+      ...plan,
+      intent: 'catalog_query',
+      responseStrategy: plan.responseStrategy ?? 'guide',
+      missingFields: [],
+    };
+  }
+  if (intent === 'catalog_query' && looksLikePurchaseRequest(normalized) && planHasConcreteQuantity(plan)) {
+    return {
+      ...plan,
+      intent: 'delivery_order',
+      responseStrategy: plan.responseStrategy === 'guide' ? 'quote' : plan.responseStrategy,
+    };
+  }
+  return plan;
+}
+
+function isPaymentProofOrConfirmation(text) {
+  return containsAny(text, [
+    'comprobante',
+    'transferencia realizada',
+    'ya transferi',
+    'ya transferí',
+    'ya pague',
+    'ya pagué',
+    'pagado',
+    'recibo',
+    'soporte',
+  ]);
+}
+
+function isAvailabilityOrOptionsQuestion(text) {
+  return containsAny(text, [
+    'que tiene',
+    'que tienes',
+    'tiene ',
+    'tienes ',
+    'hay ',
+    'maneja',
+    'manejan',
+    'venden',
+    'consigo',
+  ]);
+}
+
+function looksLikePurchaseRequest(text) {
+  return containsAny(text, [
+    'me regalas',
+    'me regala',
+    'me manda',
+    'mandame',
+    'mándame',
+    'dame',
+    'quiero',
+    'necesito',
+    'para domicilio',
+  ]);
+}
+
+function planHasConcreteQuantity(plan) {
+  const items = plan.order?.items?.length ? plan.order.items : plan.candidateItems;
+  return (items ?? []).some((item) => Number(item.quantity ?? 0) > 0 || Number(item.budgetAmount ?? 0) > 0);
+}
+
 function enrichPlannerOutput(plan, text) {
   const rawOrder = plan.order ?? { delivery: false, items: [] };
   const candidateItems = normalizeCandidateItems(plan.candidateItems);
@@ -886,7 +1022,7 @@ function enrichPlannerOutput(plan, text) {
   };
   return {
     ...plan,
-    reasoningMode: plan.reasoningMode ?? 'shopkeeper_guided_sale',
+    reasoningMode: normalizeReasoningMode(plan.reasoningMode),
     customerUnderstanding,
     candidateItems: enrichedCandidateItems,
     toolPlan: Array.isArray(plan.toolPlan) && plan.toolPlan.length
@@ -931,6 +1067,13 @@ function normalizeProviderIntent(intent) {
   if (containsAny(normalized, ['payment_confirmation', 'pago', 'comprobante'])) return 'payment_confirmation';
   if (containsAny(normalized, ['human_handoff', 'humano', 'asesor'])) return 'human_handoff';
   return 'catalog_query';
+}
+
+function normalizeReasoningMode(value) {
+  const normalized = normalize(value);
+  if (!normalized || normalized === 'shopkeeper_guided_sale') return 'shopkeeper_guided_sale';
+  if (containsAny(normalized, ['shopkeeper', 'tendero', 'tienda', 'heuristic', 'catalog', 'sale', 'venta'])) return 'shopkeeper_guided_sale';
+  return 'shopkeeper_guided_sale';
 }
 
 function normalizeResponseStrategy(strategy) {
@@ -1002,7 +1145,8 @@ function inferPlannerFilters(query) {
   if (normalized === 'queso' || normalized.includes('queso campesino')) return { query: 'queso' };
   if (normalized === 'pan' || normalized.includes('pan tajado')) return { query: 'pan' };
   if (normalized.includes('jamon')) return { query: 'jamon' };
-  if (containsAny(normalized, ['jugo', 'jugos', 'bebida', 'bebidas', 'sed', 'tomar', 'frio', 'fria'])) return { category: 'bebidas' };
+  if (containsAny(normalized, ['jugo', 'jugos'])) return { query: 'jugo' };
+  if (containsAny(normalized, ['bebida', 'bebidas', 'sed', 'tomar', 'frio', 'fria'])) return { category: 'bebidas' };
   if (containsAny(normalized, ['mecato', 'snack', 'snacks', 'dulce', 'antojo', 'galleta', 'papas', 'barato', 'economico', 'economica', 'lonchera', 'refrigerio', 'picar'])) return { category: 'snacks' };
   if (containsAny(normalized, ['cafe', 'cafes', 'tinto', 'tintico'])) return { category: 'cafe' };
   if (containsAny(normalized, ['aseo', 'limpieza', 'jabon', 'shampoo', 'papel'])) return { category: 'aseo' };

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createAppAsync } from '../index.js';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-backend-'));
-const { app, store } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
+const { app, store, events } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
 const server = app.listen(0, '127.0.0.1');
 
 try {
@@ -19,6 +19,63 @@ try {
   const overview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.ok(overview.conversations.length > 0);
   assert.ok(overview.tools.some((tool) => tool.name === 'google_sheets_read_table'));
+
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: 'wa-smoke-decision',
+      customer: 'Caso Decision Smoke',
+      tenantId: 'andina',
+      stage: 'payment',
+      zone: 'payment',
+      status: 'live',
+      value: '$42.000',
+      progress: 72,
+      need: 'Validar una decision humana creada por evento critico.',
+      nextStep: 'Esperar aprobacion humana antes de registrar.',
+      humanReason: '',
+      lastTool: 'transactional_write',
+      avatar: 'DS',
+      path: ['whatsapp', 'agent', 'payment'],
+      messages: [],
+    });
+  });
+  const decisionEvent = events.emit({
+    type: 'decision.requested',
+    tenantId: 'andina',
+    conversationId: 'wa-smoke-decision',
+    detail: 'Registrar escritura transaccional del pedido',
+  });
+  const linkedDecisionRequests = store.getState().pendingRequests.filter((request) => (
+    request.conversationId === 'wa-smoke-decision' && request.type === 'decision.requested' && request.status === 'pending'
+  ));
+  assert.equal(linkedDecisionRequests.length, 1);
+  assert.equal(decisionEvent.metadata.requestId, linkedDecisionRequests[0].id);
+  assert.equal(decisionEvent.metadata.autoLinkedHumanRequest, true);
+  events.emit({
+    type: 'decision.requested',
+    tenantId: 'andina',
+    conversationId: 'wa-smoke-decision',
+    detail: 'Registrar escritura transaccional del pedido',
+  });
+  const dedupedDecisionRequests = store.getState().pendingRequests.filter((request) => (
+    request.conversationId === 'wa-smoke-decision' && request.type === 'decision.requested' && request.status === 'pending'
+  ));
+  assert.equal(dedupedDecisionRequests.length, 1);
+  const decisionConversation = store.getState().conversations.find((conversation) => conversation.id === 'wa-smoke-decision');
+  assert.equal(decisionConversation.status, 'approval_required');
+  assert.equal(decisionConversation.zone, 'approval');
+  store.mutate((state) => {
+    const request = state.pendingRequests.find((item) => item.id === linkedDecisionRequests[0].id);
+    request.contextSnapshot = { customerWaId: '573001119900' };
+  });
+  const resolvedDecisionFallback = await postJson(`${base}/api/pending-requests/${encodeURIComponent(linkedDecisionRequests[0].id)}/resolve`, {
+    outcome: 'approved',
+    note: 'Listo, ya lo revisa la tienda.',
+    approverId: 'smoke-operator',
+    responseMode: 'whatsapp',
+  });
+  assert.equal(resolvedDecisionFallback.customerReply.mode, 'whatsapp');
+  assert.equal(resolvedDecisionFallback.customerReply.deliveryStatus, 'mock_accepted');
 
   const run = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -181,6 +238,18 @@ try {
 
   const pending = await getJson(`${base}/api/pending-requests?tenantId=andina`);
   assert.ok(pending.some((request) => request.type === 'human_handoff'));
+  const handoffRequest = pending.find((request) => request.type === 'human_handoff');
+  const humanReply = 'Claro, lo valida la tienda y te confirmamos por este mismo WhatsApp.';
+  const resolvedHandoff = await postJson(`${base}/api/pending-requests/${encodeURIComponent(handoffRequest.id)}/resolve`, {
+    outcome: 'approved',
+    note: humanReply,
+    approverId: 'smoke-operator',
+    responseMode: 'whatsapp',
+  });
+  assert.equal(resolvedHandoff.status, 'resolved');
+  assert.equal(resolvedHandoff.customerReply.mode, 'whatsapp');
+  const handoffConversation = store.getState().conversations.find((conversation) => conversation.id === handoffRequest.conversationId);
+  assert.ok(handoffConversation.messages.some((message) => message.role === 'human' && message.text === humanReply));
 
   const verify = await fetch(`${base}/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=dev-verify-token&hub.challenge=abc123`);
   assert.equal(await verify.text(), 'abc123');
@@ -220,6 +289,7 @@ try {
   assert.equal(billingStatusBeforeCheckout.plan.includedDeliveries, 1000);
   assert.equal(billingStatusBeforeCheckout.plan.includedInteractions, 5000);
   assert.equal(billingStatusBeforeCheckout.actions.canStartCheckout, true);
+  assert.ok(billingStatusBeforeCheckout.notices.some((notice) => notice.key === 'checkout_expired_or_missing'));
 
   const previousMercadoPagoSecret = process.env.MERCADOPAGO_WEBHOOK_SECRET;
   process.env.MERCADOPAGO_WEBHOOK_SECRET = 'mp-webhook-test-secret';
@@ -356,12 +426,27 @@ try {
     reason: 'Piloto comercial',
   }, { expectedStatus: 201 });
   assert.equal(discount.status, 'active');
+  const discounts = await getJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/discounts`);
+  assert.ok(discounts.discounts.some((item) => item.id === discount.id));
 
   const exception = await postJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/exceptions`, {
     reason: 'Soporte piloto',
     expiresAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
   }, { expectedStatus: 201 });
   assert.equal(exception.status, 'active');
+  const exceptions = await getJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/exceptions`);
+  assert.ok(exceptions.exceptions.some((item) => item.id === exception.id));
+
+  const billingStatusWithCommercialAdjustments = await getJson(`${base}/api/billing/status?tenantId=${createdTenant.tenant.id}`);
+  assert.equal(billingStatusWithCommercialAdjustments.activeDiscounts.length, 1);
+  assert.equal(billingStatusWithCommercialAdjustments.activeAccessExceptions.length, 1);
+  assert.ok(billingStatusWithCommercialAdjustments.notices.some((notice) => notice.key === 'discount_active'));
+  assert.ok(billingStatusWithCommercialAdjustments.notices.some((notice) => notice.key === 'access_exception_active'));
+
+  const revokedDiscount = await patchJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/discounts/${discount.id}/revoke`, {});
+  assert.equal(revokedDiscount.status, 'revoked');
+  const revokedException = await patchJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/exceptions/${exception.id}/revoke`, {});
+  assert.equal(revokedException.status, 'revoked');
 
   const blockedRun = await postJson(`${base}/api/agent/run`, {
     tenantId: createdTenant.tenant.id,
@@ -370,6 +455,12 @@ try {
     text: 'tienes chocoramo?',
   }, { expectedStatus: 402 });
   assert.equal(blockedRun.code, 'tenant_not_operational');
+  const blockedGoogleSetup = await getJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/oauth/start`, { expectedStatus: 402 });
+  assert.equal(blockedGoogleSetup.code, 'subscription_required_for_setup');
+  const blockedWhatsAppBinding = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/whatsapp/binding`, {
+    phoneNumberId: 'blocked-before-payment',
+  }, { expectedStatus: 402 });
+  assert.equal(blockedWhatsAppBinding.code, 'subscription_required_for_setup');
 
   const checkout = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/subscription/checkout`, {
     payerEmail: 'dueno@example.com',
@@ -377,6 +468,9 @@ try {
   assert.equal(checkout.mode, 'sandbox_contract');
   assert.equal(checkout.subscription.status, 'pending_payment');
   assert.ok(checkout.subscription.checkoutExpiresAt);
+  const billingStatusWithCheckout = await getJson(`${base}/api/billing/status?tenantId=${createdTenant.tenant.id}`);
+  assert.equal(billingStatusWithCheckout.checkoutRecovery.recoverable, true);
+  assert.ok(billingStatusWithCheckout.notices.some((notice) => notice.key === 'checkout_pending'));
 
   const continuedCheckout = await postJson(`${base}/api/billing/continue-checkout`, {
     tenantId: createdTenant.tenant.id,
@@ -388,6 +482,39 @@ try {
   const subscription = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/subscription/mock-activate`, {});
   assert.equal(subscription.subscription.status, 'active');
   assert.ok(subscription.subscription.currentPeriodEnd);
+
+  const upgradePlan = await postJson(`${base}/api/admin/billing/plans`, {
+    name: 'Plan Upgrade Smoke',
+    amount: 189000,
+    includedDeliveries: 3000,
+    includedInteractions: 12000,
+    isActive: true,
+  }, { expectedStatus: 201 });
+  const upgradedSubscription = await postJson(`${base}/api/billing/change-plan`, {
+    tenantId: createdTenant.tenant.id,
+    planId: upgradePlan.id,
+    direction: 'upgrade',
+  });
+  assert.equal(upgradedSubscription.appliesImmediately, true);
+  assert.equal(upgradedSubscription.subscription.planId, upgradePlan.id);
+  assert.equal(upgradedSubscription.subscription.pendingPlanChange, null);
+
+  const downgradedSubscription = await postJson(`${base}/api/billing/change-plan`, {
+    tenantId: createdTenant.tenant.id,
+    planId: 'ventas_ia_1000_domicilios',
+    direction: 'downgrade',
+  });
+  assert.equal(downgradedSubscription.appliesImmediately, false);
+  assert.equal(downgradedSubscription.subscription.planId, upgradePlan.id);
+  assert.equal(downgradedSubscription.subscription.pendingPlanChange.planId, 'ventas_ia_1000_domicilios');
+  assert.equal(downgradedSubscription.noRefunds, true);
+
+  const cancelledSubscription = await postJson(`${base}/api/billing/cancel`, {
+    tenantId: createdTenant.tenant.id,
+    reason: 'smoke_test_cancel_at_period_end',
+  });
+  assert.equal(cancelledSubscription.subscription.cancelAtPeriodEnd, true);
+  assert.ok(cancelledSubscription.accessUntil);
 
   const payments = await getJson(`${base}/api/billing/payments?tenantId=${createdTenant.tenant.id}`);
   assert.ok(payments.payments.some((payment) => payment.status === 'approved'));
@@ -408,6 +535,11 @@ try {
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Catalogo'));
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Clientes'));
   assert.ok(provision.workspace.spreadsheet.sheets.some((sheet) => sheet.name === 'Pedidos'));
+
+  const googleReadyOverview = await getJson(`${base}/api/ops/overview?tenantId=${createdTenant.tenant.id}`);
+  const googleTools = googleReadyOverview.tools.filter((tool) => tool.name.startsWith('google_'));
+  assert.ok(googleTools.length >= 4);
+  assert.ok(googleTools.every((tool) => ['sandbox_ready', 'production_ready'].includes(tool.status)));
 
   const validationBeforeWhatsapp = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/validate`, {});
   assert.equal(validationBeforeWhatsapp.readyForActivation, false);
@@ -439,6 +571,12 @@ try {
   assert.equal(whatsappBinding.tenant.config.whatsapp.phoneNumberId, '200000000001');
   assert.equal(whatsappBinding.whatsappOnboarding.status, 'connected');
 
+  const whatsappReadyOverview = await getJson(`${base}/api/ops/overview?tenantId=${createdTenant.tenant.id}`);
+  assert.equal(
+    whatsappReadyOverview.tools.find((tool) => tool.name === 'whatsapp_business_messaging')?.status,
+    'production_ready',
+  );
+
   const validation = await postJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/validate`, {});
   assert.equal(validation.readyForActivation, true);
 
@@ -468,6 +606,7 @@ try {
     'tool.google_sheets_order_write',
     'tool.human_handoff.created',
     'tool.whatsapp_business_messaging.sent',
+    'human_response.whatsapp_sent',
   ]) {
     assert.ok(auditActions.has(action), `missing audit action ${action}`);
   }
@@ -479,10 +618,12 @@ try {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-async function getJson(url) {
+async function getJson(url, { expectedStatus = 200 } = {}) {
   const response = await fetch(url);
-  assert.equal(response.ok, true, `${url} returned ${response.status}`);
-  return response.json();
+  const text = await response.text();
+  assert.equal(response.status, expectedStatus, `${url} returned ${response.status}: ${text}`);
+  if (!text) return {};
+  return JSON.parse(text);
 }
 
 async function postJson(url, body, { expectedStatus = 200, headers = {} } = {}) {

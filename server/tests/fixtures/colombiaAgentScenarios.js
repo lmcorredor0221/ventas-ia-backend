@@ -477,6 +477,194 @@ export const colombiaAgentScenarioSet = [
       },
     ],
   },
+  {
+    id: 'real_supermarket_saludo_solo_domicilio',
+    level: 'chat_real_rafaga',
+    customer: 'known',
+    text: 'Buenas noches para un domicilio',
+    expect: {
+      intent: 'delivery_order',
+      missingFields: ['order_items'],
+      replyIncludes: ['que productos quieres pedir'],
+    },
+  },
+  {
+    id: 'real_supermarket_pago_tarjeta_es_preferencia',
+    level: 'chat_real_pago',
+    customer: 'known',
+    steps: [
+      {
+        text: 'Me regalas 3 chocorramos para domicilio',
+        expect: {
+          intent: 'delivery_order',
+          missingFields: [],
+          replyIncludes: ['3 x Chocoramo', 'Confirmas el pedido'],
+        },
+      },
+      {
+        text: 'Pago con tarjeta débito',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'card_terminal',
+          replyIncludes: ['3 x Chocoramo', 'Confirmas el pedido'],
+        },
+      },
+    ],
+  },
+  {
+    id: 'real_supermarket_correccion_sin_producto',
+    level: 'chat_real_correccion',
+    customer: 'known',
+    steps: [
+      {
+        text: 'Me regalas 2 chocorramos y 1 agua cristal para domicilio',
+        expect: {
+          intent: 'delivery_order',
+          missingFields: [],
+          replyIncludes: ['2 x Chocoramo', '1 x Agua Cristal sin gas 600ml'],
+        },
+      },
+      {
+        text: 'Bueno entonces sin el agua',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          replyIncludes: ['2 x Chocoramo'],
+          notReplyIncludes: ['Agua Cristal'],
+          orderItems: ['Chocoramo'],
+          notOrderItems: ['Agua Cristal sin gas 600ml'],
+        },
+      },
+    ],
+  },
+  {
+    id: 'real_supermarket_agrega_producto_a_canasta',
+    level: 'chat_real_correccion',
+    customer: 'known',
+    steps: [
+      {
+        text: 'Me regalas 1 pan tajado para domicilio',
+        expect: {
+          intent: 'delivery_order',
+          missingFields: [],
+          replyIncludes: ['1 x Pan tajado Bimbo'],
+        },
+      },
+      {
+        text: 'Y agregame 1 queso campesino',
+        expect: {
+          intent: 'delivery_order',
+          missingFields: [],
+          replyIncludes: ['1 x Pan tajado Bimbo', '1 x Queso campesino 250g'],
+          orderItems: ['Pan tajado Bimbo', 'Queso campesino 250g'],
+        },
+      },
+    ],
+  },
+  {
+    id: 'real_supermarket_valor_calchichon_coca',
+    level: 'chat_real_inferencia',
+    customer: 'known',
+    extraProducts: [
+      {
+        sku: 'AND-CAR-SAL-250',
+        name: 'Salchichon Zenú porcionado',
+        aliases: ['salchichon', 'salchichón', 'calchichon', 'carnes frias'],
+        price: 5000,
+        stock: 10,
+        category: 'carnes frias',
+        presentation: 'porcion al peso',
+        driveFileId: 'drv-and-car-sal-250',
+      },
+      {
+        sku: 'AND-COC-350',
+        name: 'Coca-Cola 350ml',
+        aliases: ['coca cola 350', 'coca-cola 350', 'coca 350'],
+        price: 3200,
+        stock: 16,
+        category: 'bebidas',
+        presentation: '350 ml',
+        driveFileId: 'drv-and-coc-350',
+      },
+    ],
+    text: 'Buenas tardes, para un domicilio, me regalas favor 5000 de calchichon y una coca-cola 350',
+    expect: {
+      intent: 'delivery_order',
+      missingFields: [],
+      replyIncludes: ['Salchichon Zenú porcionado', '1 x Coca-Cola 350ml', 'Confirmas el pedido'],
+      orderItems: ['Salchichon Zenú porcionado', 'Coca-Cola 350ml'],
+    },
+  },
+  {
+    id: 'real_supermarket_foto_producto_handoff',
+    level: 'chat_real_multimedia',
+    customer: 'known',
+    messageType: 'image',
+    mediaRef: 'media-producto-real-1',
+    text: '',
+    expect: {
+      intent: 'catalog_query',
+      summary: 'Human handoff requested',
+      replyIncludes: ['Recibimos tu imagen', 'asesor'],
+    },
+  },
+  {
+    id: 'real_supermarket_reclamo_faltante_handoff',
+    level: 'chat_real_reclamo',
+    customer: 'known',
+    text: 'Por que me enviaron solo un jugo Cfrut?',
+    expect: {
+      intent: 'human_handoff',
+      summary: 'Human handoff requested',
+      replyIncludes: ['Te conecto con un asesor'],
+    },
+  },
+  {
+    id: 'real_supermarket_comprobante_pago_aprobacion',
+    level: 'chat_real_pago',
+    customer: 'known',
+    text: 'Ya hice la transferencia y te mando comprobante',
+    expect: {
+      intent: 'payment_confirmation',
+      summary: 'Payment write approval requested',
+    },
+  },
+  {
+    id: 'real_supermarket_no_hay_ponque_escalamiento',
+    level: 'chat_real_disponibilidad_parcial',
+    customer: 'known',
+    text: 'Me regalas 3 chocorramos y ponque ramo mora para domicilio',
+    expect: {
+      intent: 'delivery_order',
+      summary: 'Structured order escalated to human',
+      replyIncludes: ['3 Chocoramo', 'validación con la tienda'],
+    },
+  },
+  {
+    id: 'real_supermarket_confirmacion_solo_eso',
+    level: 'chat_real_cierre',
+    customer: 'known',
+    steps: [
+      {
+        text: 'Me regalas 1 yogurt alpina fresa para domicilio',
+        expect: {
+          intent: 'delivery_order',
+          missingFields: [],
+          replyIncludes: ['1 x Yogurt Alpina fresa', 'Confirmas el pedido'],
+        },
+      },
+      {
+        text: 'Si veci, solo eso',
+        expect: {
+          intent: 'order_confirmation',
+          summary: 'Confirmed order registered and handed off',
+          replyIncludes: ['Pedido confirmado y registrado', 'Referencia:'],
+          orderId: true,
+        },
+      },
+    ],
+  },
 ];
 
 export const colombianIdiomResearch = [

@@ -9,8 +9,12 @@
     "test": "npm run test:backend",
     "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs",
     "test:colombia": "node server/tests/colombia-scenarios.mjs",
+    "test:codex-cli": "node server/tests/codex-cli-scenarios.mjs",
+    "test:deepseek-real": "node scripts/run-with-env.mjs .env.google.local node server/tests/deepseek-real-scenarios.mjs",
+    "test:mercadopago-sandbox": "node scripts/run-with-env.mjs .env.google.local node server/tests/mercadopago-sandbox.mjs",
     "test:postgres": "node server/tests/postgres-smoke.mjs",
-    "test:postgres:google": "node scripts/run-with-env.mjs .env.google.local AUTH_REQUIRED=false CSRF_REQUIRED=false node server/tests/postgres-smoke.mjs"
+    "test:postgres:google": "node scripts/run-with-env.mjs .env.google.local AUTH_REQUIRED=false CSRF_REQUIRED=false node server/tests/postgres-smoke.mjs",
+    "billing:maintenance": "node scripts/run-with-env.mjs .env.google.local node scripts/run-billing-maintenance.mjs"
   },
   "dependencies": {
     "cors": "^2.8.6",

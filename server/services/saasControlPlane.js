@@ -96,7 +96,7 @@ export class SaasControlPlane {
       recordFunnelEvent(state, { tenantId, stage: 'account_created', actorId: actor?.id ?? null, payload: { ownerEmail } });
     });
     this.persistTenantCritical(tenantId);
-    this.events.emit({ type: 'tenant.created', tenantId, detail: `Tenant creado para ${storeName}`, metadata: { ownerEmail } });
+    this.events.emit({ type: 'tenant.created', tenantId, detail: `Cliente creado para ${storeName}`, metadata: { ownerEmail } });
     this.audit(tenantId, 'tenant.create', 'tenant', { ownerEmail, actorId: actor?.id, source: actor ? 'authenticated_user' : 'system' });
     return this.getTenantBundle(tenantId);
   }
@@ -227,7 +227,7 @@ export class SaasControlPlane {
     this.patchTenantLifecycle(tenantId, { subscriptionStatus: 'active' });
     this.completeOnboardingStep(tenantId, 'subscription');
     this.recordBillingFunnel(tenantId, 'payment_confirmed', { mode: 'mock' });
-    this.events.emit({ type: 'subscription.activated', tenantId, detail: 'Suscripcion activada en modo sandbox' });
+    this.events.emit({ type: 'subscription.activated', tenantId, detail: 'Suscripcion activada para prueba local' });
     this.audit(tenantId, 'subscription.activated', 'subscription', { mode: 'mock', status: subscription.status });
     return { subscription, status: this.getOnboardingStatus(tenantId) };
   }
@@ -317,6 +317,7 @@ export class SaasControlPlane {
 
   beginGoogleOAuth(tenantId, { loginHint } = {}) {
     const tenant = this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'google_oauth');
     const state = crypto.randomBytes(24).toString('hex');
     const redirectUri = this.googleRedirectUri();
     const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -364,6 +365,7 @@ export class SaasControlPlane {
   async completeGoogleOAuth({ state, code, mockAccountEmail }) {
     const oauthState = this.consumeOAuthState(state);
     const tenantId = oauthState.tenantId;
+    this.requireActiveSubscriptionForSetup(tenantId, 'google_oauth');
     const hasLiveCredentials = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
     let tokenPayload = null;
     let accountEmail = mockAccountEmail ?? oauthState.loginHint;
@@ -436,6 +438,7 @@ export class SaasControlPlane {
 
   async provisionGoogleWorkspace(tenantId) {
     const tenant = this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'google_provisioning');
     const connection = this.store.getState().googleConnectionsByTenant[tenantId];
     if (!connection?.status) {
       const error = new Error('Google OAuth must be connected before provisioning');
@@ -548,7 +551,7 @@ export class SaasControlPlane {
     this.persistTenantCritical(tenantId);
     this.completeOnboardingStep(tenantId, 'activation');
     this.recordBillingFunnel(tenantId, 'store_activated', { readyForOperation: true });
-    this.events.emit({ type: 'tenant.activated', tenantId, detail: 'Tenant activado para operar' });
+    this.events.emit({ type: 'tenant.activated', tenantId, detail: 'Cliente activado para operar' });
     this.audit(tenantId, 'tenant.activated', 'tenant', { readyForOperation: true });
     return this.getTenantBundle(tenantId);
   }
@@ -558,6 +561,11 @@ export class SaasControlPlane {
     if (!tenant.config?.saas?.enforceEntitlement) return tenant;
     const status = this.getOnboardingStatus(tenantId);
     if (status.readyForOperation) return tenant;
+    const exceptionActive = activeItemsForTenant(this.store.getState().billingAccessExceptions, tenantId, 'expiresAt').length > 0;
+    const nonBillingReady = status.checks
+      .filter((check) => check.key !== 'subscription')
+      .every((check) => check.ok) && tenant.lifecycle?.activationStatus === 'active';
+    if (exceptionActive && nonBillingReady) return tenant;
     const error = new Error('Tenant is not operational');
     error.statusCode = ACTIVE_SUBSCRIPTION_STATUSES.has(status.subscription?.status) ? 428 : 402;
     error.code = 'tenant_not_operational';
@@ -618,13 +626,26 @@ export class SaasControlPlane {
     const payments = state.subscriptionPaymentsByTenant?.[tenantId] ?? [];
     const usageCycle = this.ensureCurrentUsageCycle(tenantId);
     const checkoutRecoverable = isCheckoutRecoverable(subscription);
+    const discounts = activeItemsForTenant(state.billingDiscounts, tenantId, 'endsAt');
+    const accessExceptions = activeItemsForTenant(state.billingAccessExceptions, tenantId, 'expiresAt');
+    const notices = billingNotices({ subscription, plan, payments, usageCycle, checkoutRecoverable, discounts, accessExceptions });
     return {
       tenantId,
       tenantName: tenant.name,
       subscription,
       plan: publicPlan(plan),
       payments,
+      paymentHistory: payments.map(publicPayment),
       usageCycle,
+      notices,
+      checkoutRecovery: {
+        recoverable: checkoutRecoverable,
+        checkoutUrl: checkoutRecoverable ? subscription.checkoutUrl : null,
+        expiresAt: subscription.checkoutExpiresAt ?? null,
+        daysRemaining: daysRemaining(subscription.checkoutExpiresAt),
+      },
+      activeDiscounts: discounts,
+      activeAccessExceptions: accessExceptions,
       limits: {
         includedDeliveries: plan.includedDeliveries,
         includedInteractions: plan.includedInteractions,
@@ -640,7 +661,7 @@ export class SaasControlPlane {
 
   getPaymentHistory(tenantId) {
     this.requireTenant(tenantId);
-    return this.store.getState().subscriptionPaymentsByTenant?.[tenantId] ?? [];
+    return (this.store.getState().subscriptionPaymentsByTenant?.[tenantId] ?? []).map(publicPayment);
   }
 
   cancelSubscription(tenantId, { reason = 'owner_requested' } = {}, { actor } = {}) {
@@ -691,20 +712,64 @@ export class SaasControlPlane {
     return { subscription: nextSubscription, plan: publicPlan(plan), appliesImmediately: upgrade, noRefunds: true };
   }
 
-  syncMercadoPagoSubscription(tenantId, { actor } = {}) {
+  async syncMercadoPagoSubscription(tenantId, { actor, force = false } = {}) {
     const subscription = this.ensureSubscription(tenantId, actor?.email);
     const before = subscription.status;
+    const now = new Date().toISOString();
+    const lastManualSyncAt = subscription.lastManualSyncAt ?? subscription.lastSyncAt;
+    if (!force && lastManualSyncAt && Date.now() - new Date(lastManualSyncAt).getTime() < 60_000) {
+      const error = new Error('Mercado Pago sync is rate limited');
+      error.statusCode = 429;
+      error.code = 'mercadopago_sync_rate_limited';
+      error.retryAfterSeconds = Math.ceil((60_000 - (Date.now() - new Date(lastManualSyncAt).getTime())) / 1000);
+      throw error;
+    }
+
+    const accessToken = process.env.MERCADOPAGO_ACCESS_TOKEN;
+    const preapprovalId = subscription.mercadoPagoPreapprovalId ?? subscription.mercadopagoPreapprovalId;
+    let providerResource = null;
+    let checkedProvider = false;
+    let providerMode = accessToken ? 'live_ready' : 'local_contract';
+    let syncMode = providerMode;
+
+    if (accessToken && preapprovalId) {
+      checkedProvider = true;
+      providerResource = await fetchMercadoPagoPreapproval(preapprovalId, accessToken);
+      const normalizedStatus = normalizeSubscriptionStatus(providerResource.status);
+      providerMode = 'live';
+      syncMode = 'live_provider_checked';
+      this.updateSubscriptionFromMercadoPagoResource(tenantId, providerResource, {
+        now,
+        actor,
+        source: 'manual_sync',
+      });
+    } else if (accessToken) {
+      syncMode = 'live_ready_missing_preapproval';
+    }
+
     const synced = this.updateSubscription(tenantId, {
-      lastSyncAt: new Date().toISOString(),
-      syncMode: process.env.MERCADOPAGO_ACCESS_TOKEN ? 'live_ready' : 'local_contract',
+      lastSyncAt: now,
+      lastManualSyncAt: now,
+      syncMode,
+      providerMode: providerMode === 'live' ? 'live' : subscription.providerMode,
     });
     this.audit(tenantId, 'subscription.sync.requested', 'subscription', {
       actorId: actor?.id,
       statusBefore: before,
       statusAfter: synced.status,
       providerMode: synced.syncMode,
+      checkedProvider,
+      preapprovalId: preapprovalId ?? null,
     });
-    return { subscription: synced, statusBefore: before, statusAfter: synced.status };
+    return {
+      subscription: synced,
+      statusBefore: before,
+      statusAfter: synced.status,
+      providerMode: synced.syncMode,
+      checkedProvider,
+      preapprovalId: preapprovalId ?? null,
+      providerStatus: providerResource?.status ?? null,
+    };
   }
 
   runBillingMaintenance({ now = new Date().toISOString(), actor } = {}) {
@@ -855,6 +920,34 @@ export class SaasControlPlane {
     return discount;
   }
 
+  listBillingDiscounts(tenantId) {
+    if (tenantId) this.requireTenant(tenantId);
+    return (this.store.getState().billingDiscounts ?? [])
+      .filter((item) => !tenantId || item.tenantId === tenantId)
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+  }
+
+  revokeBillingDiscount(tenantId, discountId, { actor } = {}) {
+    this.requireTenant(tenantId);
+    const now = new Date().toISOString();
+    let discount;
+    this.store.mutate((state) => {
+      discount = (state.billingDiscounts ?? []).find((item) => item.tenantId === tenantId && item.id === discountId);
+      if (!discount) return;
+      discount.status = 'revoked';
+      discount.revokedAt = now;
+      discount.revokedBy = actor?.id ?? 'admin';
+      discount.updatedAt = now;
+    });
+    if (!discount) {
+      const error = new Error(`Billing discount not found: ${discountId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    this.audit(tenantId, 'billing.discount.revoked', 'billing_discount', { discountId, actorId: actor?.id });
+    return discount;
+  }
+
   createBillingAccessException(tenantId, payload, { actor } = {}) {
     this.requireTenant(tenantId);
     const now = new Date().toISOString();
@@ -882,6 +975,34 @@ export class SaasControlPlane {
       actorId: actor?.id,
       expiresAt: exception.expiresAt,
     });
+    return exception;
+  }
+
+  listBillingAccessExceptions(tenantId) {
+    if (tenantId) this.requireTenant(tenantId);
+    return (this.store.getState().billingAccessExceptions ?? [])
+      .filter((item) => !tenantId || item.tenantId === tenantId)
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')));
+  }
+
+  revokeBillingAccessException(tenantId, exceptionId, { actor } = {}) {
+    this.requireTenant(tenantId);
+    const now = new Date().toISOString();
+    let exception;
+    this.store.mutate((state) => {
+      exception = (state.billingAccessExceptions ?? []).find((item) => item.tenantId === tenantId && item.id === exceptionId);
+      if (!exception) return;
+      exception.status = 'revoked';
+      exception.revokedAt = now;
+      exception.revokedBy = actor?.id ?? 'admin';
+      exception.updatedAt = now;
+    });
+    if (!exception) {
+      const error = new Error(`Billing access exception not found: ${exceptionId}`);
+      error.statusCode = 404;
+      throw error;
+    }
+    this.audit(tenantId, 'billing.access_exception.revoked', 'billing_access_exception', { exceptionId, actorId: actor?.id });
     return exception;
   }
 
@@ -959,6 +1080,7 @@ export class SaasControlPlane {
 
   startWhatsAppEmbeddedSignup(tenantId) {
     this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_setup');
     const status = this.getWhatsAppOnboarding(tenantId);
     const now = new Date().toISOString();
     this.store.mutate((state) => {
@@ -1009,6 +1131,7 @@ export class SaasControlPlane {
 
   saveWhatsAppBinding(tenantId, payload = {}) {
     const tenant = this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_binding');
     const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
     if (!phoneNumberId) {
       const error = new Error('phoneNumberId is required');
@@ -1044,7 +1167,7 @@ export class SaasControlPlane {
     this.persistTenantCritical(tenantId);
     this.completeOnboardingStep(tenantId, 'whatsapp');
     this.recordBillingFunnel(tenantId, 'whatsapp_configured', { phoneNumberId });
-    this.events.emit({ type: 'whatsapp.connection.bound', tenantId, detail: 'WhatsApp conectado al tenant', metadata: { phoneNumberId } });
+    this.events.emit({ type: 'whatsapp.connection.bound', tenantId, detail: 'WhatsApp conectado a la tienda', metadata: { phoneNumberId } });
     this.audit(tenantId, 'whatsapp.connection.bound', 'whatsapp_connection', {
       phoneNumberId,
       wabaId: payload.wabaId ?? null,
@@ -1066,10 +1189,10 @@ export class SaasControlPlane {
     const googleWorkspace = state.googleWorkspacesByTenant[tenantId] ?? null;
     const checks = [
       { key: 'subscription', label: 'Suscripcion activa en Mercado Pago', ok: ACTIVE_SUBSCRIPTION_STATUSES.has(subscription?.status), detail: subscription?.status ?? 'missing' },
-      { key: 'google_oauth', label: 'OAuth Google conectado', ok: googleConnection?.status === 'connected', detail: googleConnection?.accountEmail ?? 'missing' },
+      { key: 'google_oauth', label: 'Google conectado', ok: googleConnection?.status === 'connected', detail: googleConnection?.accountEmail ?? 'missing' },
       { key: 'google_provisioning', label: 'Drive y Sheets aprovisionados', ok: googleWorkspace?.status === 'provisioned', detail: googleWorkspace?.spreadsheet?.id ?? 'missing' },
       { key: 'llm', label: 'DeepSeek global de plataforma', ok: platformLlmConfig(state).provider === 'deepseek' && Boolean(platformLlmConfig(state).apiKeyRef), detail: platformLlmConfig(state).model ?? 'missing' },
-      { key: 'whatsapp', label: 'WhatsApp separado por tenant', ok: Boolean(tenant.config?.whatsapp?.phoneNumberId), detail: tenant.config?.whatsapp?.phoneNumberId ?? 'missing' },
+      { key: 'whatsapp', label: 'WhatsApp separado por tienda', ok: Boolean(tenant.config?.whatsapp?.phoneNumberId), detail: tenant.config?.whatsapp?.phoneNumberId ? 'Número conectado' : 'missing' },
     ];
     const readyForActivation = checks.every((item) => item.ok);
     const readyForOperation = readyForActivation && tenant.lifecycle?.activationStatus === 'active' && tenant.lifecycle?.access === 'active';
@@ -1121,6 +1244,63 @@ export class SaasControlPlane {
     });
     this.persistTenantCritical(tenantId);
     return subscription;
+  }
+
+  updateSubscriptionFromMercadoPagoResource(tenantId, resource, { now = new Date().toISOString(), actor, source = 'provider' } = {}) {
+    const previous = this.ensureSubscription(tenantId, actor?.email);
+    const normalizedStatus = normalizeSubscriptionStatus(resource.status);
+    const plan = planById(this.store.getState(), previous.planId) ?? defaultPlan(this.store.getState());
+    const patch = {
+      status: normalizedStatus,
+      rawStatus: resource.status,
+      providerMode: 'live',
+      mercadoPagoPreapprovalId: resource.id ?? previous.mercadoPagoPreapprovalId,
+      checkoutUrl: resource.init_point ?? resource.sandbox_init_point ?? previous.checkoutUrl,
+      amount: resource.transaction_amount ?? resource.auto_recurring?.transaction_amount ?? previous.amount ?? plan.amount,
+      currency: resource.currency_id ?? previous.currency ?? plan.currency,
+    };
+    const shouldRecordPayment = ACTIVE_SUBSCRIPTION_STATUSES.has(normalizedStatus)
+      && (!ACTIVE_SUBSCRIPTION_STATUSES.has(previous.status) || (previous.currentPeriodEnd && isOnOrBefore(previous.currentPeriodEnd, now)));
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(normalizedStatus)) {
+      patch.activatedAt = previous.activatedAt ?? now;
+      patch.currentPeriodStart = previous.currentPeriodStart ?? now;
+      patch.currentPeriodEnd = previous.currentPeriodEnd ?? addMonths(patch.currentPeriodStart, 1);
+      patch.nextBillingDate = previous.nextBillingDate ?? patch.currentPeriodEnd;
+      patch.graceStartedAt = null;
+      patch.graceEndsAt = null;
+      patch.suspendedAt = null;
+      patch.reactivatedAt = previous.activatedAt ? now : previous.reactivatedAt;
+    }
+    const subscription = this.updateSubscription(tenantId, patch);
+    this.patchTenantLifecycle(tenantId, { subscriptionStatus: normalizedStatus });
+    if (shouldRecordPayment) {
+      this.recordPayment(tenantId, {
+        status: 'approved',
+        amount: subscription.amount ?? plan.amount,
+        currency: subscription.currency ?? plan.currency,
+        paidAt: now,
+        externalReference: tenantId,
+        mercadopagoPreapprovalId: resource.id ?? previous.mercadoPagoPreapprovalId,
+        rawStatusDetail: `${source}:${resource.status}`,
+      });
+      this.ensureCurrentUsageCycle(tenantId);
+      this.completeOnboardingStep(tenantId, 'subscription');
+      this.recordBillingFunnel(tenantId, 'payment_confirmed', { source, preapprovalId: resource.id ?? null });
+    }
+    if (BLOCKED_SUBSCRIPTION_STATUSES.has(normalizedStatus)) {
+      this.patchTenant(tenantId, { status: 'subscription_blocked' });
+    }
+    return subscription;
+  }
+
+  requireActiveSubscriptionForSetup(tenantId, step) {
+    const subscription = this.ensureSubscription(tenantId);
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) return subscription;
+    const error = new Error('Active subscription is required before operational setup');
+    error.statusCode = 402;
+    error.code = 'subscription_required_for_setup';
+    error.status = { tenantId, step, subscriptionStatus: subscription.status };
+    throw error;
   }
 
   recordPayment(tenantId, payment) {
@@ -1456,19 +1636,19 @@ function whatsappRequirementsForPath(setupPath) {
   if (setupPath === 'cloud_api_existing') {
     return [
       'Acceso admin al negocio Meta del cliente',
-      'WABA existente o permiso para seleccionarla',
-      'phone_number_id, token permanente y webhook verify token',
+      'Cuenta WhatsApp existente o permiso para seleccionarla',
+      'Identificador del número, acceso permanente y referencia de verificación',
     ];
   }
   if (setupPath === 'new_business') {
     return [
       'Crear o confirmar Business Manager del cliente',
       'Tener numero disponible para OTP y nombre visible de la tienda',
-      'Completar verificacion y registrar numero en Cloud API',
+      'Completar verificacion y registrar numero en la integración oficial',
     ];
   }
   return [
-    'Confirmar si el numero actual puede migrarse a Cloud API',
+    'Confirmar si el numero actual puede migrarse a la integración oficial',
     'Acceso al telefono para recibir OTP',
     'Definir si la tienda conserva el numero o usa uno nuevo',
   ];
@@ -1481,31 +1661,31 @@ function whatsappSetupSteps({ setupPath, connected, canAutomate, whatsapp }) {
       key: 'diagnosis',
       label: 'Diagnóstico',
       status: pathSelected ? 'done' : 'current',
-      detail: 'Preguntar si ya tiene WhatsApp Business, Cloud API o empieza desde cero.',
+      detail: 'Preguntar si ya tiene WhatsApp Business, integración oficial o empieza desde cero.',
     },
     {
       key: 'meta_auth',
       label: 'Autorización Meta',
       status: connected ? 'done' : pathSelected && canAutomate ? 'current' : pathSelected ? 'manual' : 'locked',
-      detail: canAutomate ? 'Abrir Embedded Signup con el negocio del cliente.' : 'Guiar al cliente en Meta Business hasta habilitar la cuenta.',
+      detail: canAutomate ? 'Abrir el registro guiado con el negocio del cliente.' : 'Guiar al cliente en Meta Business hasta habilitar la cuenta.',
     },
     {
       key: 'business',
       label: 'Cuenta WhatsApp',
       status: connected || whatsapp.wabaId ? 'done' : pathSelected ? 'manual' : 'locked',
-      detail: 'Seleccionar o crear WABA, negocio, nombre visible y categoria.',
+      detail: 'Seleccionar o crear la cuenta WhatsApp, negocio, nombre visible y categoria.',
     },
     {
       key: 'phone',
       label: 'Número y OTP',
       status: connected || whatsapp.phoneNumberId ? 'done' : pathSelected ? 'manual' : 'locked',
-      detail: 'Validar numero del cliente, recibir codigo y obtener phone_number_id.',
+      detail: 'Validar numero del cliente, recibir codigo y obtener el identificador del número.',
     },
     {
       key: 'webhook',
-      label: 'Webhook',
+      label: 'Eventos de conexión',
       status: connected ? 'done' : pathSelected ? 'manual' : 'locked',
-      detail: 'Apuntar eventos de WhatsApp al webhook publico de la plataforma.',
+      detail: 'Apuntar eventos de WhatsApp a la URL publica de la plataforma.',
     },
     {
       key: 'test',
@@ -1538,6 +1718,21 @@ function slugify(value) {
     .slice(0, 48);
 }
 
+async function fetchMercadoPagoPreapproval(preapprovalId, accessToken) {
+  const response = await fetch(`https://api.mercadopago.com/preapproval/${encodeURIComponent(preapprovalId)}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(`Mercado Pago preapproval sync failed: ${response.status}`);
+    error.statusCode = response.status >= 500 ? 502 : 400;
+    error.code = 'mercadopago_preapproval_sync_failed';
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+}
+
 function normalizeSubscriptionStatus(status) {
   return normalizeBillingSubscriptionStatus(status);
 }
@@ -1559,6 +1754,160 @@ function expireBillingCollection(collection = [], dateKey, now) {
     expired.push({ ...item });
   }
   return expired;
+}
+
+function activeItemsForTenant(collection = [], tenantId, dateKey) {
+  const now = Date.now();
+  return (collection ?? [])
+    .filter((item) => item?.tenantId === tenantId && item.status === 'active')
+    .filter((item) => !item[dateKey] || new Date(item[dateKey]).getTime() > now)
+    .sort((a, b) => String(a[dateKey] ?? '').localeCompare(String(b[dateKey] ?? '')));
+}
+
+function publicPayment(payment) {
+  return {
+    ...payment,
+    hasReceipt: Boolean(payment.receiptUrl || payment.mercadoPagoPaymentId || payment.mercadoPagoPreapprovalId),
+    receiptLabel: payment.receiptUrl
+      ? 'Comprobante disponible'
+      : payment.mercadoPagoPaymentId
+        ? `Mercado Pago ${payment.mercadoPagoPaymentId}`
+        : payment.mercadoPagoPreapprovalId
+          ? `Suscripcion ${payment.mercadoPagoPreapprovalId}`
+          : payment.rawStatusDetail ?? 'Referencia local',
+  };
+}
+
+function billingNotices({ subscription, plan, payments, usageCycle, checkoutRecoverable, discounts, accessExceptions }) {
+  const notices = [];
+  const status = normalizeBillingSubscriptionStatus(subscription?.status);
+  const deliveryPercent = percent(usageCycle?.deliveriesUsed, plan?.includedDeliveries ?? subscription?.includedDeliveries);
+  const interactionPercent = percent(usageCycle?.interactionsUsed, plan?.includedInteractions ?? subscription?.includedInteractions);
+
+  if (status === 'pending_payment') {
+    notices.push({
+      key: checkoutRecoverable ? 'checkout_pending' : 'checkout_expired_or_missing',
+      tone: checkoutRecoverable ? 'warning' : 'critical',
+      title: checkoutRecoverable ? 'Pago pendiente recuperable' : 'Pago pendiente vencido',
+      message: checkoutRecoverable
+        ? `El enlace de pago se puede continuar. Vence en ${daysRemaining(subscription.checkoutExpiresAt)} dias.`
+        : 'El enlace de pago no esta disponible o ya vencio. Debe generarse uno nuevo.',
+      action: checkoutRecoverable ? 'continue_checkout' : 'start_checkout',
+    });
+  }
+
+  if (status === 'trial') {
+    notices.push({
+      key: 'trial_active',
+      tone: 'info',
+      title: 'Periodo de prueba activo',
+      message: subscription.trialEndsAt
+        ? `La prueba termina el ${formatDateOnly(subscription.trialEndsAt)}.`
+        : `Prueba configurada por ${plan?.trialDays ?? subscription.trialDays ?? 0} dias.`,
+      action: 'monitor_trial',
+    });
+  }
+
+  if (status === 'grace_period') {
+    const remaining = daysRemaining(subscription.graceEndsAt);
+    notices.push({
+      key: remaining <= 2 ? 'grace_ending' : 'grace_active',
+      tone: remaining <= 2 ? 'critical' : 'warning',
+      title: remaining <= 2 ? 'Periodo de gracia por vencer' : 'Periodo de gracia activo',
+      message: remaining > 0
+        ? `La tienda sigue operando, pero se suspendera si no se confirma el pago en ${remaining} dias.`
+        : 'La gracia ya vencio; la siguiente conciliacion suspendera el acceso.',
+      action: 'sync_or_collect_payment',
+    });
+  }
+
+  if (['suspended', 'expired', 'cancelled', 'past_due'].includes(status)) {
+    notices.push({
+      key: `subscription_${status}`,
+      tone: 'critical',
+      title: 'Acceso requiere atencion',
+      message: 'El estado de pago impide operar normalmente. Sincroniza Mercado Pago, recupera el checkout o aplica una excepcion auditada.',
+      action: 'recover_access',
+    });
+  }
+
+  for (const threshold of [100, 90, 80]) {
+    if (deliveryPercent >= threshold) {
+      notices.push({
+        key: `deliveries_${threshold}`,
+        tone: threshold === 100 ? 'critical' : threshold === 90 ? 'warning' : 'info',
+        title: threshold === 100 ? 'Limite de domicilios alcanzado' : `Domicilios al ${threshold}%`,
+        message: threshold === 100
+          ? 'No se deben registrar mas domicilios sin upgrade o excepcion administrativa.'
+          : 'Conviene ofrecer upgrade antes de bloquear la operacion.',
+        action: threshold === 100 ? 'upgrade_or_exception' : 'suggest_upgrade',
+      });
+      break;
+    }
+  }
+
+  for (const threshold of [100, 90, 80]) {
+    if (interactionPercent >= threshold) {
+      notices.push({
+        key: `interactions_${threshold}`,
+        tone: threshold === 100 ? 'critical' : threshold === 90 ? 'warning' : 'info',
+        title: threshold === 100 ? 'Limite de interacciones alcanzado' : `Interacciones al ${threshold}%`,
+        message: threshold === 100
+          ? 'El consumo llego al limite del plan. Se requiere upgrade o excepcion administrativa.'
+          : 'El cliente se acerca al limite de uso del ciclo.',
+        action: threshold === 100 ? 'upgrade_or_exception' : 'monitor_usage',
+      });
+      break;
+    }
+  }
+
+  if (discounts.length) {
+    notices.push({
+      key: 'discount_active',
+      tone: 'info',
+      title: 'Descuento comercial activo',
+      message: `${discounts.length} descuento(s) vigente(s) con vencimiento y auditoria.`,
+      action: 'review_discount',
+    });
+  }
+
+  if (accessExceptions.length) {
+    notices.push({
+      key: 'access_exception_active',
+      tone: 'warning',
+      title: 'Excepcion temporal activa',
+      message: 'El acceso fue habilitado manualmente sin cambiar el estado real de Mercado Pago.',
+      action: 'review_exception',
+    });
+  }
+
+  if (!payments.length && ACTIVE_SUBSCRIPTION_STATUSES.has(status)) {
+    notices.push({
+      key: 'payment_history_missing',
+      tone: 'warning',
+      title: 'Historial de pago incompleto',
+      message: 'La suscripcion esta activa, pero no hay comprobante registrado en el historial local.',
+      action: 'sync_payment_history',
+    });
+  }
+
+  return notices;
+}
+
+function percent(value, limit) {
+  return Math.round((Number(value ?? 0) / Math.max(Number(limit ?? 0), 1)) * 100);
+}
+
+function daysRemaining(value) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return 0;
+  return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
+}
+
+function formatDateOnly(value) {
+  if (!value) return 'fecha pendiente';
+  return new Intl.DateTimeFormat('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' }).format(new Date(value));
 }
 
 function nextStepFromChecks(checks, lifecycle = {}) {

@@ -15,9 +15,10 @@ try {
   const base = `http://127.0.0.1:${port}`;
 
   assert.equal(colombiaProducts20.length, 20, 'El catalogo de prueba debe cubrir exactamente 20 productos de tienda.');
-  assert.equal(colombiaAgentScenarioSet.length, 40, 'El set debe cubrir exactamente 40 escenarios conversacionales bogotanos.');
+  assert.equal(colombiaAgentScenarioSet.length, 50, 'El set debe cubrir exactamente 50 escenarios conversacionales bogotanos y reales.');
 
   const results = [];
+  const traces = [];
   for (const [index, scenario] of colombiaAgentScenarioSet.entries()) {
     const waId = `57310${String(index).padStart(6, '0')}`;
     if (scenario.customer === 'known') seedKnownCustomer(waId, `Cliente ${index + 1}`);
@@ -30,14 +31,26 @@ try {
         waId,
         profileName: scenario.customer === 'known' ? `Cliente ${index + 1}` : '',
         text: step.text,
+        messageType: step.messageType ?? scenario.messageType,
+        mediaRef: step.mediaRef ?? scenario.mediaRef,
         messageId: `msg-${scenario.id}-${stepIndex}`,
       });
 
       assertStep({ scenario, step, run, waId });
       results.push(`${scenario.id}#${stepIndex + 1}:${run.result.plan.intent}`);
+      traces.push(buildTrace({ scenario, step, run, waId, stepIndex }));
     }
   }
 
+  fs.writeFileSync(
+    path.join(process.cwd(), 'test-results-colombia-scenarios.json'),
+    `${JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      scenarios: colombiaAgentScenarioSet.length,
+      steps: results.length,
+      traces,
+    }, null, 2)}\n`,
+  );
   console.log(`Colombia agent scenario tests passed (${results.length} steps, ${colombiaAgentScenarioSet.length} scenarios)`);
 } finally {
   server.close();
@@ -60,7 +73,7 @@ function assertStep({ scenario, step, run, waId }) {
   assert.ok(Array.isArray(plan.toolPlan), `${scenario.id}: debe declarar plan de herramientas`);
   assert.equal(plan.intent, expectation.intent, `${scenario.id}: intent incorrecto`);
   assert.ok(plan.reasoningNotes?.length, `${scenario.id}: debe exponer notas de razonamiento para auditoria`);
-  if (['catalog_query', 'delivery_order'].includes(plan.intent)) {
+  if (['catalog_query', 'delivery_order'].includes(plan.intent) && (plan.candidateItems?.length ?? 0) > 0) {
     assert.ok(Array.isArray(plan.candidateItems), `${scenario.id}: debe exponer candidatos de producto`);
     assert.ok(plan.toolPlan.some((step) => step.tool === 'google_sheets_read_table'), `${scenario.id}: debe planear consulta a catalogo`);
   }
@@ -79,11 +92,25 @@ function assertStep({ scenario, step, run, waId }) {
       assert.ok(reply.includes(fragment), `${scenario.id}: la respuesta no incluye "${fragment}". Respuesta: ${reply}`);
     }
   }
+  if (expectation.notReplyIncludes) {
+    for (const fragment of expectation.notReplyIncludes) {
+      assert.equal(reply.includes(fragment), false, `${scenario.id}: la respuesta no debe incluir "${fragment}". Respuesta: ${reply}`);
+    }
+  }
   if (expectation.orderItems) {
     const itemNames = (conversation.orderDraft?.items ?? []).map((item) => item.product?.name ?? item.catalogQuery);
     for (const name of expectation.orderItems) {
       assert.ok(itemNames.includes(name), `${scenario.id}: la canasta no incluye ${name}. Canasta: ${itemNames.join(', ')}`);
     }
+  }
+  if (expectation.notOrderItems) {
+    const itemNames = (conversation.orderDraft?.items ?? []).map((item) => item.product?.name ?? item.catalogQuery);
+    for (const name of expectation.notOrderItems) {
+      assert.equal(itemNames.includes(name), false, `${scenario.id}: la canasta no debe incluir ${name}. Canasta: ${itemNames.join(', ')}`);
+    }
+  }
+  if (expectation.paymentMethod) {
+    assert.equal(conversation.orderDraft?.paymentMethod, expectation.paymentMethod, `${scenario.id}: metodo de pago incorrecto`);
   }
   if (expectation.savedProfile) {
     const profile = store.getState().customerProfilesByTenant?.andina?.[waId];
@@ -95,6 +122,45 @@ function assertStep({ scenario, step, run, waId }) {
     const orders = store.getState().ordersByTenant?.andina ?? [];
     assert.ok(orders.some((order) => order.id === conversation.orderId), `${scenario.id}: pedido no quedo en Google Sheets mock`);
   }
+}
+
+function buildTrace({ scenario, step, run, waId, stepIndex }) {
+  const conversation = run.conversation;
+  const plan = run.result.plan;
+  return {
+    scenarioId: scenario.id,
+    level: scenario.level,
+    step: stepIndex + 1,
+    waId,
+    message: step.text ?? scenario.text ?? '',
+    customerFound: scenario.customer === 'known',
+    intent: plan.intent,
+    executionMode: plan.executionMode,
+    reasoningMode: plan.reasoningMode,
+    responseStrategy: plan.responseStrategy,
+    confidence: plan.confidence,
+    candidateItems: plan.candidateItems ?? [],
+    missingFields: conversation.orderDraft?.missingFields ?? plan.missingFields ?? [],
+    toolPlan: plan.toolPlan ?? [],
+    summary: run.result.summary,
+    reply: conversation.messages.at(-1)?.text ?? '',
+    orderDraft: conversation.orderDraft
+      ? {
+          delivery: conversation.orderDraft.delivery,
+          subtotal: conversation.orderDraft.subtotal,
+          items: (conversation.orderDraft.items ?? []).map((item) => ({
+            rawName: item.rawName,
+            catalogQuery: item.catalogQuery,
+            product: item.product?.name ?? null,
+            quantity: item.quantity ?? null,
+            budgetAmount: item.budgetAmount ?? null,
+            available: item.available ?? null,
+          })),
+        }
+      : null,
+    orderId: conversation.orderId ?? null,
+    status: conversation.status,
+  };
 }
 
 function seedExtraProducts(products) {

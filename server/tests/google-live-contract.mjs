@@ -141,6 +141,7 @@ try {
   }, { expectedStatus: 201 });
   const tenantId = createdTenant.tenant.id;
 
+  await postJson(`${base}/api/saas/tenants/${tenantId}/subscription/mock-activate`, {});
   const oauthStart = await getJson(`${base}/api/saas/tenants/${tenantId}/google/oauth/start`);
   assert.equal(oauthStart.ready, true);
   assert.ok(oauthStart.authorizationUrl.includes('client_id=google-client-test'));

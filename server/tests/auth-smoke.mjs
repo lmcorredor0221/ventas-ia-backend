@@ -63,11 +63,42 @@ try {
   assert.ok(state.auditEvents.some((event) => event.action === 'auth.login'));
   assert.ok(state.auditEvents.some((event) => event.action === 'tenant.create'));
 
+  await assertDevGoogleLoginIsDisabledWhenConfigured();
+
   console.log('Auth smoke tests passed');
 } finally {
   server.close();
   await store.close?.();
   fs.rmSync(tempDir, { recursive: true, force: true });
+}
+
+async function assertDevGoogleLoginIsDisabledWhenConfigured() {
+  const strictTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-auth-strict-'));
+  const strict = await createAppAsync({
+    dataFile: path.join(strictTempDir, 'store.json'),
+    storageDriver: 'json',
+    authRequired: true,
+    csrfRequired: true,
+    allowDevGoogleLogin: false,
+  });
+  const strictServer = strict.app.listen(0, '127.0.0.1');
+  try {
+    const port = await new Promise((resolve) => strictServer.once('listening', () => resolve(strictServer.address().port)));
+    const base = `http://127.0.0.1:${port}`;
+    const login = await postJson(`${base}/api/auth/google`, {
+      idToken: 'dev-google-id-token',
+      profile: {
+        sub: 'google-auth-strict-andina',
+        email: 'andina@example.local',
+        name: 'Owner Andina',
+      },
+    }, { expectedStatus: 401 });
+    assert.equal(login.body.code, 'dev_google_login_disabled');
+  } finally {
+    strictServer.close();
+    await strict.store.close?.();
+    fs.rmSync(strictTempDir, { recursive: true, force: true });
+  }
 }
 
 async function getJson(url, { cookie, expectedStatus = 200 } = {}) {

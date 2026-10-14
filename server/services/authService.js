@@ -71,8 +71,10 @@ export class AuthService {
       metadata: { userId: user.id, mode: googleProfile.mode },
     });
 
+    const exposedUser = publicUser(user);
     return {
-      user: publicUser(user),
+      user: exposedUser,
+      isPlatformAdmin: isPlatformAdmin(exposedUser, this.store.getState()),
       memberships,
       session,
       cookie: this.sessionCookie(session.id, session.expiresAt),
@@ -122,9 +124,11 @@ export class AuthService {
     session.csrfToken ??= crypto.randomBytes(32).toString('hex');
     const user = state.users.find((item) => item.id === session.userId);
     if (!user) return null;
+    const exposedUser = publicUser(user);
     return {
       session,
-      user: publicUser(user),
+      user: exposedUser,
+      isPlatformAdmin: isPlatformAdmin(exposedUser, state),
       memberships: membershipsForUser(state, user.id),
     };
   }
@@ -254,12 +258,19 @@ export class AuthService {
   }
 
   async verifyGoogleIdentity({ idToken, profile }) {
+    if (idToken === 'dev-google-id-token' && !this.config.allowDevGoogleLogin) {
+      const error = new Error('Development Google login is disabled');
+      error.statusCode = 401;
+      error.code = 'dev_google_login_disabled';
+      throw error;
+    }
     if (process.env.GOOGLE_CLIENT_ID && idToken && idToken !== 'dev-google-id-token') {
       const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.aud !== process.env.GOOGLE_CLIENT_ID) {
         const error = new Error('Invalid Google ID token');
         error.statusCode = 401;
+        error.code = 'invalid_google_id_token';
         throw error;
       }
       return {
