@@ -183,6 +183,14 @@ export class GoogleWorkspaceService {
     });
   }
 
+  async clearValues({ accessToken, spreadsheetId, range }) {
+    return googleFetch(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:clear`, {
+      method: 'POST',
+      accessToken,
+      body: {},
+    });
+  }
+
   async appendValues({ accessToken, spreadsheetId, range, values }) {
     return googleFetch(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
       method: 'POST',

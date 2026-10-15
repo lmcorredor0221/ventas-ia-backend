@@ -17,9 +17,7 @@ export class PostgresStore {
   constructor({ databaseUrl, ssl = 'auto', max = 5 }) {
     if (!databaseUrl) throw new Error('DATABASE_URL is required when STORAGE_DRIVER=postgres');
     this.pool = new Pool({
-      // pg lets sslmode query parameters override the explicit SSL object.
-      // Normalize provider URLs so Render/Supabase use the policy below.
-      connectionString: normalizeDatabaseUrl(databaseUrl),
+      connectionString: databaseUrl,
       max,
       ssl: resolveSsl(databaseUrl, ssl),
     });
@@ -141,6 +139,18 @@ export class PostgresStore {
   }
 
   async findConversationByWa(tenantId, waId) {
+    const result = await this.pool.query(
+      `SELECT payload FROM conversations
+       WHERE tenant_id = $1
+         AND wa_id = $2
+         AND COALESCE(payload->>'caseStatus', payload->>'status', status) NOT IN ('closed_no_confirmation', 'completed', 'resolved', 'cancelled')
+       ORDER BY updated_at DESC LIMIT 1`,
+      [tenantId, waId],
+    );
+    return result.rows[0]?.payload ?? null;
+  }
+
+  async findLatestConversationByWa(tenantId, waId) {
     const result = await this.pool.query(
       'SELECT payload FROM conversations WHERE tenant_id = $1 AND wa_id = $2 ORDER BY updated_at DESC LIMIT 1',
       [tenantId, waId],
@@ -725,8 +735,8 @@ async function upsertBillingPlan(client, plan) {
       plan.currency ?? 'COP',
       plan.amount ?? 0,
       plan.billingFrequency ?? 'monthly',
-      plan.includedDeliveries ?? 1000,
-      plan.includedInteractions ?? 5000,
+      plan.includedDeliveries ?? 400,
+      plan.includedInteractions ?? 2700,
       Boolean(plan.trialEnabled),
       plan.trialDays ?? 0,
       plan.graceDays ?? 5,
@@ -1277,18 +1287,6 @@ function resolveSsl(databaseUrl, ssl) {
   if (ssl === 'require') return { rejectUnauthorized: false };
   if (databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1')) return false;
   return { rejectUnauthorized: false };
-}
-
-function normalizeDatabaseUrl(databaseUrl) {
-  try {
-    const url = new URL(databaseUrl);
-    for (const key of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert']) {
-      url.searchParams.delete(key);
-    }
-    return url.toString();
-  } catch {
-    return databaseUrl;
-  }
 }
 
 function secretReferencesFromTenant(tenant) {

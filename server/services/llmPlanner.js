@@ -262,7 +262,11 @@ export class LLMPlanner {
 
     const delivery = containsAny(normalized, ['domicilio', 'domicilios', 'envio', 'envío', 'llevar', 'traer', 'manda', 'mandar', 'lleve']);
     const availabilityQuestion = containsAny(normalized, ['tienes', 'tiene', 'hay', 'disponible', 'manejan', 'maneja', 'manejas', 'venden', 'consigo', 'colabora', 'colabore', 'recomienda', 'ofrece']);
-    const products = providedProducts ?? this.store.getState().productsByTenant[tenantId] ?? [];
+    const products = providedProducts ?? (
+      this.config?.allowLocalCatalogFallback === false
+        ? []
+        : this.store.getState().productsByTenant[tenantId] ?? []
+    );
     const matchedItems = extractItems(normalized, products);
     const inferredItems = extractUnknownOrderItems(normalized, matchedItems);
     const items = mergePlannerItems(matchedItems, inferredItems);
@@ -323,6 +327,9 @@ export class LLMPlanner {
   }
 
   async listProducts(tenantId) {
+    // En produccion Google Sheets/Drive es la fuente de verdad; no filtramos
+    // el prompt con una copia persistida del catalogo.
+    if (this.config?.allowLocalCatalogFallback === false) return [];
     if (this.store.listProducts) return this.store.listProducts(tenantId);
     return this.store.getState().productsByTenant[tenantId] ?? [];
   }

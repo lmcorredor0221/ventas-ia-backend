@@ -2,6 +2,24 @@ import { appendAuditEvent } from './authService.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function googleConnectionRequiredError(message) {
+  const error = new Error(message);
+  error.statusCode = 428;
+  error.code = 'google_connection_required';
+  return error;
+}
+
+function googleConnectionRequiredResult(message) {
+  return {
+    status: 'connection_required',
+    code: 'google_connection_required',
+    rows: [],
+    files: [],
+    source_refs: [],
+    message,
+  };
+}
+
 export class ToolRegistry {
   constructor({ store, events, usage, config, googleWorkspace, secretVault }) {
     this.store = store;
@@ -63,6 +81,9 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudo consultar el catalogo de Google de esta tienda.');
+    }
     const rows = live
       ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: payload.range ?? tenant?.config?.googleSheets?.catalogRange })
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
@@ -70,7 +91,7 @@ export class ToolRegistry {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'driveFileId'],
       rows: filterRows(rows, payload.filters),
-      source: live ? 'google_sheets_live' : 'local_mirror',
+      source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
       fetched_at: new Date().toISOString(),
     };
@@ -78,6 +99,10 @@ export class ToolRegistry {
 
   async googleDriveFilePicker(tenantId, payload) {
     await sleep(25);
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudieron consultar los documentos de Google de esta tienda.');
+    }
     const files = this.store.listDriveFiles ? await this.store.listDriveFiles(tenantId) : (this.store.getState().driveFilesByTenant[tenantId] ?? []);
     const requested = payload.file_ids?.length ? files.filter((file) => payload.file_ids.includes(file.fileId)) : files;
     return {
@@ -92,6 +117,9 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudo consultar el cliente en Google Sheets de esta tienda.');
+    }
     const profile = live
       ? await this.lookupLiveCustomerProfile({ tenantId, tenant, live, waId: payload.wa_id })
       : this.store.getCustomerProfile
@@ -101,7 +129,7 @@ export class ToolRegistry {
       status: profile ? 'found' : 'not_found',
       profile: profile ?? null,
       source_ref: profile?.sheetRowId ?? profile?.driveFileId ?? null,
-      source: live ? 'google_sheets_live' : 'local_mirror',
+      source: live ? 'google_sheets_live' : 'local_test_fixture',
       sheet_ref: tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     };
   }
@@ -110,6 +138,9 @@ export class ToolRegistry {
     await sleep(25);
     const now = new Date().toISOString();
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      throw googleConnectionRequiredError('No se pudo guardar el cliente en Google Sheets de esta tienda.');
+    }
     const liveSourceRef = live ? await this.upsertLiveCustomerProfile({ tenantId, live, payload, now }) : null;
     let profile;
     this.store.mutate((state) => {
@@ -135,12 +166,16 @@ export class ToolRegistry {
       waId: payload.wa_id,
       sourceRef: profile.sheetRowId,
     });
-    return { status: 'saved', profile, source_ref: liveSourceRef ?? profile.sheetRowId, source: live ? 'google_sheets_live' : 'local_mirror' };
+    return { status: 'saved', profile, source_ref: liveSourceRef ?? profile.sheetRowId, source: live ? 'google_sheets_live' : 'local_test_fixture' };
   }
 
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
     await sleep(25);
     const now = new Date().toISOString();
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      throw googleConnectionRequiredError('No se pudo registrar el pedido en Google Sheets de esta tienda.');
+    }
     const order = {
       id: `ord-${crypto.randomUUID().slice(0, 10)}`,
       tenantId,
@@ -159,7 +194,6 @@ export class ToolRegistry {
       state.ordersByTenant[tenantId] ??= [];
       state.ordersByTenant[tenantId].unshift(order);
     });
-    const live = await this.liveGoogleContext(tenantId);
     let liveSourceRef = null;
     if (live) liveSourceRef = await this.appendLiveOrder({ tenantId, live, order });
     this.store.persistOrder?.(tenantId, order.id);
@@ -170,7 +204,7 @@ export class ToolRegistry {
       subtotal: order.subtotal,
       itemCount: order.items.length,
     });
-    return { status: 'saved', order, source_ref: liveSourceRef ?? order.id, source: live ? 'google_sheets_live' : 'local_mirror' };
+    return { status: 'saved', order, source_ref: liveSourceRef ?? order.id, source: live ? 'google_sheets_live' : 'local_test_fixture' };
   }
 
   async liveGoogleContext(tenantId) {
@@ -212,7 +246,7 @@ export class ToolRegistry {
         'fileId',
       );
     });
-    return rows.length ? rows : this.store.listProducts ? await this.store.listProducts(tenantId) : (tenant ? this.store.getState().productsByTenant[tenantId] ?? [] : []);
+    return rows;
   }
 
   async lookupLiveCustomerProfile({ tenantId, tenant, live, waId }) {

@@ -1,10 +1,16 @@
+import {
+  DEFAULT_BILLING_PLAN_ID,
+  DEFAULT_INCLUDED_DELIVERIES,
+  DEFAULT_INCLUDED_INTERACTIONS,
+} from './billingService.js';
+
 const DEFAULT_LIMITS = {
-  includedDeliveries: 1000,
-  includedInteractions: 5000,
+  includedDeliveries: DEFAULT_INCLUDED_DELIVERIES,
+  includedInteractions: DEFAULT_INCLUDED_INTERACTIONS,
   includedLlmTokens: null,
 };
 
-const THRESHOLDS = [0.8, 0.9, 1];
+const THRESHOLDS = [0.7, 0.85, 1];
 
 export class UsageService {
   constructor({ store, events }) {
@@ -88,7 +94,7 @@ export class UsageService {
     return {
       tenantId,
       period: resolvedPeriod,
-      planCode: tenant?.config?.saas?.planCode ?? 'ventas_ia_1000_domicilios',
+      planCode: tenant?.config?.saas?.planCode ?? DEFAULT_BILLING_PLAN_ID,
       limits,
       metrics,
       percentages: {

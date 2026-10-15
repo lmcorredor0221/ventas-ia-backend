@@ -8,15 +8,51 @@ export class AgentRuntime {
     this.planner = planner;
     this.usage = usage;
     this.config = config;
+    this.manualSweepTimer = null;
+  }
+
+  start() {
+    if (this.manualSweepTimer) return;
+    const intervalMs = Number(this.config.manualCaseSweepIntervalMs ?? 30_000);
+    this.manualSweepTimer = setInterval(() => {
+      this.closeExpiredManualCases().catch((error) => {
+        console.error('Manual case sweep failed:', error.message);
+      });
+    }, intervalMs);
+    this.manualSweepTimer.unref?.();
+  }
+
+  stop() {
+    if (!this.manualSweepTimer) return;
+    clearInterval(this.manualSweepTimer);
+    this.manualSweepTimer = null;
   }
 
   async processInbound(normalized) {
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
+    await this.closeExpiredManualCases();
     const conversation = await this.ensureConversation(tenantId, normalized);
 
     if (await this.isDuplicate(normalized.messageId)) {
       return { duplicate: true, conversation };
     }
+
+    if (conversation.manualMode === 'whatsapp_external' || conversation.status === 'manual_active') {
+      await this.markProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+      await this.addMessage(conversation.id, {
+        role: 'user',
+        text: normalized.text || `[${normalized.messageType}]`,
+        providerMessageId: normalized.messageId,
+      });
+      await this.patchConversation(conversation.id, { manualLastActivityAt: new Date().toISOString() });
+      return {
+        duplicate: false,
+        manual: true,
+        conversation: await this.getConversation(conversation.id),
+        result: { summary: 'Manual WhatsApp conversation recorded' },
+      };
+    }
+
     await this.usage?.assertCanProcessInteraction(tenantId, { conversationId: conversation.id });
     await this.markProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
     this.usage?.recordAgentInteraction(tenantId, {
@@ -58,6 +94,10 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
+
+    if (customerLookup.status === 'connection_required' && ['catalog_query', 'delivery_order', 'order_confirmation', 'order_clarification'].includes(plan.intent)) {
+      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
+    }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -117,6 +157,38 @@ export class AgentRuntime {
     }
 
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
+  }
+
+  async handleGoogleUnavailable({ tenantId, conversationId, normalized, plan }) {
+    const message = 'No puedo confirmar el catalogo en este momento porque la tienda no esta conectada a Google. Dejo tu solicitud en manos del tendero para validarla y continuar contigo.';
+    await this.patchConversation(conversationId, {
+      stage: 'handoff',
+      zone: 'approval',
+      status: 'blocked',
+      value: 'Pendiente de validacion',
+      progress: 34,
+      need: normalized.text,
+      nextStep: 'El tendero debe conectar Google o validar el pedido manualmente.',
+      lastTool: 'google_sheets_customer_profile_lookup',
+    });
+    await this.tools.call('human_handoff', tenantId, conversationId, {
+      reason: 'Google Drive/Sheets no disponible para validar catalogo y pedido',
+      urgency: 'Alta',
+      assigned_team: 'ventas',
+      context_snapshot: {
+        summary: message,
+        customerWaId: normalized.waId,
+        originalText: normalized.text,
+        plan,
+        action: 'connect_google_or_validate_order_manually',
+      },
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: message,
+    });
+    return { summary: 'Google unavailable; human handoff requested', plan };
   }
 
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
@@ -579,8 +651,37 @@ export class AgentRuntime {
       ? await this.store.findConversationByWa(tenantId, normalized.waId)
       : this.store
         .getState()
-        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId);
+        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedCase(item));
     if (existing) return existing;
+
+    const previous = this.store.findLatestConversationByWa
+      ? await this.store.findLatestConversationByWa(tenantId, normalized.waId)
+      : this.store
+        .getState()
+        .conversations
+        .filter((item) => item.tenantId === tenantId && item.waId === normalized.waId)
+        .sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? 0) - Date.parse(left.updatedAt ?? left.createdAt ?? 0))[0];
+    if (previous && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
+      const now = new Date().toISOString();
+      this.store.mutate((state) => {
+        const conversation = state.conversations.find((item) => item.id === previous.id);
+        if (!conversation) return;
+        Object.assign(conversation, {
+          status: 'live',
+          caseStatus: 'active',
+          inboxState: 'active',
+          manualMode: 'none',
+          aiPaused: false,
+          closedAt: null,
+          closeReason: null,
+          reopenedAt: now,
+          nextStep: 'Caso anterior reanudado por solicitud explicita del cliente.',
+          updatedAt: now,
+        });
+      });
+      this.store.persistConversation?.(previous.id);
+      return this.getConversation(previous.id);
+    }
     const created = {
       id: `wa-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
@@ -590,6 +691,13 @@ export class AgentRuntime {
       stage: 'inbound',
       zone: 'whatsapp',
       status: 'live',
+      caseStatus: 'active',
+      inboxState: 'active',
+      manualMode: 'none',
+      aiPaused: false,
+      closedAt: null,
+      closeReason: null,
+      orderDraft: null,
       value: 'Pendiente',
       progress: 12,
       need: normalized.text ?? normalized.messageType,
@@ -627,6 +735,79 @@ export class AgentRuntime {
     this.store.persistConversation?.(conversationId);
   }
 
+  async activateManualWhatsApp(conversationId, { actorId = 'local-admin' } = {}) {
+    const now = new Date().toISOString();
+    let conversation;
+    this.store.mutate((state) => {
+      conversation = state.conversations.find((item) => item.id === conversationId);
+      if (!conversation) return;
+      conversation.status = 'manual_active';
+      conversation.caseStatus = 'active';
+      conversation.inboxState = 'active';
+      conversation.manualMode = 'whatsapp_external';
+      conversation.aiPaused = true;
+      conversation.manualStartedAt = conversation.manualStartedAt ?? now;
+      conversation.manualLastActivityAt = now;
+      conversation.nextStep = 'Atencion manual activa en WhatsApp Web/Desktop.';
+      conversation.messages ??= [];
+      conversation.messages.push({
+        id: `manual-${crypto.randomUUID()}`,
+        role: 'system',
+        channel: 'platform',
+        text: 'La conversacion continua de manera manual en WhatsApp Web/Desktop.',
+        actorId,
+        createdAt: now,
+      });
+      conversation.updatedAt = now;
+    });
+    if (!conversation) return null;
+    this.store.persistConversation?.(conversationId);
+    return this.getConversation(conversationId);
+  }
+
+  async closeExpiredManualCases(now = Date.now()) {
+    const inactivityMs = Number(this.config.manualCaseInactivityMinutes ?? 5) * 60_000;
+    const expired = [];
+    this.store.mutate((state) => {
+      for (const conversation of state.conversations) {
+        if (conversation.manualMode !== 'whatsapp_external' || conversation.status !== 'manual_active') continue;
+        const lastActivity = Date.parse(conversation.manualLastActivityAt ?? conversation.updatedAt ?? conversation.createdAt ?? 0);
+        if (!Number.isFinite(lastActivity) || now - lastActivity < inactivityMs) continue;
+        const closedAt = new Date(now).toISOString();
+        conversation.status = 'closed_no_confirmation';
+        conversation.caseStatus = 'closed_no_confirmation';
+        conversation.inboxState = 'history';
+        conversation.manualMode = 'none';
+        conversation.aiPaused = false;
+        conversation.closedAt = closedAt;
+        conversation.closeReason = 'manual_inactivity';
+        conversation.orderStatus = 'not_confirmed';
+        if (conversation.orderDraft) conversation.orderDraft.status = 'not_confirmed';
+        conversation.nextStep = 'Caso cerrado por inactividad. Un nuevo mensaje abrira un caso nuevo.';
+        conversation.messages ??= [];
+        conversation.messages.push({
+          id: `manual-timeout-${crypto.randomUUID()}`,
+          role: 'system',
+          channel: 'platform',
+          text: 'Atencion manual cerrada por inactividad. Pedido no confirmado.',
+          createdAt: closedAt,
+        });
+        conversation.updatedAt = closedAt;
+        expired.push(conversation.id);
+      }
+    });
+    for (const conversationId of expired) {
+      this.store.persistConversation?.(conversationId);
+      this.events.emit({
+        type: 'conversation.manual_timeout',
+        tenantId: (await this.getConversation(conversationId))?.tenantId,
+        conversationId,
+        detail: 'Atencion manual cerrada por inactividad; pedido no confirmado.',
+      });
+    }
+    return expired;
+  }
+
   async getConversation(conversationId) {
     if (this.store.getConversation) return this.store.getConversation(conversationId);
     return this.store.getState().conversations.find((item) => item.id === conversationId);
@@ -651,6 +832,31 @@ export class AgentRuntime {
     });
     await this.store.persistProcessedMessage?.(messageId, payload);
   }
+}
+
+function isClosedCase(conversation) {
+  return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+}
+
+function isExplicitCaseContinuation(text, previous, config = {}) {
+  if (!isClosedCase(previous)) return false;
+  const windowMs = Number(config.caseContinuationWindowMinutes ?? 30) * 60_000;
+  const lastActivity = Date.parse(previous.closedAt ?? previous.updatedAt ?? previous.createdAt ?? 0);
+  if (!Number.isFinite(lastActivity) || Date.now() - lastActivity > windowMs) return false;
+  const normalized = normalizeText(text);
+  return containsAny(normalized, [
+    'pedido anterior',
+    'pedido de antes',
+    'lo de antes',
+    'el mismo pedido',
+    'continuar el pedido',
+    'continua el pedido',
+    'retomar el pedido',
+    'retoma el pedido',
+    'sumale',
+    'agregale',
+    'agregale al pedido',
+  ]);
 }
 
 function containsAny(text, words) {

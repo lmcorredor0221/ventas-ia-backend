@@ -49,6 +49,7 @@ try {
   let intentMatches = 0;
   let checkedSteps = 0;
   let providerApiSteps = 0;
+  const usageTotals = emptyUsageTotals();
 
   for (const [scenarioIndex, scenarioId] of selectedScenarioIds.entries()) {
     const scenario = colombiaAgentScenarioSet.find((item) => item.id === scenarioId);
@@ -77,6 +78,8 @@ try {
       if (plan.executionMode === 'provider_api') {
         providerApiSteps += 1;
       }
+      const llmUsage = latestLlmUsage(store, run.conversation.id);
+      addUsageTotals(usageTotals, llmUsage);
       if (['catalog_query', 'delivery_order'].includes(plan.intent) && (plan.candidateItems?.length ?? 0) > 0) {
         assert.ok(plan.toolPlan.some((toolStep) => toolStep.tool === 'google_sheets_read_table'), `${scenario.id}: debe consultar catalogo`);
       }
@@ -93,6 +96,7 @@ try {
         missingFields: run.conversation.orderDraft?.missingFields ?? plan.missingFields ?? [],
         candidateItems: plan.candidateItems ?? [],
         reply: run.conversation.messages.at(-1)?.text ?? '',
+        llmUsage,
       });
     }
   }
@@ -111,6 +115,7 @@ try {
       providerApiSteps,
       intentMatches,
       matchRate,
+      usageTotals,
       traces,
     }, null, 2)}\n`,
   );
@@ -136,6 +141,62 @@ function seedExtraProducts(products) {
     for (const product of products) bySku.set(product.sku, product);
     state.productsByTenant.andina = [...bySku.values()];
   });
+}
+
+function latestLlmUsage(store, conversationId) {
+  const event = (store.getState().events ?? []).find((item) => (
+    item.type === 'llm.plan.created' && item.conversationId === conversationId
+  ));
+  const providerMetadata = event?.metadata?.providerMetadata ?? {};
+  const usage = providerMetadata.usage ?? null;
+  if (!usage) {
+    return {
+      provider: providerMetadata.provider ?? null,
+      model: providerMetadata.model ?? null,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      estimated: true,
+    };
+  }
+  return {
+    provider: providerMetadata.provider ?? null,
+    model: providerMetadata.model ?? null,
+    promptTokens: numberOrNull(usage.prompt_tokens ?? usage.promptTokenCount),
+    completionTokens: numberOrNull(usage.completion_tokens ?? usage.candidatesTokenCount),
+    totalTokens: numberOrNull(usage.total_tokens ?? usage.totalTokenCount),
+    estimated: false,
+  };
+}
+
+function emptyUsageTotals() {
+  return {
+    calls: 0,
+    realCalls: 0,
+    estimatedCalls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    unknownUsageCalls: 0,
+  };
+}
+
+function addUsageTotals(totals, usage) {
+  totals.calls += 1;
+  if (usage.estimated) totals.estimatedCalls += 1;
+  else totals.realCalls += 1;
+  if (usage.promptTokens == null || usage.completionTokens == null || usage.totalTokens == null) {
+    totals.unknownUsageCalls += 1;
+    return;
+  }
+  totals.promptTokens += usage.promptTokens;
+  totals.completionTokens += usage.completionTokens;
+  totals.totalTokens += usage.totalTokens;
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function seedKnownCustomer(waId, name) {

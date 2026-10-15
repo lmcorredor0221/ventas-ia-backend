@@ -2,6 +2,8 @@
 
 Actualizado: 2026-10-10.
 
+> **Actualizacion de capacidad:** la decision comercial vigente posterior a este documento es Plan Basico de `COP 89.000`, hasta `400 domicilios` por ciclo y un costo interno objetivo de DeepSeek cercano a `US$3`. Las referencias anteriores a `1.000 domicilios` y `5.000 interacciones` se conservan como historial hasta completar la alineacion tecnica.
+
 ## Decision aprobada
 
 Ventas IA usara Mercado Pago para cobrar la suscripcion mensual automatica de la plataforma.
@@ -186,7 +188,7 @@ Reglas:
 - Solo los planes activos deben aparecer para nuevos clientes.
 - Un plan inactivo no debe afectar suscripciones existentes sin una migracion explicita.
 - Cada plan debe tener nombre, precio, periodicidad, limites, moneda, estado y referencia de Mercado Pago.
-- El plan inicial recomendado sigue siendo el plan mensual base de 1.000 domicilios.
+- El Plan Basico vigente se comunicara como hasta 400 domicilios por ciclo, sujeto a la alineacion tecnica pendiente.
 
 Esta decision evita rehacer arquitectura cuando se agreguen planes futuros, pero mantiene simple la venta inicial.
 
@@ -315,7 +317,7 @@ Regla aprobada:
 
 Ejemplo:
 
-- Plan: 1.000 domicilios incluidos.
+- Plan: hasta 400 domicilios incluidos como promesa comercial.
 - Cliente activado el 12 de noviembre.
 - Ciclo activo: 12 de noviembre al 11 de diciembre.
 - El 12 de diciembre se reinicia el contador.
@@ -327,8 +329,9 @@ Esto evita confusiones comerciales y alinea pago, cuota y suspension.
 Reglas aprobadas:
 
 - Plan inicial:
-  - 1.000 domicilios incluidos por ciclo.
-  - 5.000 interacciones del agente incluidas por ciclo.
+  - 400 domicilios incluidos por ciclo como limite comercial.
+  - Aproximadamente 2.700 llamadas reales al agente IA como objetivo de costo interno.
+  - Hasta 5.000 interacciones tecnicas solo como proteccion, si se conserva despues de medir el uso real.
 - La plataforma debe avisar al 80%, 90% y 100% de uso del limite.
 - Al 100% del limite de domicilios:
   - Se bloquean nuevos domicilios confirmados por el agente.
@@ -690,7 +693,7 @@ Los limites del plan se reiniciaran con ese mismo ciclo de facturacion por anive
 
 Al alcanzar el 100% del limite de domicilios, se bloquean nuevos domicilios confirmados, pero se mantienen conversaciones basicas. El owner puede hacer upgrade inmediato y el administrador puede dar excepcion temporal auditada.
 
-El plan inicial tendra 1.000 domicilios y 5.000 interacciones por ciclo. Las interacciones operan como uso justo para controlar costos.
+El Plan Basico tendra como promesa comercial hasta 400 domicilios por ciclo. El costo interno objetivo de DeepSeek se controla con aproximadamente 2.700 llamadas reales al LLM; las 5.000 interacciones tecnicas solo podran conservarse como limite superior de proteccion, no como equivalencia de la promesa comercial.
 
 No habra excedentes pagados automaticos en la primera version. Al superar limites, se ofrece upgrade o excepcion administrativa auditada.
 

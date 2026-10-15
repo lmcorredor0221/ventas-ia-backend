@@ -60,6 +60,7 @@ function createExpressRuntime({ config, store }) {
   const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault });
   const planner = new LLMPlanner({ store, events, usage, config });
   const runtime = new AgentRuntime({ store, events, tools, planner, usage, config });
+  runtime.start();
   const controlPlane = new SaasControlPlane({ store, events, config, googleWorkspace, secretVault });
   const auth = new AuthService({ store, events, config });
 

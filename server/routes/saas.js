@@ -105,6 +105,27 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
+  router.post('/tenants/:tenantId/google/catalog/validate', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.validateCatalogImport(req.params.tenantId, req.body?.csvText ?? '');
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/google/catalog/import', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.importCatalogCsv(req.params.tenantId, req.body?.csvText ?? '', { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.catalog.imported', resource: 'google_catalog' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/tenants/:tenantId/whatsapp/status', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId);

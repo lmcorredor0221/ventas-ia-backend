@@ -84,6 +84,11 @@ global.fetch = async (url, options = {}) => {
     return jsonResponse({ totalUpdatedCells: 36 });
   }
 
+  if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && href.includes(':clear')) {
+    assert.equal(options.headers.authorization, 'Bearer access-token-refreshed');
+    return jsonResponse({ clearedRange: 'Catalogo!A1:J1000' });
+  }
+
   if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && options.method === 'GET') {
     assert.equal(options.headers.authorization, 'Bearer access-token-refreshed');
     const range = decodeURIComponent(href.split('/values/')[1].split('?')[0]);
@@ -107,6 +112,11 @@ global.fetch = async (url, options = {}) => {
     const sheetName = range.split('!')[0];
     const rowNumber = Number(range.match(/![A-Z]+(\d+):/)?.[1]);
     const body = JSON.parse(options.body);
+    if (sheetName === 'Catalogo') {
+      assert.equal(body.values.length, 3);
+      liveSheets[sheetName] = body.values;
+      return jsonResponse({ updatedRows: body.values.length });
+    }
     if (rowNumber && liveSheets[sheetName]) liveSheets[sheetName][rowNumber - 1] = body.values[0];
     return jsonResponse({ updatedRows: body.values?.length ?? 0 });
   }
@@ -169,6 +179,19 @@ try {
   });
   assert.equal(catalogSmoke.result.source, 'google_sheets_live');
   assert.equal(catalogSmoke.result.rows[0].sku, 'LIVE-CHO-01');
+
+  const catalogCsv = [
+    'sku,nombre,categoria,marca,presentacion,precio,stock,aliases,activo',
+    'LIVE-CHO-01,Chocoramo,Snacks,Ramo,65 g,2800,10,chocoramo|ponque ramo,true',
+    'LIVE-COC-01,Coca-Cola,Bebidas,Coca-Cola,350 ml,3500,8,coca,true',
+  ].join('\n');
+  const catalogValidation = await postJson(`${base}/api/saas/tenants/${tenantId}/google/catalog/validate`, { csvText: catalogCsv });
+  assert.equal(catalogValidation.valid, true);
+  assert.equal(catalogValidation.canImport, true);
+  const catalogImport = await postJson(`${base}/api/saas/tenants/${tenantId}/google/catalog/import`, { csvText: catalogCsv, fileName: 'catalogo.csv' });
+  assert.equal(catalogImport.source, 'google_sheets_live');
+  assert.equal(catalogImport.activeRows, 2);
+  assert.equal(liveSheets.Catalogo.length, 3);
 
   const upsertProfile = await postJson(`${base}/api/tools/google_sheets_customer_profile_upsert/smoke-test`, {
     tenantId,

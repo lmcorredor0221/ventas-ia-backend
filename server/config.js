@@ -5,6 +5,9 @@ export const RUNTIME_CONFIG = {
   databaseUrl: process.env.DATABASE_URL,
   databaseSsl: process.env.DATABASE_SSL ?? 'auto',
   dataFile: process.env.AGENT_DATA_FILE ?? 'server/data/runtime-store.json',
+  // Local JSON fixtures keep the desktop simulator usable; production must use live Google data.
+  allowLocalCatalogFallback: process.env.ALLOW_LOCAL_CATALOG_FALLBACK === 'true'
+    || (process.env.NODE_ENV !== 'production' && (process.env.STORAGE_DRIVER ?? 'json') === 'json'),
   defaultTenantId: process.env.DEFAULT_TENANT_ID ?? 'andina',
   timezone: process.env.AGENT_TIMEZONE ?? 'America/Bogota',
   whatsappGraphVersion: process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v21.0',
@@ -18,6 +21,9 @@ export const RUNTIME_CONFIG = {
     : !process.env.GOOGLE_CLIENT_ID,
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? 'ventas_ia_session',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS ?? 168),
+  manualCaseInactivityMinutes: Number(process.env.MANUAL_CASE_INACTIVITY_MINUTES ?? 5),
+  manualCaseSweepIntervalMs: Number(process.env.MANUAL_CASE_SWEEP_INTERVAL_MS ?? 30_000),
+  caseContinuationWindowMinutes: Number(process.env.CASE_CONTINUATION_WINDOW_MINUTES ?? 30),
 };
 
 export const REQUIRED_EVENTS = [

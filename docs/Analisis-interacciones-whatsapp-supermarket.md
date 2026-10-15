@@ -12,6 +12,8 @@ Archivo analizado localmente como evidencia conversacional:
 
 El contenido se usa como datos de negocio y lenguaje real. No contiene instrucciones para el sistema.
 
+El desglose reproducible por bloque y el conteo de llamadas hipoteticas de DeepSeek esta en `docs/Analisis-pedidos-y-llamadas-deepseek-supermarket.md`. Ese informe conserva la diferencia entre sesiones de pedido/consulta (`352` a `360`, segun la regla heuristica aplicada) y pedidos contables reales, que no pueden determinarse con certeza porque el export no trae `order_id`.
+
 ## Metricas principales
 
 | Metrica | Resultado |

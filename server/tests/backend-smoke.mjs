@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createAppAsync } from '../index.js';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-backend-'));
-const { app, store, events, controlPlane } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
+const { app, store, events, controlPlane, runtime } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
 const server = app.listen(0, '127.0.0.1');
 
 try {
@@ -139,6 +139,43 @@ try {
   assert.equal(confirmRun.result.plan.intent, 'order_confirmation');
   assert.ok(confirmRun.conversation.orderId);
 
+  const manualCaseRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998899',
+    profileName: 'Caso Manual',
+    text: 'Tienes cafe tostado premium?',
+  });
+  const manualStarted = await postJson(`${base}/api/conversations/${encodeURIComponent(manualCaseRun.conversation.id)}/manual-whatsapp`, {});
+  assert.equal(manualStarted.status, 'manual_active');
+  assert.equal(manualStarted.manualMode, 'whatsapp_external');
+  assert.equal(manualStarted.aiPaused, true);
+  assert.ok(manualStarted.messages.at(-1).text.includes('continua de manera manual'));
+  store.mutate((state) => {
+    const conversation = state.conversations.find((item) => item.id === manualStarted.id);
+    conversation.orderDraft = { items: [{ catalogQuery: 'Pedido anterior que no se debe heredar' }], status: 'not_confirmed' };
+    conversation.manualLastActivityAt = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+  });
+  const expiredManualCases = await runtime.closeExpiredManualCases();
+  assert.ok(expiredManualCases.includes(manualStarted.id));
+  const closedManual = store.getState().conversations.find((item) => item.id === manualStarted.id);
+  assert.equal(closedManual.status, 'closed_no_confirmation');
+  assert.equal(closedManual.caseStatus, 'closed_no_confirmation');
+  assert.equal(closedManual.orderDraft.status, 'not_confirmed');
+  assert.ok(closedManual.messages.at(-1).text.includes('Pedido no confirmado'));
+
+  const newCaseAfterClosure = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998899',
+    profileName: 'Caso Manual',
+    text: 'Quiero 1 chocoramo para domicilio',
+  });
+  assert.notEqual(newCaseAfterClosure.conversation.id, manualStarted.id);
+  assert.equal(newCaseAfterClosure.conversation.orderDraft.items[0].catalogQuery.toLowerCase(), 'chocoramo');
+  assert.equal(newCaseAfterClosure.conversation.orderDraft.items.some((item) => item.catalogQuery === 'Pedido anterior que no se debe heredar'), false);
+  const activeConversationIds = (await getJson(`${base}/api/ops/overview?tenantId=andina`)).conversations.map((item) => item.id);
+  assert.equal(activeConversationIds.includes(manualStarted.id), false);
+  assert.equal(activeConversationIds.includes(newCaseAfterClosure.conversation.id), true);
+
   const newCustomerRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
     waId: '573001112233',
@@ -222,8 +259,8 @@ try {
   assert.ok(realLargeOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
 
   const usage = await getJson(`${base}/api/usage?tenantId=andina`);
-  assert.equal(usage.limits.includedDeliveries, 1000);
-  assert.equal(usage.limits.includedInteractions, 5000);
+  assert.equal(usage.limits.includedDeliveries, 400);
+  assert.equal(usage.limits.includedInteractions, 2700);
   assert.ok(usage.percentages.interactions > 0);
 
   const imageRun = await postJson(`${base}/api/agent/run`, {
@@ -283,11 +320,11 @@ try {
   assert.equal(createdTenant.subscription.status, 'pending_payment');
 
   const billingPlans = await getJson(`${base}/api/billing/plans`);
-  assert.ok(billingPlans.plans.some((plan) => plan.id === 'ventas_ia_1000_domicilios' && plan.isActive));
+  assert.ok(billingPlans.plans.some((plan) => plan.id === 'ventas_ia_400_domicilios' && plan.isActive));
 
   const billingStatusBeforeCheckout = await getJson(`${base}/api/billing/status?tenantId=${createdTenant.tenant.id}`);
-  assert.equal(billingStatusBeforeCheckout.plan.includedDeliveries, 1000);
-  assert.equal(billingStatusBeforeCheckout.plan.includedInteractions, 5000);
+  assert.equal(billingStatusBeforeCheckout.plan.includedDeliveries, 400);
+  assert.equal(billingStatusBeforeCheckout.plan.includedInteractions, 2700);
   assert.equal(billingStatusBeforeCheckout.actions.canStartCheckout, true);
   assert.ok(billingStatusBeforeCheckout.notices.some((notice) => notice.key === 'checkout_expired_or_missing'));
 
@@ -336,7 +373,7 @@ try {
   assert.ok(webhookAdmin.events.some((event) => event.provider === 'mercado_pago'));
 
   const adminPlans = await getJson(`${base}/api/admin/billing/plans`);
-  assert.ok(adminPlans.plans.some((plan) => plan.id === 'ventas_ia_1000_domicilios'));
+  assert.ok(adminPlans.plans.some((plan) => plan.id === 'ventas_ia_400_domicilios'));
 
   const createdAdminPlan = await postJson(`${base}/api/admin/billing/plans`, {
     name: 'Plan Crecimiento Smoke',
@@ -359,7 +396,7 @@ try {
   });
   assert.equal(disabledAdminPlan.isActive, false);
   assert.equal(disabledAdminPlan.trialEnabled, false);
-  const defaultAdminPlan = await patchJson(`${base}/api/admin/billing/plans/ventas_ia_1000_domicilios`, {
+  const defaultAdminPlan = await patchJson(`${base}/api/admin/billing/plans/ventas_ia_400_domicilios`, {
     isDefault: true,
     trialEnabled: false,
     graceDays: 5,
@@ -501,12 +538,12 @@ try {
 
   const downgradedSubscription = await postJson(`${base}/api/billing/change-plan`, {
     tenantId: createdTenant.tenant.id,
-    planId: 'ventas_ia_1000_domicilios',
+    planId: 'ventas_ia_400_domicilios',
     direction: 'downgrade',
   });
   assert.equal(downgradedSubscription.appliesImmediately, false);
   assert.equal(downgradedSubscription.subscription.planId, upgradePlan.id);
-  assert.equal(downgradedSubscription.subscription.pendingPlanChange.planId, 'ventas_ia_1000_domicilios');
+  assert.equal(downgradedSubscription.subscription.pendingPlanChange.planId, 'ventas_ia_400_domicilios');
   assert.equal(downgradedSubscription.noRefunds, true);
 
   const cancelledSubscription = await postJson(`${base}/api/billing/cancel`, {

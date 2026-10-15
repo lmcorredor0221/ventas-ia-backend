@@ -278,11 +278,11 @@ try {
   assert.ok(overview.usage.metrics.agent_interactions >= 2);
 
   const apiUsage = await getJson(`${base}/api/usage?tenantId=${tenantId}`);
-  assert.equal(apiUsage.limits.includedDeliveries, 1000);
-  assert.equal(apiUsage.limits.includedInteractions, 5000);
+  assert.equal(apiUsage.limits.includedDeliveries, 400);
+  assert.equal(apiUsage.limits.includedInteractions, 2700);
 
   const billingStatus = await getJson(`${base}/api/billing/status?tenantId=${tenantId}`);
-  assert.equal(billingStatus.plan.id, 'ventas_ia_1000_domicilios');
+  assert.equal(billingStatus.plan.id, 'ventas_ia_400_domicilios');
   assert.ok(billingStatus.payments.some((payment) => payment.status === 'approved'));
 
   const billingRows = await store.pool.query(`
