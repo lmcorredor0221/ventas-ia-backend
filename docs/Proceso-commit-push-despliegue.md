@@ -107,10 +107,22 @@ curl.exe -sS https://via.leanagentbuilder.com/api/health
 - Supabase: no borrar el proyecto; revisar migraciones y restaurar desde backup si una operación de datos lo exige.
 - El dominio `www.leanagentbuilder.com` permanece intacto durante todo el proceso.
 
-## Evidencia final
+## Evidencia final de esta ejecución
 
-- Commit backend: pendiente de ejecución.
-- Commit frontend: pendiente de ejecución.
-- Deployment Render: pendiente de ejecución.
-- Deployment Vercel: pendiente de ejecución.
-- Verificación Supabase: pendiente de ejecución.
+- Backend publicado: commit `71f2e3eba8daab064f8e0666ddc0ccc3467ac7b8` en `main`.
+- Frontend publicado: commits `63a9b70aad9094ede6be15941025ab941176808a` y `a12181672eec2f8faf90aa6a018097404630504a` en `main`.
+- Render: deployment `dep-db8ifi0u01pc738arm9g`, estado `live`, servicio `srv-db7sqqmq1p3s73elv1eg`.
+- Render directo: `https://ventas-ia-backend-free.onrender.com/health` respondió `200`.
+- Seguridad backend: `/api/auth/me` sin sesión respondió `401 Authentication required`.
+- Vercel: deployment `dpl_6z8yg2SsdwdU5RxGySz3UAhNeJr8`, estado `READY`, asociado a `via.leanagentbuilder.com` y al commit `a121816`.
+- Vercel SPA: `/landing` y sus assets respondieron `200` después de agregar el fallback a `/index.html`.
+- Proxy: `https://via.leanagentbuilder.com/api/health` respondió `200` y llegó al backend nuevo de Render.
+- Supabase: el servicio Render inició correctamente con PostgreSQL configurado. La conexión Supabase disponible en esta sesión solo mostró el proyecto anterior y devolvió permiso insuficiente al consultar el ref independiente `mmcxphpstxjugxjrdffb`; no se aplicó SQL manual ni se expusieron credenciales.
+- Integridad: no se detectaron secretos en los diffs publicados y `www.leanagentbuilder.com` no fue modificado.
+
+## Pendientes explícitos
+
+- Reautenticar el conector de Supabase con acceso al proyecto independiente y confirmar migraciones/backup desde su panel.
+- Completar OAuth público de Google Drive/Sheets.
+- Configurar y probar callbacks reales de WhatsApp Cloud API y Mercado Pago.
+- Rotar la API key de DeepSeek compartida durante la conversación antes de abrir producción a clientes.
