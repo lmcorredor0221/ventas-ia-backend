@@ -1264,6 +1264,36 @@ export class SaasControlPlane {
     return this.getWhatsAppOnboarding(tenantId);
   }
 
+  resetWhatsAppOnboarding(tenantId, { actor } = {}) {
+    const tenant = this.requireTenant(tenantId);
+    if (tenant.config?.whatsapp?.phoneNumberId) {
+      const error = new Error('No se puede reiniciar porque este WhatsApp ya esta conectado. Desconectalo de forma controlada antes de iniciar otra configuracion.');
+      error.statusCode = 409;
+      error.code = 'whatsapp_channel_already_connected';
+      throw error;
+    }
+
+    this.store.mutate((state) => {
+      delete state.whatsappOnboardingByTenant[tenantId];
+      const onboarding = state.onboardingByTenant[tenantId];
+      const whatsappStep = onboarding?.steps?.find((step) => step.key === 'whatsapp');
+      if (whatsappStep) {
+        whatsappStep.status = 'pending';
+        whatsappStep.completedAt = null;
+        onboarding.status = 'in_progress';
+        onboarding.updatedAt = new Date().toISOString();
+      }
+    });
+    this.events.emit({
+      type: 'whatsapp.onboarding.reset',
+      tenantId,
+      detail: 'Preparacion local de WhatsApp reiniciada',
+      metadata: { actorId: actor?.id ?? null },
+    });
+    this.audit(tenantId, 'whatsapp.onboarding.reset', 'whatsapp_connection', { actorId: actor?.id ?? null });
+    return this.getTenantBundle(tenantId);
+  }
+
   startWhatsAppEmbeddedSignup(tenantId) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_setup');

@@ -146,6 +146,17 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
+  router.post('/tenants/:tenantId/whatsapp/reset', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.resetWhatsAppOnboarding(req.params.tenantId, { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.onboarding.reset.requested', resource: 'whatsapp_connection' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/tenants/:tenantId/whatsapp/embedded-signup/start', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });

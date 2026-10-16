@@ -49,7 +49,25 @@ const { controlPlane, secretVault, store } = await createAppAsync({
 });
 
 try {
+  store.mutate((state) => {
+    const tenant = state.tenants.find((item) => item.id === 'andina');
+    tenant.config.whatsapp.phoneNumberId = null;
+  });
   controlPlane.mockActivateSubscription('andina');
+  controlPlane.saveWhatsAppOnboardingIntent('andina', {
+    setupPath: 'new_business',
+    hasWhatsAppBusiness: false,
+    businessName: 'Tienda Contrato',
+    contactPhone: '+57 300 000 0000',
+  });
+  const subscriptionBeforeReset = controlPlane.getTenantBundle('andina').subscription;
+  const reset = controlPlane.resetWhatsAppOnboarding('andina', { actor: { id: 'owner-contract' } });
+  assert.equal(reset.whatsappOnboarding.setupPath, null);
+  assert.equal(reset.whatsappOnboarding.status, 'needs_path');
+  assert.equal(reset.subscription.id, subscriptionBeforeReset.id);
+  assert.equal(store.getState().whatsappOnboardingByTenant.andina, undefined);
+  assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.onboarding.reset'));
+
   controlPlane.saveWhatsAppOnboardingIntent('andina', {
     setupPath: 'new_business',
     hasWhatsAppBusiness: false,
@@ -68,6 +86,10 @@ try {
   assert.equal(secretVault.readSecret(result.tenant.config.whatsapp.accessTokenRef), 'tenant-a-meta-token');
   assert.equal(graphCalls.length, 5);
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.embedded_signup.completed'));
+  assert.throws(
+    () => controlPlane.resetWhatsAppOnboarding('andina'),
+    (error) => error.code === 'whatsapp_channel_already_connected' && error.statusCode === 409,
+  );
   console.log('WhatsApp Embedded Signup contract tests passed');
 } finally {
   await store.close?.();
