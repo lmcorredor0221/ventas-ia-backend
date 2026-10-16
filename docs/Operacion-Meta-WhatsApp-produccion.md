@@ -33,9 +33,13 @@ No existe renovacion silenciosa ni se solicita al usuario copiar un token. Meta 
 4. Definir en Render `WHATSAPP_PROVIDER_MODE=live`, el App ID, App Secret, Config ID, URL publica y token de verificacion. Nunca se guardan en frontend ni en un tenant.
 5. Mantener `WHATSAPP_GRAPH_API_VERSION=v26.0`, igual a la version de suscripcion confirmada por Meta.
 
+## Estado de publicacion
+
+La aplicacion global **Ventas IA Ops Store** quedo publicada el 16 de octubre de 2026. Meta confirma que esta disponible para el publico, por lo que los propietarios de tiendas ya no necesitan pertenecer a los roles de desarrollo de la app para abrir el flujo de autorizacion.
+
 ## Antes de abrir a todos los tenants
 
-- Publicar la app de Meta despues de completar los requisitos y permisos de produccion que solicite Meta.
+- Confirmar en Meta que la app continua publicada y que los permisos de WhatsApp requeridos siguen aprobados para produccion.
 - Probar Embedded Signup con una tienda piloto y un numero real.
 - Confirmar que el webhook recibe un mensaje entrante y que el backend lo asocia al `phone_number_id` del tenant correcto.
 - Vigilar desde administracion de plataforma los fallos de webhook y los tokens proximos a vencer.
