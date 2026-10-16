@@ -10,8 +10,9 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-    const expected = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? 'dev-verify-token';
-    const ok = mode === 'subscribe' && token === expected;
+    const expected = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN
+      ?? (process.env.NODE_ENV === 'production' ? null : 'dev-verify-token');
+    const ok = Boolean(expected) && mode === 'subscribe' && token === expected;
     recordWebhookEvent(store, {
       provider: 'meta_whatsapp_cloud_api',
       eventType: 'verification',
@@ -108,8 +109,8 @@ function extractPhoneNumberId(payload) {
 }
 
 function verifySignature(req) {
-  const appSecret = process.env.WHATSAPP_APP_SECRET;
-  if (!appSecret) return true;
+  const appSecret = process.env.WHATSAPP_APP_SECRET ?? process.env.META_APP_SECRET;
+  if (!appSecret) return process.env.NODE_ENV !== 'production';
   const signature = req.get('X-Hub-Signature-256');
   if (!signature?.startsWith('sha256=')) return false;
   const expected = `sha256=${crypto.createHmac('sha256', appSecret).update(req.rawBody ?? '').digest('hex')}`;

@@ -337,7 +337,7 @@ export class SaasControlPlane {
     return { accepted: true, topic, dataId, subscription, status: this.getOnboardingStatus(tenantId) };
   }
 
-  beginGoogleOAuth(tenantId, { loginHint } = {}) {
+  beginGoogleOAuth(tenantId, { loginHint, returnMode = 'api' } = {}) {
     const tenant = this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'google_oauth');
     const state = crypto.randomBytes(24).toString('hex');
@@ -352,6 +352,7 @@ export class SaasControlPlane {
         tenantId,
         loginHint: loginHint ?? tenant.lifecycle?.ownerEmail,
         scopes: GOOGLE_SCOPES,
+        returnMode: returnMode === 'browser' ? 'browser' : 'api',
         createdAt: now,
         expiresAt,
       };
@@ -380,6 +381,7 @@ export class SaasControlPlane {
       expiresAt,
       redirectUri,
       scopes: GOOGLE_SCOPES,
+      returnMode: returnMode === 'browser' ? 'browser' : 'api',
       authorizationUrl: url.toString(),
     };
   }
@@ -455,7 +457,29 @@ export class SaasControlPlane {
       accountEmail: connection.accountEmail,
       scopes: connection.scopes,
     });
-    return { connection, status: this.getOnboardingStatus(tenantId) };
+    return {
+      connection,
+      status: this.getOnboardingStatus(tenantId),
+      returnMode: oauthState.returnMode ?? 'api',
+    };
+  }
+
+  failGoogleOAuth({ state, reason }) {
+    const oauthState = this.consumeOAuthState(state);
+    const tenantId = oauthState.tenantId;
+    const normalizedReason = normalizeGoogleOAuthFailure(reason);
+    this.events.emit({
+      type: 'google.oauth.cancelled',
+      tenantId,
+      detail: 'Autorizacion Google no completada',
+      metadata: { reason: normalizedReason },
+    });
+    this.audit(tenantId, 'google.oauth.cancelled', 'google_connection', { reason: normalizedReason });
+    return {
+      tenantId,
+      reason: normalizedReason,
+      returnMode: oauthState.returnMode ?? 'api',
+    };
   }
 
   async provisionGoogleWorkspace(tenantId) {
@@ -1271,8 +1295,10 @@ export class SaasControlPlane {
       return {
         ready: false,
         mode: 'guided_manual',
-        reason: 'meta_app_not_configured',
-        message: 'Faltan credenciales Meta para abrir Embedded Signup desde la microapp.',
+        reason: status.reason,
+        message: status.reason === 'meta_webhook_not_configured'
+          ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
+          : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
         manualSteps: status.steps,
         status: this.getWhatsAppOnboarding(tenantId),
       };
@@ -1297,6 +1323,7 @@ export class SaasControlPlane {
     const code = String(payload.code ?? '').trim();
     const wabaId = String(payload.wabaId ?? '').trim();
     const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
+    const registrationPin = String(payload.registrationPin ?? '').trim();
     const appId = String(process.env.META_APP_ID ?? '').trim();
     const appSecret = String(process.env.META_APP_SECRET ?? process.env.WHATSAPP_APP_SECRET ?? '').trim();
     const configId = String(process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID ?? '').trim();
@@ -1351,6 +1378,34 @@ export class SaasControlPlane {
       throw error;
     }
 
+    // Meta keeps the business assets as its source of truth. After the owner
+    // approves Embedded Signup, finish the tenant-specific operational binding.
+    await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`,
+      { method: 'POST', headers: { authorization: `Bearer ${accessToken}` } },
+      'whatsapp_waba_webhook_subscription',
+    );
+
+    const setupPath = this.getWhatsAppOnboarding(tenantId).setupPath;
+    const requiresPhoneRegistration = setupPath !== 'cloud_api_existing';
+    if (requiresPhoneRegistration) {
+      if (!/^\d{6}$/.test(registrationPin)) {
+        const error = new Error('Crea un PIN de seguridad de seis dígitos para proteger el número en Meta.');
+        error.statusCode = 422;
+        error.code = 'whatsapp_registration_pin_required';
+        throw error;
+      }
+      await fetchGraphJson(
+        `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(phoneNumberId)}/register`,
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ messaging_product: 'whatsapp', pin: registrationPin }),
+        },
+        'whatsapp_phone_registration',
+      );
+    }
+
     const accessTokenRef = this.secretVault.saveSecret({
       tenantId,
       name: 'WHATSAPP_ACCESS_TOKEN',
@@ -1370,6 +1425,8 @@ export class SaasControlPlane {
       phoneNumberId,
       accessTokenRef,
       configId,
+      webhookSubscribed: true,
+      phoneRegistered: requiresPhoneRegistration,
     });
     return result;
   }
@@ -1665,6 +1722,20 @@ export class SaasControlPlane {
     return process.env.GOOGLE_REDIRECT_URI ?? `${this.publicBaseUrl()}/api/saas/google/oauth/callback`;
   }
 
+  googleOAuthReturnUrl({ tenantId, outcome, reason } = {}) {
+    const url = new URL(this.frontendBaseUrl());
+    url.searchParams.set('app', '1');
+    url.searchParams.set('view', 'onboarding');
+    url.searchParams.set('googleOAuth', outcome ?? 'failed');
+    if (tenantId) url.searchParams.set('tenant', tenantId);
+    if (reason) url.searchParams.set('reason', reason);
+    return url.toString();
+  }
+
+  frontendBaseUrl() {
+    return this.config.frontendAppUrl ?? this.publicBaseUrl();
+  }
+
   publicBaseUrl() {
     return process.env.PUBLIC_APP_URL ?? `http://${this.config.host}:${this.config.port}`;
   }
@@ -1840,7 +1911,16 @@ function normalizeWhatsAppSetupPath(value) {
 function whatsappOnboardingForTenant({ tenant, saved }) {
   const whatsapp = tenant.config?.whatsapp ?? {};
   const setupPath = saved.setupPath ?? (whatsapp.phoneNumberId ? 'cloud_api_existing' : null);
-  const canAutomate = Boolean(process.env.META_APP_ID && (process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID || process.env.META_CONFIG_ID));
+  const metaConfigured = Boolean(
+    process.env.META_APP_ID
+    && (process.env.META_APP_SECRET || process.env.WHATSAPP_APP_SECRET)
+    && (process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID || process.env.META_CONFIG_ID),
+  );
+  const webhookConfigured = Boolean(
+    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN
+    && isHttpsUrl(whatsappWebhookPublicUrl()),
+  );
+  const canAutomate = metaConfigured && webhookConfigured;
   const connected = Boolean(whatsapp.phoneNumberId);
   const status = connected ? 'connected' : saved.status ?? (setupPath ? 'in_progress' : 'needs_path');
   const nextAction = connected
@@ -1856,7 +1936,11 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     status,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
-    reason: canAutomate ? null : 'meta_app_not_configured',
+    reason: canAutomate
+      ? null
+      : !metaConfigured
+        ? 'meta_app_not_configured'
+        : 'meta_webhook_not_configured',
     nextAction,
     hasWhatsAppBusiness: saved.hasWhatsAppBusiness ?? null,
     businessName: saved.businessName ?? tenant.name,
@@ -1881,6 +1965,21 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     lastAttemptAt: saved.lastAttemptAt ?? null,
     updatedAt: saved.updatedAt ?? null,
   };
+}
+
+function whatsappWebhookPublicUrl() {
+  const configured = String(process.env.WHATSAPP_WEBHOOK_PUBLIC_URL ?? '').trim();
+  if (configured) return configured;
+  const baseUrl = String(process.env.PUBLIC_APP_URL ?? '').trim().replace(/\/$/, '');
+  return baseUrl ? `${baseUrl}/webhooks/whatsapp` : '';
+}
+
+function isHttpsUrl(value) {
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function whatsappRequirementsForPath(setupPath) {
@@ -1986,6 +2085,13 @@ async function fetchMercadoPagoPreapproval(preapprovalId, accessToken) {
 
 function normalizeSubscriptionStatus(status) {
   return normalizeBillingSubscriptionStatus(status);
+}
+
+function normalizeGoogleOAuthFailure(reason) {
+  const value = String(reason ?? '').toLowerCase();
+  if (value === 'access_denied') return 'cancelled';
+  if (value === 'temporarily_unavailable') return 'temporarily_unavailable';
+  return 'failed';
 }
 
 function isOnOrBefore(value, now) {

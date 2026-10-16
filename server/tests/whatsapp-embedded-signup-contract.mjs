@@ -29,6 +29,17 @@ global.fetch = async (url, options = {}) => {
     assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
     return jsonResponse({ data: [{ id: '200000000001' }] });
   }
+  if (href.includes('/300000000001/subscribed_apps')) {
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
+    return jsonResponse({ success: true });
+  }
+  if (href.includes('/200000000001/register')) {
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
+    assert.deepEqual(JSON.parse(options.body), { messaging_product: 'whatsapp', pin: '123456' });
+    return jsonResponse({ success: true });
+  }
   throw new Error(`Unexpected Graph API request: ${href}`);
 };
 
@@ -39,16 +50,23 @@ const { controlPlane, secretVault, store } = await createAppAsync({
 
 try {
   controlPlane.mockActivateSubscription('andina');
+  controlPlane.saveWhatsAppOnboardingIntent('andina', {
+    setupPath: 'new_business',
+    hasWhatsAppBusiness: false,
+    businessName: 'Tienda Contrato',
+    contactPhone: '+57 300 000 0000',
+  });
   const result = await controlPlane.completeWhatsAppEmbeddedSignup('andina', {
     code: 'embedded-code-contract',
     wabaId: '300000000001',
     phoneNumberId: '200000000001',
+    registrationPin: '123456',
   });
 
   assert.equal(result.tenant.config.whatsapp.phoneNumberId, '200000000001');
   assert.equal(result.tenant.config.whatsapp.wabaId, '300000000001');
   assert.equal(secretVault.readSecret(result.tenant.config.whatsapp.accessTokenRef), 'tenant-a-meta-token');
-  assert.equal(graphCalls.length, 3);
+  assert.equal(graphCalls.length, 5);
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.embedded_signup.completed'));
   console.log('WhatsApp Embedded Signup contract tests passed');
 } finally {
