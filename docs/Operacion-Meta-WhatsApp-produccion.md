@@ -27,11 +27,13 @@ No existe renovacion silenciosa ni se solicita al usuario copiar un token. Meta 
 
 ## Configuracion inicial de la plataforma
 
-1. Crear una configuracion de WhatsApp Embedded Signup de 60 dias en la app de Meta con `whatsapp_business_management` y `whatsapp_business_messaging`.
-2. Configurar la URL HTTPS `https://ventas-ia-backend-free.onrender.com/webhooks/whatsapp` y verificarla con el mismo token almacenado en Render.
-3. Suscribir el campo `messages` de WhatsApp Business Account; Meta tambien puede suscribir eventos de cuenta y plantillas.
-4. Definir en Render `WHATSAPP_PROVIDER_MODE=live`, el App ID, App Secret, Config ID, URL publica y token de verificacion. Nunca se guardan en frontend ni en un tenant.
-5. Mantener `WHATSAPP_GRAPH_API_VERSION=v26.0`, igual a la version de suscripcion confirmada por Meta.
+1. Registrar la plataforma Web `https://via.leanagentbuilder.com/` en Inicio de sesion con Facebook para empresas y mantener activos OAuth web y el SDK de JavaScript.
+2. Crear una configuracion de WhatsApp Embedded Signup v4 de 60 dias en la app de Meta con `whatsapp_business_management` y `whatsapp_business_messaging`.
+3. Lanzar Embedded Signup con su `config_id`, `response_type=code`, `override_default_response_type=true` y `extras: { setup: {} }`. La configuracion v4 define permisos y activos; no se debe forzar el parametro heredado `sessionInfoVersion`.
+4. Configurar la URL HTTPS `https://ventas-ia-backend-free.onrender.com/webhooks/whatsapp` y verificarla con el mismo token almacenado en Render.
+5. Suscribir el campo `messages` de WhatsApp Business Account; Meta tambien puede suscribir eventos de cuenta y plantillas.
+6. Definir en Render `WHATSAPP_PROVIDER_MODE=live`, el App ID, App Secret, Config ID, URL publica y token de verificacion. Nunca se guardan en frontend ni en un tenant.
+7. Mantener `WHATSAPP_GRAPH_API_VERSION=v26.0`, igual a la version de suscripcion confirmada por Meta.
 
 ## Estado de publicacion
 
