@@ -1,7 +1,7 @@
 # Proceso de commit, push y despliegue
 
-Fecha de ejecución: 2026-10-15
-Proyecto: Ventas IA Ops Store
+Fecha de ejecución: 2026-10-15  
+Proyecto: Ventas IA Ops Store  
 Administrador de plataforma: `lmcorredor@gmail.com`
 
 ## Objetivo
@@ -126,3 +126,25 @@ curl.exe -sS https://via.leanagentbuilder.com/api/health
 - Completar OAuth público de Google Drive/Sheets.
 - Configurar y probar callbacks reales de WhatsApp Cloud API y Mercado Pago.
 - Rotar la API key de DeepSeek compartida durante la conversación antes de abrir producción a clientes.
+
+## Actualización: Meta Embedded Signup — 2026-10-16
+
+Se publicó la mejora de conexión autoservicio de WhatsApp con commits separados:
+
+- Backend: `f26ca1287f3aec5b50bb7fc1dc16609f4c9c9231` (`feat: harden Meta Embedded Signup completion`).
+- Frontend: `3fb8f72c4bfd1e694265889a180ebc342504ccd6` (`feat: simplify WhatsApp self-service onboarding`).
+
+Validación previa al release:
+
+- Backend: `npm run test:backend` y `npm run test:plan` aprobados.
+- Frontend: `npm run build`, `tests/verify_ui.py` y `tests/verify_landing.py` aprobados.
+- Se comprobó la página pública `https://via.leanagentbuilder.com/eliminar-datos` después del despliegue de Vercel.
+
+Despliegue y comprobaciones públicas:
+
+- Vercel publicó automáticamente el frontend desde `main`.
+- Render tiene el auto-deploy desactivado; se publicó manualmente el backend con el deploy `dep-db946rvt5n8s73e88r7g`, estado `live`.
+- `https://ventas-ia-backend-free.onrender.com/health` y `https://via.leanagentbuilder.com/api/health` respondieron `200`.
+- La verificación de webhook con un token inválido respondió `403`.
+
+El release no completa por sí solo la habilitación pública de Meta. Quedan fuera de Git y deben configurarse en Render/Meta: `META_APP_ID`, `META_APP_SECRET`, `WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` y la URL HTTPS pública del webhook. También se debe completar la publicación y revisión de la aplicación global de Meta antes de incorporar tiendas externas.
