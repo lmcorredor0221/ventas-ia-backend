@@ -10,7 +10,10 @@ export const RUNTIME_CONFIG = {
     || (process.env.NODE_ENV !== 'production' && (process.env.STORAGE_DRIVER ?? 'json') === 'json'),
   defaultTenantId: process.env.DEFAULT_TENANT_ID ?? 'andina',
   timezone: process.env.AGENT_TIMEZONE ?? 'America/Bogota',
-  whatsappGraphVersion: process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v21.0',
+  // Keep the default aligned with the webhook version configured in Meta.
+  whatsappGraphVersion: process.env.WHATSAPP_GRAPH_API_VERSION ?? 'v26.0',
+  whatsappTenantTokenLifetimeDays: Number(process.env.WHATSAPP_TENANT_TOKEN_LIFETIME_DAYS ?? 60),
+  whatsappTenantTokenRenewalWindowDays: Number(process.env.WHATSAPP_TENANT_TOKEN_RENEWAL_WINDOW_DAYS ?? 14),
   whatsappMode: process.env.WHATSAPP_PROVIDER_MODE ?? 'mock',
   llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 15000),
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 1200),

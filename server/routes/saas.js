@@ -160,8 +160,19 @@ export function createSaasRouter({ controlPlane, auth }) {
   router.post('/tenants/:tenantId/whatsapp/embedded-signup/start', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId);
+      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'connect' });
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.requested', resource: 'whatsapp_connection' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/whatsapp/embedded-signup/renew', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'renew' });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.renewal_requested', resource: 'whatsapp_connection' });
       res.json(result);
     } catch (error) {
       next(error);

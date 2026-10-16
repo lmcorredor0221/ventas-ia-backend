@@ -14,7 +14,7 @@ process.env.WHATSAPP_ACCESS_TOKEN_REF = 'wa-tenant-token';
 global.fetch = async (url, options = {}) => {
   const href = String(url);
   outboundCalls.push({ url: href, options });
-  assert.equal(href, 'https://graph.facebook.com/v21.0/100000000001/messages');
+  assert.equal(href, 'https://graph.facebook.com/v26.0/100000000001/messages');
   assert.equal(options.headers.authorization, 'Bearer wa-tenant-token');
   const body = JSON.parse(options.body);
   assert.equal(body.messaging_product, 'whatsapp');

@@ -1238,7 +1238,12 @@ export class SaasControlPlane {
   getWhatsAppOnboarding(tenantId) {
     const tenant = this.requireTenant(tenantId);
     const saved = this.store.getState().whatsappOnboardingByTenant[tenantId] ?? {};
-    return whatsappOnboardingForTenant({ tenant, saved });
+    return whatsappOnboardingForTenant({
+      tenant,
+      saved,
+      tokenLifetimeDays: this.config.whatsappTenantTokenLifetimeDays,
+      tokenRenewalWindowDays: this.config.whatsappTenantTokenRenewalWindowDays,
+    });
   }
 
   saveWhatsAppOnboardingIntent(tenantId, payload = {}) {
@@ -1294,18 +1299,32 @@ export class SaasControlPlane {
     return this.getTenantBundle(tenantId);
   }
 
-  startWhatsAppEmbeddedSignup(tenantId) {
+  startWhatsAppEmbeddedSignup(tenantId, { purpose = 'connect' } = {}) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_setup');
     const status = this.getWhatsAppOnboarding(tenantId);
+    const normalizedPurpose = purpose === 'renew' ? 'renew' : 'connect';
+    if (normalizedPurpose === 'renew' && !status.connected) {
+      const error = new Error('Conecta un numero de WhatsApp antes de renovar su acceso.');
+      error.statusCode = 409;
+      error.code = 'whatsapp_channel_not_connected';
+      throw error;
+    }
+    if (normalizedPurpose === 'connect' && status.connected) {
+      const error = new Error('Este WhatsApp ya esta conectado. Usa la renovacion para volver a autorizarlo con Meta.');
+      error.statusCode = 409;
+      error.code = 'whatsapp_channel_already_connected';
+      throw error;
+    }
     const now = new Date().toISOString();
     this.store.mutate((state) => {
       state.whatsappOnboardingByTenant[tenantId] = {
         ...(state.whatsappOnboardingByTenant[tenantId] ?? {}),
         tenantId,
-        status: status.canAutomate ? 'ready_to_connect' : 'guided_manual',
+        status: status.canAutomate ? (normalizedPurpose === 'renew' ? 'ready_to_renew' : 'ready_to_connect') : 'guided_manual',
         lastAttemptAt: now,
         lastAttemptMode: status.automationMode,
+        lastAttemptKind: normalizedPurpose,
         updatedAt: now,
         createdAt: state.whatsappOnboardingByTenant[tenantId]?.createdAt ?? now,
       };
@@ -1313,12 +1332,13 @@ export class SaasControlPlane {
     this.events.emit({
       type: 'whatsapp.embedded_signup.started',
       tenantId,
-      detail: status.canAutomate ? 'Embedded Signup WhatsApp preparado' : 'Guia manual WhatsApp requerida',
-      metadata: { automationMode: status.automationMode },
+      detail: status.canAutomate ? `Embedded Signup WhatsApp preparado para ${normalizedPurpose === 'renew' ? 'renovar' : 'conectar'}` : 'Guia manual WhatsApp requerida',
+      metadata: { automationMode: status.automationMode, purpose: normalizedPurpose },
     });
     this.audit(tenantId, 'whatsapp.embedded_signup.started', 'whatsapp_connection', {
       canAutomate: status.canAutomate,
       automationMode: status.automationMode,
+      purpose: normalizedPurpose,
     });
 
     if (!status.canAutomate) {
@@ -1340,7 +1360,7 @@ export class SaasControlPlane {
       launch: {
         appId: process.env.META_APP_ID,
         configId: process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID,
-        redirectUri: process.env.WHATSAPP_EMBEDDED_SIGNUP_REDIRECT_URI ?? `${this.publicBaseUrl()}/api/saas/whatsapp/embedded-signup/callback`,
+        graphApiVersion: this.config.whatsappGraphVersion,
         responseType: 'code',
       },
       status: this.getWhatsAppOnboarding(tenantId),
@@ -1416,8 +1436,9 @@ export class SaasControlPlane {
       'whatsapp_waba_webhook_subscription',
     );
 
-    const setupPath = this.getWhatsAppOnboarding(tenantId).setupPath;
-    const requiresPhoneRegistration = setupPath !== 'cloud_api_existing';
+    const onboarding = this.getWhatsAppOnboarding(tenantId);
+    const renewalAttempt = this.store.getState().whatsappOnboardingByTenant[tenantId]?.lastAttemptKind === 'renew';
+    const requiresPhoneRegistration = onboarding.setupPath !== 'cloud_api_existing' && !renewalAttempt;
     if (requiresPhoneRegistration) {
       if (!/^\d{6}$/.test(registrationPin)) {
         const error = new Error('Crea un PIN de seguridad de seis dígitos para proteger el número en Meta.');
@@ -1443,12 +1464,20 @@ export class SaasControlPlane {
       provider: 'meta_whatsapp_cloud_api',
       purpose: 'WhatsApp Cloud API token obtenido por Embedded Signup',
     });
+    const accessTokenIssuedAt = new Date().toISOString();
+    const tokenExpiresInSeconds = Number(tokenPayload.expires_in);
+    const tokenLifetimeMs = Number.isFinite(tokenExpiresInSeconds) && tokenExpiresInSeconds > 0
+      ? tokenExpiresInSeconds * 1000
+      : Math.max(1, Number(this.config.whatsappTenantTokenLifetimeDays ?? 60)) * 24 * 60 * 60 * 1000;
+    const accessTokenExpiresAt = new Date(Date.parse(accessTokenIssuedAt) + tokenLifetimeMs).toISOString();
     const result = this.saveWhatsAppBinding(tenantId, {
       phoneNumberId,
       wabaId,
       displayPhoneNumber: phone.display_phone_number ?? payload.displayPhoneNumber,
       verifiedName: phone.verified_name ?? payload.verifiedName,
       accessTokenRef,
+      accessTokenIssuedAt,
+      accessTokenExpiresAt,
     }, { verifiedByProvider: true });
     this.audit(tenantId, 'whatsapp.embedded_signup.completed', 'whatsapp_connection', {
       wabaId,
@@ -1457,6 +1486,8 @@ export class SaasControlPlane {
       configId,
       webhookSubscribed: true,
       phoneRegistered: requiresPhoneRegistration,
+      renewalAttempt,
+      accessTokenExpiresAt,
     });
     return result;
   }
@@ -1488,6 +1519,8 @@ export class SaasControlPlane {
           verifiedName: String(payload.verifiedName ?? nextTenant.name ?? '').trim() || null,
           phoneNumberIdRef: String(payload.phoneNumberIdRef ?? nextTenant.config.whatsapp?.phoneNumberIdRef ?? `${tenantId.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`).trim(),
           accessTokenRef: String(payload.accessTokenRef ?? nextTenant.config.whatsapp?.accessTokenRef ?? `${tenantId.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`).trim(),
+          accessTokenIssuedAt: String(payload.accessTokenIssuedAt ?? nextTenant.config.whatsapp?.accessTokenIssuedAt ?? '').trim() || null,
+          accessTokenExpiresAt: String(payload.accessTokenExpiresAt ?? nextTenant.config.whatsapp?.accessTokenExpiresAt ?? '').trim() || null,
           verifyTokenRef: String(payload.verifyTokenRef ?? nextTenant.config.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF').trim(),
           appSecretRef: String(payload.appSecretRef ?? nextTenant.config.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF').trim(),
         };
@@ -1498,6 +1531,7 @@ export class SaasControlPlane {
         tenantId,
         status: 'connected',
         connectedAt: now,
+        lastRenewedAt: payload.accessTokenIssuedAt ?? state.whatsappOnboardingByTenant[tenantId]?.lastRenewedAt ?? null,
         updatedAt: now,
         createdAt: state.whatsappOnboardingByTenant[tenantId]?.createdAt ?? now,
       };
@@ -1938,7 +1972,7 @@ function normalizeWhatsAppSetupPath(value) {
   return allowed.has(value) ? value : 'business_app_existing';
 }
 
-function whatsappOnboardingForTenant({ tenant, saved }) {
+function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, tokenRenewalWindowDays = 14 }) {
   const whatsapp = tenant.config?.whatsapp ?? {};
   const setupPath = saved.setupPath ?? (whatsapp.phoneNumberId ? 'cloud_api_existing' : null);
   const metaConfigured = Boolean(
@@ -1952,9 +1986,16 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
   );
   const canAutomate = metaConfigured && webhookConfigured;
   const connected = Boolean(whatsapp.phoneNumberId);
+  const token = whatsappAccessTokenHealth({
+    connected,
+    issuedAt: whatsapp.accessTokenIssuedAt,
+    expiresAt: whatsapp.accessTokenExpiresAt,
+    tokenLifetimeDays,
+    tokenRenewalWindowDays,
+  });
   const status = connected ? 'connected' : saved.status ?? (setupPath ? 'in_progress' : 'needs_path');
   const nextAction = connected
-    ? 'validate'
+    ? token.renewalRequired ? 'renew_embedded_signup' : 'validate'
     : canAutomate && setupPath
       ? 'start_embedded_signup'
       : setupPath
@@ -1964,6 +2005,7 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     tenantId: tenant.id,
     setupPath,
     status,
+    connected,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
     reason: canAutomate
@@ -1984,7 +2026,10 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
       accessTokenRef: whatsapp.accessTokenRef ?? null,
       verifyTokenRef: whatsapp.verifyTokenRef ?? null,
       appSecretRef: whatsapp.appSecretRef ?? null,
+      accessTokenIssuedAt: whatsapp.accessTokenIssuedAt ?? null,
+      accessTokenExpiresAt: whatsapp.accessTokenExpiresAt ?? null,
     },
+    token,
     requirements: whatsappRequirementsForPath(setupPath),
     steps: whatsappSetupSteps({ setupPath, connected, canAutomate, whatsapp }),
     externalLinks: {
@@ -1994,6 +2039,46 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     },
     lastAttemptAt: saved.lastAttemptAt ?? null,
     updatedAt: saved.updatedAt ?? null,
+  };
+}
+
+function whatsappAccessTokenHealth({ connected, issuedAt, expiresAt, tokenLifetimeDays, tokenRenewalWindowDays }) {
+  if (!connected) {
+    return {
+      status: 'not_connected',
+      renewalRequired: false,
+      issuedAt: null,
+      expiresAt: null,
+      daysRemaining: null,
+    };
+  }
+  const expiry = Date.parse(expiresAt ?? '');
+  if (!Number.isFinite(expiry)) {
+    return {
+      status: 'unknown',
+      renewalRequired: false,
+      issuedAt: issuedAt ?? null,
+      expiresAt: null,
+      daysRemaining: null,
+      message: 'Esta conexión se creó antes del control de vencimiento. Reautorízala cuando te sea posible para registrar su próxima fecha de renovación.',
+    };
+  }
+  const remainingMs = expiry - Date.now();
+  const daysRemaining = Math.ceil(remainingMs / (24 * 60 * 60 * 1000));
+  const renewalWindow = Math.max(1, Number(tokenRenewalWindowDays ?? 14));
+  const status = remainingMs <= 0 ? 'expired' : daysRemaining <= renewalWindow ? 'expiring_soon' : 'valid';
+  return {
+    status,
+    renewalRequired: status === 'expired' || status === 'expiring_soon',
+    issuedAt: issuedAt ?? null,
+    expiresAt: new Date(expiry).toISOString(),
+    daysRemaining,
+    message: status === 'expired'
+      ? 'La autorización con Meta venció. Renueva el acceso para seguir atendiendo pedidos.'
+      : status === 'expiring_soon'
+        ? `La autorización vence en ${daysRemaining} día${daysRemaining === 1 ? '' : 's'}. Renueva el acceso antes de que venza.`
+        : `La autorización está vigente por ${daysRemaining} día${daysRemaining === 1 ? '' : 's'}.`,
+    configuredLifetimeDays: Math.max(1, Number(tokenLifetimeDays ?? 60)),
   };
 }
 

@@ -5,7 +5,17 @@ import path from 'node:path';
 import { createAppAsync } from '../index.js';
 
 const originalFetch = global.fetch;
-const envKeys = ['META_APP_ID', 'META_APP_SECRET', 'WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID', 'SECRET_ENCRYPTION_KEY'];
+const envKeys = [
+  'META_APP_ID',
+  'META_APP_SECRET',
+  'WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID',
+  'WHATSAPP_WEBHOOK_PUBLIC_URL',
+  'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
+  'SECRET_ENCRYPTION_KEY',
+  'WHATSAPP_GRAPH_API_VERSION',
+  'WHATSAPP_TENANT_TOKEN_LIFETIME_DAYS',
+  'WHATSAPP_TENANT_TOKEN_RENEWAL_WINDOW_DAYS',
+];
 const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-whatsapp-embedded-'));
 const graphCalls = [];
@@ -14,7 +24,12 @@ Object.assign(process.env, {
   META_APP_ID: 'meta-app-contract',
   META_APP_SECRET: 'meta-secret-contract',
   WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID: 'meta-config-contract',
+  WHATSAPP_WEBHOOK_PUBLIC_URL: 'https://example.test/webhooks/whatsapp',
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-contract',
   SECRET_ENCRYPTION_KEY: 'embedded-signup-contract-key',
+  WHATSAPP_GRAPH_API_VERSION: 'v26.0',
+  WHATSAPP_TENANT_TOKEN_LIFETIME_DAYS: '60',
+  WHATSAPP_TENANT_TOKEN_RENEWAL_WINDOW_DAYS: '14',
 });
 
 global.fetch = async (url, options = {}) => {
@@ -84,8 +99,18 @@ try {
   assert.equal(result.tenant.config.whatsapp.phoneNumberId, '200000000001');
   assert.equal(result.tenant.config.whatsapp.wabaId, '300000000001');
   assert.equal(secretVault.readSecret(result.tenant.config.whatsapp.accessTokenRef), 'tenant-a-meta-token');
+  assert.ok(Date.parse(result.tenant.config.whatsapp.accessTokenIssuedAt));
+  assert.ok(Date.parse(result.tenant.config.whatsapp.accessTokenExpiresAt));
+  assert.equal(result.whatsappOnboarding.token.status, 'valid');
   assert.equal(graphCalls.length, 5);
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.embedded_signup.completed'));
+  const renewal = controlPlane.startWhatsAppEmbeddedSignup('andina', { purpose: 'renew' });
+  assert.equal(renewal.mode, 'embedded_signup');
+  assert.equal(renewal.launch.graphApiVersion, 'v26.0');
+  assert.throws(
+    () => controlPlane.startWhatsAppEmbeddedSignup('andina'),
+    (error) => error.code === 'whatsapp_channel_already_connected' && error.statusCode === 409,
+  );
   assert.throws(
     () => controlPlane.resetWhatsAppOnboarding('andina'),
     (error) => error.code === 'whatsapp_channel_already_connected' && error.statusCode === 409,
