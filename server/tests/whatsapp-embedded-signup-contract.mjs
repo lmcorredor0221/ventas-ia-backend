@@ -8,6 +8,7 @@ const originalFetch = global.fetch;
 const envKeys = [
   'META_APP_ID',
   'META_APP_SECRET',
+  'META_WHATSAPP_ADVANCED_ACCESS_APPROVED',
   'WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID',
   'WHATSAPP_WEBHOOK_PUBLIC_URL',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
@@ -23,6 +24,7 @@ const graphCalls = [];
 Object.assign(process.env, {
   META_APP_ID: 'meta-app-contract',
   META_APP_SECRET: 'meta-secret-contract',
+  META_WHATSAPP_ADVANCED_ACCESS_APPROVED: 'false',
   WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID: 'meta-config-contract',
   WHATSAPP_WEBHOOK_PUBLIC_URL: 'https://example.test/webhooks/whatsapp',
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-contract',
@@ -89,6 +91,11 @@ try {
     businessName: 'Tienda Contrato',
     contactPhone: '+57 300 000 0000',
   });
+  const pendingApproval = controlPlane.getWhatsAppOnboarding('andina');
+  assert.equal(pendingApproval.canAutomate, false);
+  assert.equal(pendingApproval.reason, 'meta_approval_pending');
+  assert.equal(controlPlane.startWhatsAppEmbeddedSignup('andina').mode, 'guided_manual');
+  process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED = 'true';
   const result = await controlPlane.completeWhatsAppEmbeddedSignup('andina', {
     code: 'embedded-code-contract',
     wabaId: '300000000001',

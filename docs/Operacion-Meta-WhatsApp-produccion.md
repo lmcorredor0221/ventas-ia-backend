@@ -34,10 +34,11 @@ No existe renovacion silenciosa ni se solicita al usuario copiar un token. Meta 
 5. Suscribir el campo `messages` de WhatsApp Business Account; Meta tambien puede suscribir eventos de cuenta y plantillas.
 6. Definir en Render `WHATSAPP_PROVIDER_MODE=live`, el App ID, App Secret, Config ID, URL publica y token de verificacion. Nunca se guardan en frontend ni en un tenant.
 7. Mantener `WHATSAPP_GRAPH_API_VERSION=v26.0`, igual a la version de suscripcion confirmada por Meta.
+8. Registrar la app como proveedor tecnologico independiente y solicitar a Meta la revision de `business_management`, `whatsapp_business_management` y los demas permisos exigidos por su flujo. Hasta que Meta conceda acceso avanzado, mantener `META_WHATSAPP_ADVANCED_ACCESS_APPROVED=false`. Tras verificar la aprobacion, cambiarlo a `true` para probar el alta completa de una tienda piloto; si falla, volver a `false` mientras se investiga.
 
 ## Estado de publicacion
 
-La aplicacion global **Ventas IA Ops Store** quedo publicada el 16 de octubre de 2026. Meta confirma que esta disponible para el publico, por lo que los propietarios de tiendas ya no necesitan pertenecer a los roles de desarrollo de la app para abrir el flujo de autorizacion.
+La aplicacion global **Ventas IA Ops Store** quedo publicada el 16 de octubre de 2026, pero publicar la app no concede acceso avanzado para registrar negocios de terceros. El 16 de octubre, `whatsapp_business_management` y `whatsapp_business_messaging` aparecian como **Listo para la prueba** en Meta; `business_management` aun no estaba agregado. El registro como proveedor tecnologico independiente y la revision de la app siguen pendientes. Por eso el backend bloquea Embedded Signup para tenants hasta que `META_WHATSAPP_ADVANCED_ACCESS_APPROVED=true`.
 
 ## Antes de abrir a todos los tenants
 

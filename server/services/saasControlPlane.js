@@ -1348,7 +1348,9 @@ export class SaasControlPlane {
         reason: status.reason,
         message: status.reason === 'meta_webhook_not_configured'
           ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
-          : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
+          : status.reason === 'meta_approval_pending'
+            ? 'Meta aún debe aprobar el acceso avanzado de Ventas IA para conectar tiendas de clientes.'
+            : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
         manualSteps: status.steps,
         status: this.getWhatsAppOnboarding(tenantId),
       };
@@ -1984,7 +1986,8 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN
     && isHttpsUrl(whatsappWebhookPublicUrl()),
   );
-  const canAutomate = metaConfigured && webhookConfigured;
+  const appReviewApproved = process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED === 'true';
+  const canAutomate = metaConfigured && webhookConfigured && appReviewApproved;
   const connected = Boolean(whatsapp.phoneNumberId);
   const token = whatsappAccessTokenHealth({
     connected,
@@ -2012,7 +2015,9 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
       ? null
       : !metaConfigured
         ? 'meta_app_not_configured'
-        : 'meta_webhook_not_configured',
+        : !webhookConfigured
+          ? 'meta_webhook_not_configured'
+          : 'meta_approval_pending',
     nextAction,
     hasWhatsAppBusiness: saved.hasWhatsAppBusiness ?? null,
     businessName: saved.businessName ?? tenant.name,
