@@ -522,6 +522,11 @@ export class AgentRuntime {
     const shouldReplyToCustomer = Boolean(normalizedNote && normalizedMode !== 'none');
     const currentState = this.store.getState();
     const currentRequest = currentState.pendingRequests.find((item) => item.id === requestId);
+    if (currentRequest?.status !== 'pending') {
+      const error = new Error('Esta tarea ya fue atendida. Actualiza la pantalla para ver el estado actual.');
+      error.statusCode = currentRequest ? 409 : 404;
+      throw error;
+    }
     const currentConversation = currentRequest
       ? currentState.conversations.find((item) => item.id === currentRequest.conversationId)
       : null;
@@ -535,6 +540,19 @@ export class AgentRuntime {
     let request;
     let conversationSnapshot;
     const now = new Date().toISOString();
+    const isDeliveryOrder = currentRequest.action === 'prepare_delivery_order'
+      || currentRequest.contextSnapshot?.action === 'prepare_delivery_order'
+      || currentRequest.assignedTeam === 'operaciones'
+      || /pedido|domicilio/i.test(currentRequest.title ?? '');
+    const currentOrder = isDeliveryOrder
+      ? (currentState.ordersByTenant?.[currentRequest.tenantId] ?? []).find((item) => (
+        item.id === currentRequest.contextSnapshot?.orderId || item.conversationId === currentRequest.conversationId
+      ))
+      : null;
+    const orderStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
+    const sheetSync = currentOrder
+      ? await this.tools.syncLiveOrderStatus({ tenantId: currentRequest.tenantId, order: currentOrder, status: orderStatus, updatedAt: now })
+      : null;
     this.store.mutate((state) => {
       request = state.pendingRequests.find((item) => item.id === requestId);
       if (!request) throw new Error(`Request not found: ${requestId}`);
@@ -544,6 +562,20 @@ export class AgentRuntime {
       request.approverId = approverId;
       request.responseMode = normalizedMode;
       request.approvalToken = outcome === 'approved' ? `APPROVED-${crypto.randomUUID()}` : null;
+      if (currentOrder) {
+        const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.id === currentOrder.id);
+        if (order) {
+          order.status = orderStatus;
+          order.updatedAt = now;
+          order.statusHistory = [...(order.statusHistory ?? []), {
+            status: orderStatus,
+            at: now,
+            actorId: approverId,
+          }];
+          order.sheetSyncStatus = sheetSync.status === 'synced' ? 'synced' : 'pending';
+          if (sheetSync.status === 'synced') order.sheetSyncedAt = now;
+        }
+      }
       const conversation = state.conversations.find((item) => item.id === request.conversationId);
       if (conversation) {
         conversationSnapshot = { id: conversation.id, waId: resolveHumanReplyWaId(state, request, conversation) };
@@ -574,6 +606,7 @@ export class AgentRuntime {
     });
     this.store.persistPendingRequest?.(requestId);
     this.store.persistConversation?.(request.conversationId);
+    if (currentOrder) this.store.persistOrder?.(request.tenantId, currentOrder.id);
     let responseDelivery = null;
     if (shouldReplyToCustomer && normalizedMode === 'whatsapp') {
       responseDelivery = await this.tools.call('whatsapp_business_messaging', request.tenantId, request.conversationId, {

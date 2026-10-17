@@ -72,7 +72,10 @@ export function createSaasRouter({ controlPlane, auth }) {
   router.get('/tenants/:tenantId/google/oauth/start', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.beginGoogleOAuth(req.params.tenantId, { loginHint: req.query.loginHint });
+      const result = controlPlane.beginGoogleOAuth(req.params.tenantId, {
+        loginHint: req.query.loginHint,
+        returnMode: req.query.redirect === '1' ? 'browser' : 'api',
+      });
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.oauth.start.requested', resource: 'google_connection' });
       if (req.query.redirect === '1' && result.ready) return res.redirect(result.authorizationUrl);
       return res.json(result);
@@ -83,11 +86,31 @@ export function createSaasRouter({ controlPlane, auth }) {
 
   router.get('/google/oauth/callback', async (req, res, next) => {
     try {
+      if (req.query.error) {
+        const failed = controlPlane.failGoogleOAuth({
+          state: req.query.state,
+          reason: req.query.error,
+        });
+        if (failed.returnMode === 'browser') {
+          return res.redirect(303, controlPlane.googleOAuthReturnUrl({
+            tenantId: failed.tenantId,
+            outcome: 'cancelled',
+            reason: failed.reason,
+          }));
+        }
+        return res.status(400).json({ error: 'Google OAuth authorization was not completed', code: 'google_oauth_cancelled' });
+      }
       const result = await controlPlane.completeGoogleOAuth({
         state: req.query.state,
         code: req.query.code,
         mockAccountEmail: req.query.mockAccountEmail,
       });
+      if (result.returnMode === 'browser') {
+        return res.redirect(303, controlPlane.googleOAuthReturnUrl({
+          tenantId: result.connection.tenantId,
+          outcome: 'connected',
+        }));
+      }
       res.json(result);
     } catch (error) {
       next(error);

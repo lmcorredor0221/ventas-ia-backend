@@ -188,6 +188,7 @@ export class ToolRegistry {
       status: payload.status ?? 'pending_human_preparation',
       createdAt: now,
       updatedAt: now,
+      statusHistory: [{ status: payload.status ?? 'pending_human_preparation', at: now, actorId: 'assistant' }],
     };
     this.store.mutate((state) => {
       state.ordersByTenant ??= {};
@@ -313,6 +314,37 @@ export class ToolRegistry {
       values: [orderToSheetRow(order)],
     });
     return 'Pedidos!A:M';
+  }
+
+  async syncLiveOrderStatus({ tenantId, order, status, updatedAt }) {
+    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live) {
+      if (connection?.status === 'connected' && connection.mode === 'live') {
+        throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión antes de continuar.');
+      }
+      return { status: 'not_connected' };
+    }
+    const rows = await this.googleWorkspace.readValues({
+      accessToken: live.accessToken,
+      spreadsheetId: live.spreadsheetId,
+      range: 'Pedidos!A:A',
+    });
+    const rowIndex = rows.findIndex((row) => row[0] === order.id);
+    if (rowIndex < 0) {
+      const error = new Error('No encontramos el pedido en la hoja. Revisa la conexión antes de continuar.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const nextOrder = { ...order, status, updatedAt };
+    const rowNumber = rowIndex + 1;
+    await this.googleWorkspace.updateValues({
+      accessToken: live.accessToken,
+      spreadsheetId: live.spreadsheetId,
+      range: `Pedidos!G${rowNumber}:J${rowNumber}`,
+      values: [orderToSheetRow(nextOrder).slice(6, 10)],
+    });
+    return { status: 'synced' };
   }
 
   async googleDriveCustomerProfileLookup(tenantId, payload) {

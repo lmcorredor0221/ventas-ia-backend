@@ -104,6 +104,55 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
     }
   });
 
+  router.patch('/orders/:id/status', async (req, res, next) => {
+    try {
+      const state = store.getState();
+      const order = Object.values(state.ordersByTenant ?? {}).flat().find((item) => item.id === req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const nextStatus = req.body?.status;
+      const currentStatus = effectiveOrderStatus(order, state.pendingRequests);
+      const allowedNext = { pending_human_preparation: 'preparing', preparing: 'dispatched', dispatched: 'delivered' }[currentStatus];
+      if (nextStatus !== allowedNext) {
+        return res.status(409).json({ error: 'Este pedido cambió de etapa. Actualiza la pantalla antes de continuar.' });
+      }
+      if (currentStatus === 'pending_human_preparation' && state.pendingRequests.some((request) => (
+        request.tenantId === order.tenantId
+        && request.status === 'pending'
+        && (request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId)
+      ))) {
+        return res.status(409).json({ error: 'Este pedido tiene una tarea pendiente. Tómalo desde esa tarjeta.' });
+      }
+      const now = new Date().toISOString();
+      const sheetSync = await tools.syncLiveOrderStatus({ tenantId: order.tenantId, order, status: nextStatus, updatedAt: now });
+      const actorId = req.auth?.user?.id ?? 'local-owner';
+      store.mutate((current) => {
+        const stored = (current.ordersByTenant?.[order.tenantId] ?? []).find((item) => item.id === order.id);
+        stored.status = nextStatus;
+        stored.updatedAt = now;
+        stored.statusHistory = [...(stored.statusHistory ?? []), { status: nextStatus, at: now, actorId }];
+        stored.sheetSyncStatus = sheetSync.status === 'synced' ? 'synced' : 'pending';
+        if (sheetSync.status === 'synced') stored.sheetSyncedAt = now;
+        if (currentStatus === 'pending_human_preparation') {
+          const conversation = current.conversations.find((item) => item.id === order.conversationId);
+          if (conversation) {
+            conversation.status = 'live';
+            conversation.zone = 'agent';
+            conversation.nextStep = 'Pedido tomado por la tienda para alistar.';
+            conversation.updatedAt = now;
+          }
+        }
+      });
+      await store.persistOrder?.(order.tenantId, order.id);
+      if (currentStatus === 'pending_human_preparation') await store.persistConversation?.(order.conversationId);
+      auth.recordTenantAction(req, { tenantId: order.tenantId, action: `order.${nextStatus}`, resource: order.id });
+      events.emit({ type: `order.${nextStatus}`, tenantId: order.tenantId, conversationId: order.conversationId, detail: `Pedido ${order.id}: ${nextStatus}`, metadata: { orderId: order.id, actorId } });
+      return res.json((store.getState().ordersByTenant?.[order.tenantId] ?? []).find((item) => item.id === order.id));
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.get('/ops/overview', async (req, res, next) => {
     try {
       const tenants = await readTenants(store);
@@ -120,12 +169,20 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
       );
       const filteredEvents = await events.list({ tenantId, limit: 50 });
       const state = store.getState();
+      const tenantOrders = (state.ordersByTenant?.[tenantId] ?? []).map((order) => ({
+        ...order,
+        status: effectiveOrderStatus(order, state.pendingRequests),
+      }));
       const usageSummary = tenantId ? await usage.summary(tenantId) : null;
       res.json({
         tenants: visibleTenants,
         tenant: visibleTenants.find((item) => item.id === tenantId),
         conversations,
         conversationHistory: allConversations.filter(isClosedCase),
+        orders: [
+          ...tenantOrders.filter((order) => !['delivered', 'cancelled'].includes(order.status)),
+          ...tenantOrders.filter((order) => ['delivered', 'cancelled'].includes(order.status)).slice(0, 200),
+        ],
         pendingRequests,
         events: filteredEvents,
         usage: usageSummary,
@@ -340,5 +397,19 @@ function enrichPendingRequests(requests, state) {
       },
     };
   });
+}
+
+function effectiveOrderStatus(order, requests = []) {
+  if (order.status !== 'pending_human_preparation') return order.status;
+  const decision = requests.find((request) => (
+    request.tenantId === order.tenantId
+    && (request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId)
+    && (request.action === 'prepare_delivery_order'
+      || request.contextSnapshot?.action === 'prepare_delivery_order'
+      || request.assignedTeam === 'operaciones'
+      || /pedido|domicilio/i.test(request.title ?? ''))
+    && ['resolved', 'denied'].includes(request.status)
+  ));
+  return decision?.status === 'resolved' ? 'preparing' : decision?.status === 'denied' ? 'cancelled' : order.status;
 }
 

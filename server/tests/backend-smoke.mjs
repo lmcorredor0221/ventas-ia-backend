@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAppAsync } from '../index.js';
+import { ToolRegistry } from '../services/toolRegistry.js';
+
+const originalGoogleClientId = process.env.GOOGLE_CLIENT_ID;
+const originalGoogleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+process.env.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? 'browser-oauth-client-test';
+process.env.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? 'browser-oauth-secret-test';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-backend-'));
 const { app, store, events, controlPlane, runtime } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
@@ -19,6 +25,80 @@ try {
   const overview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.ok(overview.conversations.length > 0);
   assert.ok(overview.tools.some((tool) => tool.name === 'google_sheets_read_table'));
+
+  store.mutate((state) => {
+    state.ordersByTenant.andina ??= [];
+    state.ordersByTenant.andina.unshift({
+      id: 'order-lifecycle-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      waId: '573001111111', customerName: 'Ana', deliveryAddress: 'Calle 10',
+      items: [{ name: 'Pan', quantity: 2 }], subtotal: 8000,
+      status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    state.pendingRequests.unshift({
+      id: 'request-lifecycle-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      action: 'prepare_delivery_order', status: 'pending', title: 'Alistar domicilio confirmado',
+      contextSnapshot: { orderId: 'order-lifecycle-smoke', action: 'prepare_delivery_order' },
+    });
+  });
+  const lifecycleStart = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(lifecycleStart.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'pending_human_preparation');
+  await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'preparing' }, { expectedStatus: 409 });
+  await postJson(`${base}/api/pending-requests/request-lifecycle-smoke/resolve`, { outcome: 'approved', responseMode: 'none' });
+  const lifecyclePreparing = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(lifecyclePreparing.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
+  await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' }, { expectedStatus: 409 });
+  const originalSyncOrder = runtime.tools.syncLiveOrderStatus.bind(runtime.tools);
+  runtime.tools.syncLiveOrderStatus = async () => {
+    const error = new Error('Hoja no disponible');
+    error.statusCode = 503;
+    throw error;
+  };
+  const originalConsoleError = console.error;
+  console.error = (...args) => {
+    if (args[0]?.message !== 'Hoja no disponible') originalConsoleError(...args);
+  };
+  try {
+    await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' }, { expectedStatus: 503 });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
+  runtime.tools.syncLiveOrderStatus = originalSyncOrder;
+  const lifecycleDispatched = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' });
+  assert.equal(lifecycleDispatched.status, 'dispatched');
+  assert.equal(lifecycleDispatched.sheetSyncStatus, 'pending');
+  const lifecycleDelivered = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' });
+  assert.equal(lifecycleDelivered.status, 'delivered');
+  assert.equal(lifecycleDelivered.statusHistory.length, 3);
+  assert.equal((await getJson(`${base}/api/ops/overview?tenantId=andina`)).orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'delivered');
+  store.mutate((state) => {
+    state.ordersByTenant.andina.unshift({
+      id: 'order-orphan-smoke', tenantId: 'andina', conversationId: 'wa-orphan-smoke',
+      waId: '573001111112', customerName: 'Luis', deliveryAddress: 'Calle 11',
+      items: [{ name: 'Leche', quantity: 1 }], subtotal: 6000,
+      status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+  });
+  assert.equal((await patchJson(`${base}/api/orders/order-orphan-smoke/status`, { status: 'preparing' })).status, 'preparing');
+
+  const sheetWrites = [];
+  const sheetRegistry = new ToolRegistry({
+    store: { getState: () => ({
+      googleConnectionsByTenant: { andina: { status: 'connected', mode: 'live', refreshTokenRef: 'ref' } },
+      googleWorkspacesByTenant: { andina: { spreadsheet: { id: 'sheet-1' } } },
+    }) },
+    secretVault: { readSecret: () => 'refresh-token' },
+    googleWorkspace: {
+      refreshAccessToken: async () => 'access-token',
+      readValues: async () => [['pedido_id'], ['otro'], ['order-lifecycle-smoke']],
+      updateValues: async (args) => { sheetWrites.push(args); },
+    },
+  });
+  await sheetRegistry.syncLiveOrderStatus({
+    tenantId: 'andina', order: lifecycleDispatched, status: 'delivered', updatedAt: '2026-10-17T10:00:00Z',
+  });
+  assert.equal(sheetWrites[0].range, 'Pedidos!G3:J3');
+  assert.equal(sheetWrites[0].values[0][0], 'delivered');
 
   store.mutate((state) => {
     state.conversations.unshift({
@@ -559,6 +639,24 @@ try {
   const funnel = await getJson(`${base}/api/admin/billing/funnel`);
   assert.ok(funnel.stages.some((stage) => stage.stage === 'checkout_started' && stage.total >= 1));
 
+  const browserOAuthStart = await fetch(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/oauth/start?redirect=1`, {
+    redirect: 'manual',
+  });
+  assert.equal(browserOAuthStart.status, 302);
+  const browserAuthorizationUrl = new URL(browserOAuthStart.headers.get('location'));
+  assert.equal(browserAuthorizationUrl.hostname, 'accounts.google.com');
+  const browserOAuthState = browserAuthorizationUrl.searchParams.get('state');
+  assert.ok(browserOAuthState);
+  const browserOAuthCallback = await fetch(`${base}/api/saas/google/oauth/callback?state=${browserOAuthState}&code=dev-mock-code&mockAccountEmail=dueno%40example.com`, {
+    redirect: 'manual',
+  });
+  assert.equal(browserOAuthCallback.status, 303);
+  const browserReturnUrl = new URL(browserOAuthCallback.headers.get('location'));
+  assert.equal(browserReturnUrl.searchParams.get('app'), '1');
+  assert.equal(browserReturnUrl.searchParams.get('view'), 'onboarding');
+  assert.equal(browserReturnUrl.searchParams.get('googleOAuth'), 'connected');
+  assert.equal(browserReturnUrl.searchParams.get('tenant'), createdTenant.tenant.id);
+
   const oauthStart = await getJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/oauth/start`);
   assert.ok(oauthStart.state);
   assert.ok(oauthStart.authorizationUrl.includes('access_type=offline'));
@@ -662,6 +760,10 @@ try {
   server.close();
   await store.close?.();
   fs.rmSync(tempDir, { recursive: true, force: true });
+  if (originalGoogleClientId === undefined) delete process.env.GOOGLE_CLIENT_ID;
+  else process.env.GOOGLE_CLIENT_ID = originalGoogleClientId;
+  if (originalGoogleClientSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET;
+  else process.env.GOOGLE_CLIENT_SECRET = originalGoogleClientSecret;
 }
 
 async function getJson(url, { expectedStatus = 200 } = {}) {

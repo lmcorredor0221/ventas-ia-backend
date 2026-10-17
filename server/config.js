@@ -1,6 +1,9 @@
 export const RUNTIME_CONFIG = {
   port: Number(process.env.PORT ?? 3001),
   host: process.env.HOST ?? '127.0.0.1',
+  // The browser-facing application can live on a different origin than the API.
+  // OAuth callbacks use this address to return the owner to its onboarding step.
+  frontendAppUrl: process.env.FRONTEND_APP_URL ?? process.env.PUBLIC_APP_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? 3001}`,
   storageDriver: process.env.STORAGE_DRIVER ?? (process.env.DATABASE_URL ? 'postgres' : 'json'),
   databaseUrl: process.env.DATABASE_URL,
   databaseSsl: process.env.DATABASE_SSL ?? 'auto',
