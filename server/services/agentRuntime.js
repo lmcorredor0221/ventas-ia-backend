@@ -72,6 +72,11 @@ export class AgentRuntime {
     await this.addMessage(conversation.id, { role: 'user', text: normalized.text || `[${normalized.messageType}]`, providerMessageId: normalized.messageId });
 
     try {
+      if (isCancellationRequest(normalized.text)) {
+        const result = await this.cancelConversation({ tenantId, conversationId: conversation.id, normalized });
+        this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
+        return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
+      }
       const result = await this.routeConversation(tenantId, conversation.id, normalized);
       this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
       return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
@@ -164,6 +169,78 @@ export class AgentRuntime {
     }
 
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
+  }
+
+  async cancelConversation({ tenantId, conversationId, normalized }) {
+    const now = new Date().toISOString();
+    const cancellationMessage = 'Entendido. Cancelé esta solicitud y no se generó ningún pedido. Cuando quieras iniciar uno nuevo, escríbeme por aquí.';
+    const cancelledRequestIds = [];
+
+    this.store.mutate((state) => {
+      const conversation = state.conversations.find((item) => item.id === conversationId);
+      if (!conversation) return;
+      const orderDraft = conversation.orderDraft
+        ? { ...conversation.orderDraft, status: 'cancelled' }
+        : { status: 'cancelled', items: [] };
+      Object.assign(conversation, {
+        stage: 'closed',
+        zone: 'whatsapp',
+        status: 'closed_no_confirmation',
+        caseStatus: 'cancelled',
+        inboxState: 'closed',
+        manualMode: 'none',
+        aiPaused: true,
+        closedAt: now,
+        closeReason: 'customer_cancelled',
+        value: 'No confirmado',
+        progress: 100,
+        need: normalized.text ?? 'cancelar',
+        nextStep: 'Solicitud cancelada por el cliente.',
+        humanReason: '',
+        lastTool: 'whatsapp_business_messaging',
+        orderDraft,
+      });
+      for (const request of state.pendingRequests ?? []) {
+        if (request.conversationId !== conversationId || request.status !== 'pending') continue;
+        request.status = 'cancelled';
+        request.resolvedAt = now;
+        request.resolutionNote = 'Cancelado por el cliente desde WhatsApp.';
+        cancelledRequestIds.push(request.id);
+      }
+    });
+    await this.store.persistConversation?.(conversationId);
+    await Promise.all(cancelledRequestIds.map((requestId) => this.store.persistPendingRequest?.(requestId)));
+    this.events.emit({
+      type: 'conversation.cancelled_by_customer',
+      tenantId,
+      conversationId,
+      detail: 'Solicitud cancelada desde WhatsApp; automatización detenida.',
+      metadata: { cancelledRequestIds },
+    });
+
+    let delivery = null;
+    try {
+      delivery = await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+        action: 'send_session_message',
+        wa_id: normalized.waId,
+        text: cancellationMessage,
+      });
+    } catch (error) {
+      await this.addMessage(conversationId, {
+        role: 'system',
+        channel: 'platform',
+        text: 'Solicitud cancelada. No se pudo enviar la confirmación por WhatsApp.',
+      });
+      this.events.emit({
+        type: 'conversation.cancellation_reply_failed',
+        tenantId,
+        conversationId,
+        detail: error.message,
+        metadata: { errorCode: error.code ?? null },
+      });
+    }
+
+    return { summary: 'Customer cancelled request', delivery };
   }
 
   async handleGoogleUnavailable({ tenantId, conversationId, normalized, plan }) {
@@ -897,6 +974,25 @@ export class AgentRuntime {
 
 function isClosedCase(conversation) {
   return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+}
+
+function isCancellationRequest(text) {
+  const normalized = normalizeText(text)
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return false;
+  return [
+    'cancelar',
+    'cancela',
+    'cancelalo',
+    'cancelalo por favor',
+    'ya no quiero',
+    'no lo quiero',
+    'anula el pedido',
+    'anular pedido',
+    'cancelar pedido',
+  ].some((phrase) => normalized === normalizeText(phrase) || normalized.startsWith(`${normalizeText(phrase)} `));
 }
 
 function isExplicitCaseContinuation(text, previous, config = {}) {

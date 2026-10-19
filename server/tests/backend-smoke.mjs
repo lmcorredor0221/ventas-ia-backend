@@ -168,6 +168,24 @@ try {
   assert.equal(run.duplicate, false);
   assert.ok(run.conversation.id);
 
+  const deliveryStatusBefore = store.getState().conversations.length;
+  const deliveryStatus = await postJson(`${base}/webhooks/whatsapp`, {
+    object: 'whatsapp_business_account',
+    entry: [{
+      id: 'test-waba',
+      changes: [{
+        field: 'messages',
+        value: {
+          metadata: { phone_number_id: '100000000001' },
+          statuses: [{ id: 'wamid-status-smoke', recipient_id: '573009990000', status: 'sent', timestamp: String(Math.floor(Date.now() / 1000)) }],
+        },
+      }],
+    }],
+  });
+  assert.equal(deliveryStatus.ignored, true);
+  assert.equal(deliveryStatus.reason, 'delivery_status');
+  assert.equal(store.getState().conversations.length, deliveryStatusBefore);
+
   const coffeeRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
     waId: '573009998877',
@@ -284,6 +302,19 @@ try {
   assert.equal(unknownOrderRun.conversation.status, 'blocked');
   assert.ok(unknownOrderRun.conversation.orderDraft.missingFields.some((field) => field.startsWith('product:')));
   assert.ok(unknownOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
+
+  const cancellationRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573001112244',
+    profileName: 'Producto Desconocido',
+    text: 'Cancelar.',
+  });
+  assert.equal(cancellationRun.result.summary, 'Customer cancelled request');
+  assert.equal(cancellationRun.conversation.status, 'closed_no_confirmation');
+  assert.equal(cancellationRun.conversation.caseStatus, 'cancelled');
+  assert.equal(cancellationRun.conversation.orderDraft.status, 'cancelled');
+  assert.ok(cancellationRun.conversation.messages.at(-1).text.includes('Cancelé esta solicitud'));
+  assert.equal(store.getState().pendingRequests.some((request) => request.conversationId === cancellationRun.conversation.id && request.status === 'pending'), false);
 
   store.mutate((state) => {
     const chocoramo = state.productsByTenant.andina.find((product) => product.sku === 'AND-CHO-01');

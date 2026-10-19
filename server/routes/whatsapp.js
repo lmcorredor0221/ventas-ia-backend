@@ -72,6 +72,24 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         }));
         return res.status(200).json({ ok: true, ignored: true, reason: 'whatsapp_tenant_not_found' });
       }
+      if (normalized.messageType === 'delivery_status') {
+        recordWebhookEvent(store, webhookRecordFromRequest(req, {
+          tenantId: normalized.tenantId,
+          eventType: normalized.messageType,
+          externalId: normalized.messageId,
+          status: 'ignored',
+          httpStatus: 200,
+          durationMs: Date.now() - startedAt,
+          metadata: {
+            phoneNumberId: normalized.phoneNumberId,
+            waId: normalized.waId,
+            traceId: normalized.traceId,
+            requestId: req.requestId,
+            deliveryStatus: normalized.text,
+          },
+        }));
+        return res.status(200).json({ ok: true, ignored: true, reason: 'delivery_status' });
+      }
       controlPlane?.requireTenantOperational(normalized.tenantId);
       const result = await runtime.processInbound(normalized);
       recordWebhookEvent(store, webhookRecordFromRequest(req, {
