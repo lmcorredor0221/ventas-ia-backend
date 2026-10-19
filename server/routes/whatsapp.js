@@ -54,6 +54,24 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         }));
         return res.status(400).json({ error: 'Malformed or unsupported WhatsApp payload' });
       }
+      if (!normalized.tenantId) {
+        recordWebhookEvent(store, webhookRecordFromRequest(req, {
+          status: 'ignored',
+          httpStatus: 200,
+          durationMs: Date.now() - startedAt,
+          eventType: normalized.messageType,
+          externalId: normalized.messageId,
+          errorCode: 'whatsapp_tenant_not_found',
+          errorMessage: 'WhatsApp event does not belong to a connected tenant',
+          metadata: {
+            phoneNumberId: normalized.phoneNumberId,
+            waId: normalized.waId,
+            traceId: normalized.traceId,
+            requestId: req.requestId,
+          },
+        }));
+        return res.status(200).json({ ok: true, ignored: true, reason: 'whatsapp_tenant_not_found' });
+      }
       controlPlane?.requireTenantOperational(normalized.tenantId);
       const result = await runtime.processInbound(normalized);
       recordWebhookEvent(store, webhookRecordFromRequest(req, {
@@ -136,8 +154,8 @@ function normalizeWhatsAppPayload(payload, state) {
   if (status) {
     return {
       provider: 'meta_whatsapp_cloud_api',
-      tenantId: tenant.id,
-      workspaceId: tenant.id,
+      tenantId: tenant?.id ?? null,
+      workspaceId: tenant?.id ?? null,
       waId: status.recipient_id,
       phoneNumberId,
       messageId: status.id,
@@ -154,8 +172,8 @@ function normalizeWhatsAppPayload(payload, state) {
   const type = message.type;
   return {
     provider: 'meta_whatsapp_cloud_api',
-    tenantId: tenant.id,
-    workspaceId: tenant.id,
+    tenantId: tenant?.id ?? null,
+    workspaceId: tenant?.id ?? null,
     waId: message.from,
     profileName: change?.contacts?.[0]?.profile?.name,
     phoneNumberId,
@@ -176,12 +194,5 @@ function resolveTenantByPhoneNumberId(state, phoneNumberId) {
     error.code = 'whatsapp_phone_number_missing';
     throw error;
   }
-  const tenant = state.tenants.find((item) => item.config?.whatsapp?.phoneNumberId === phoneNumberId);
-  if (!tenant) {
-    const error = new Error('WhatsApp phone_number_id is not bound to an active tenant');
-    error.statusCode = 404;
-    error.code = 'whatsapp_tenant_not_found';
-    throw error;
-  }
-  return tenant;
+  return state.tenants.find((item) => item.config?.whatsapp?.phoneNumberId === phoneNumberId) ?? null;
 }

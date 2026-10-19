@@ -389,8 +389,10 @@ try {
         },
       }],
     }],
-  }, { expectedStatus: 404 });
-  assert.equal(unknownWhatsappTenant.code, 'whatsapp_tenant_not_found');
+  });
+  assert.equal(unknownWhatsappTenant.ok, true);
+  assert.equal(unknownWhatsappTenant.ignored, true);
+  assert.equal(unknownWhatsappTenant.reason, 'whatsapp_tenant_not_found');
 
   const createdTenant = await postJson(`${base}/api/saas/tenants`, {
     storeName: 'Tienda Prueba SaaS',
