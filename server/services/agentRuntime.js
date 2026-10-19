@@ -92,8 +92,26 @@ export class AgentRuntime {
       this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
       return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
     } catch (error) {
-      this.events.emit({ type: 'agent.failed', tenantId, conversationId: conversation.id, detail: error.message, metadata: { traceId: normalized.traceId, messageId: normalized.messageId, errorCode: error.code ?? null } });
-      await this.patchConversation(conversation.id, { status: 'degraded', zone: 'observability', nextStep: 'Revisar incidente y reintentar.' });
+      const failure = describeOperationalFailure(error);
+      this.events.emit({
+        type: 'agent.failed',
+        tenantId,
+        conversationId: conversation.id,
+        detail: error.message,
+        metadata: {
+          traceId: normalized.traceId,
+          messageId: normalized.messageId,
+          errorCode: error.code ?? null,
+          toolName: error.toolName ?? null,
+        },
+      });
+      await this.patchConversation(conversation.id, {
+        status: 'degraded',
+        zone: 'observability',
+        lastTool: error.toolName ?? conversation.lastTool ?? 'planner',
+        nextStep: failure.nextStep,
+        humanReason: failure.humanReason,
+      });
       throw error;
     }
   }
@@ -290,6 +308,18 @@ export class AgentRuntime {
     return { summary: handoff.reused ? 'Google unavailable; human handoff already pending' : 'Google unavailable; human handoff requested', plan };
   }
 
+  async resolveDriveContext({ tenantId, conversationId, selectedRows = [], reason } = {}) {
+    const fileIds = [...new Set(selectedRows.map((row) => row?.driveFileId).filter(Boolean))];
+    if (!fileIds.length) {
+      return { status: 'not_applicable', files: [], source_refs: [] };
+    }
+    return this.tools.call('google_drive_file_picker', tenantId, conversationId, {
+      file_ids: fileIds,
+      refresh_mode: 'on_demand',
+      ...(reason ? { reason } : {}),
+    });
+  }
+
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
     const text = normalized.text ?? '';
     const catalogItems = plan.order?.items ?? [];
@@ -310,10 +340,7 @@ export class AgentRuntime {
         });
       }
       const selectedRows = matches.map((match) => match.selected).filter(Boolean);
-      const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
-        file_ids: selectedRows.map((row) => row.driveFileId).filter(Boolean),
-        refresh_mode: 'on_demand',
-      });
+      const drive = await this.resolveDriveContext({ tenantId, conversationId, selectedRows });
       const quote = buildMultiCatalogReply({ matches, drive, delivery: Boolean(plan.order?.delivery) });
       const hasMatches = selectedRows.length > 0;
 
@@ -346,9 +373,10 @@ export class AgentRuntime {
     });
     const selected = catalog.rows[0];
     const alternatives = catalog.rows.slice(1, 4);
-    const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
-      file_ids: selected?.driveFileId ? [selected.driveFileId] : [],
-      refresh_mode: 'on_demand',
+    const drive = await this.resolveDriveContext({
+      tenantId,
+      conversationId,
+      selectedRows: selected ? [selected] : [],
     });
 
     const quote = selected
@@ -399,10 +427,11 @@ export class AgentRuntime {
       : orderItems;
 
     const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
-    const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
-      file_ids: selectedRows.map((row) => row.driveFileId).filter(Boolean),
-      refresh_mode: 'on_demand',
-      reason: selectedRows.length ? 'validate_order_product_files' : 'verify_catalog_context_for_missing_order_items',
+    const drive = await this.resolveDriveContext({
+      tenantId,
+      conversationId,
+      selectedRows,
+      reason: 'validate_order_product_files',
     });
 
     const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
@@ -432,7 +461,7 @@ export class AgentRuntime {
       progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
       need: normalized.text,
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
-      lastTool: 'google_drive_file_picker',
+      lastTool: drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
       orderDraft: {
         delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
         items: effectiveOrderItems,
@@ -1358,6 +1387,29 @@ function isCategoryQuery(query) {
     'despensa',
     'mercado',
   ]);
+}
+
+function describeOperationalFailure(error) {
+  const providerCode = Number(error?.payload?.error?.code);
+  const providerMessage = String(error?.payload?.error?.message ?? error?.message ?? '');
+  if (error?.code === 'whatsapp_send_failed' && (
+    providerCode === 131030 || providerMessage.includes('Recipient phone number not in allowed list')
+  )) {
+    return {
+      nextStep: 'Meta bloqueó la respuesta porque este número no está autorizado para pruebas. Agrégalo como destinatario de prueba en Meta y envía un mensaje nuevo.',
+      humanReason: 'El catálogo respondió, pero Meta no permite responder a este número hasta registrarlo como destinatario de prueba.',
+    };
+  }
+  if (error?.code === 'whatsapp_send_failed') {
+    return {
+      nextStep: 'No se pudo enviar la respuesta por WhatsApp. Revisa el canal de Meta y vuelve a intentar con un mensaje nuevo.',
+      humanReason: 'La respuesta fue preparada, pero el proveedor de WhatsApp rechazó el envío.',
+    };
+  }
+  return {
+    nextStep: 'Revisar incidente y reintentar.',
+    humanReason: 'El agente no pudo completar el siguiente paso operativo.',
+  };
 }
 
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal }) {

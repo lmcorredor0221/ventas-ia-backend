@@ -55,6 +55,7 @@ export class ToolRegistry {
       this.usage?.recordToolCall(tenantId, toolName, { conversationId });
       return result;
     } catch (error) {
+      error.toolName ??= toolName;
       this.events.emit({
         type: 'tool.call.failed',
         tenantId,
