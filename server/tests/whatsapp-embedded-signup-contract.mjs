@@ -93,8 +93,17 @@ try {
   });
   const pendingApproval = controlPlane.getWhatsAppOnboarding('andina');
   assert.equal(pendingApproval.canAutomate, false);
-  assert.equal(pendingApproval.reason, 'meta_approval_pending');
+  assert.equal(pendingApproval.reason, 'meta_app_review_pending');
   assert.equal(controlPlane.startWhatsAppEmbeddedSignup('andina').mode, 'guided_manual');
+  await assert.rejects(
+    controlPlane.completeWhatsAppEmbeddedSignup('andina', {
+      code: 'embedded-code-contract',
+      wabaId: '300000000001',
+      phoneNumberId: '200000000001',
+    }),
+    (error) => error.statusCode === 428 && error.code === 'meta_app_review_pending',
+  );
+  assert.equal(graphCalls.length, 0);
   process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED = 'true';
   const result = await controlPlane.completeWhatsAppEmbeddedSignup('andina', {
     code: 'embedded-code-contract',

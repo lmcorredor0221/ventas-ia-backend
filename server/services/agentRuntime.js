@@ -1,13 +1,14 @@
 import { appendAuditEvent } from './authService.js';
 
 export class AgentRuntime {
-  constructor({ store, events, tools, planner, usage, config }) {
+  constructor({ store, events, tools, planner, usage, config, orders = null }) {
     this.store = store;
     this.events = events;
     this.tools = tools;
     this.planner = planner;
     this.usage = usage;
     this.config = config;
+    this.orders = orders;
     this.manualSweepTimer = null;
   }
 
@@ -30,15 +31,20 @@ export class AgentRuntime {
 
   async processInbound(normalized) {
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
+    normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
     await this.closeExpiredManualCases();
     const conversation = await this.ensureConversation(tenantId, normalized);
+    if (conversation.traceId !== normalized.traceId) {
+      await this.patchConversation(conversation.id, { traceId: normalized.traceId });
+    }
 
     if (await this.isDuplicate(normalized.messageId)) {
       return { duplicate: true, conversation };
     }
 
     if (conversation.manualMode === 'whatsapp_external' || conversation.status === 'manual_active') {
-      await this.markProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+      const claimed = await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+      if (!claimed) return { duplicate: true, conversation };
       await this.addMessage(conversation.id, {
         role: 'user',
         text: normalized.text || `[${normalized.messageType}]`,
@@ -54,22 +60,23 @@ export class AgentRuntime {
     }
 
     await this.usage?.assertCanProcessInteraction(tenantId, { conversationId: conversation.id });
-    await this.markProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+    const claimed = await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+    if (!claimed) return { duplicate: true, conversation };
     this.usage?.recordAgentInteraction(tenantId, {
       conversationId: conversation.id,
       provider: normalized.provider,
       messageType: normalized.messageType,
     });
 
-    this.events.emit({ type: 'agent.started', tenantId, conversationId: conversation.id, detail: 'Inbound WhatsApp message received' });
+    this.events.emit({ type: 'agent.started', tenantId, conversationId: conversation.id, detail: 'Inbound WhatsApp message received', metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
     await this.addMessage(conversation.id, { role: 'user', text: normalized.text || `[${normalized.messageType}]`, providerMessageId: normalized.messageId });
 
     try {
       const result = await this.routeConversation(tenantId, conversation.id, normalized);
-      this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary });
+      this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
       return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
     } catch (error) {
-      this.events.emit({ type: 'agent.failed', tenantId, conversationId: conversation.id, detail: error.message });
+      this.events.emit({ type: 'agent.failed', tenantId, conversationId: conversation.id, detail: error.message, metadata: { traceId: normalized.traceId, messageId: normalized.messageId, errorCode: error.code ?? null } });
       await this.patchConversation(conversation.id, { status: 'degraded', zone: 'observability', nextStep: 'Revisar incidente y reintentar.' });
       throw error;
     }
@@ -550,8 +557,18 @@ export class AgentRuntime {
       ))
       : null;
     const orderStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
-    const sheetSync = currentOrder
+    const sheetSync = currentOrder && !this.orders
       ? await this.tools.syncLiveOrderStatus({ tenantId: currentRequest.tenantId, order: currentOrder, status: orderStatus, updatedAt: now })
+      : null;
+    const orderTransition = currentOrder && this.orders
+      ? await this.orders.transition({
+        orderId: currentOrder.id,
+        tenantId: currentRequest.tenantId,
+        nextStatus: orderStatus,
+        actorId: approverId,
+        source: 'human_request',
+        allowPendingRequest: true,
+      })
       : null;
     this.store.mutate((state) => {
       request = state.pendingRequests.find((item) => item.id === requestId);
@@ -562,7 +579,7 @@ export class AgentRuntime {
       request.approverId = approverId;
       request.responseMode = normalizedMode;
       request.approvalToken = outcome === 'approved' ? `APPROVED-${crypto.randomUUID()}` : null;
-      if (currentOrder) {
+      if (currentOrder && !this.orders) {
         const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.id === currentOrder.id);
         if (order) {
           order.status = orderStatus;
@@ -579,12 +596,14 @@ export class AgentRuntime {
       const conversation = state.conversations.find((item) => item.id === request.conversationId);
       if (conversation) {
         conversationSnapshot = { id: conversation.id, waId: resolveHumanReplyWaId(state, request, conversation) };
-        conversation.status = outcome === 'approved' ? 'live' : 'blocked';
-        conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
-        conversation.progress = outcome === 'approved' ? Math.max(conversation.progress ?? 0, 78) : conversation.progress;
-        conversation.nextStep = outcome === 'approved'
-          ? 'Flujo reanudado con aprobacion humana.'
-          : 'Operacion rechazada; revisar alternativa.';
+        if (!this.orders || !currentOrder || outcome !== 'approved') {
+          conversation.status = outcome === 'approved' ? 'live' : 'blocked';
+          conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
+          conversation.progress = outcome === 'approved' ? Math.max(conversation.progress ?? 0, 78) : conversation.progress;
+          conversation.nextStep = outcome === 'approved'
+            ? 'Flujo reanudado con aprobacion humana.'
+            : 'Operacion rechazada; revisar alternativa.';
+        }
         if (shouldReplyToCustomer && normalizedMode === 'platform') {
           conversation.messages.push({
             id: `human-${crypto.randomUUID()}`,
@@ -604,9 +623,9 @@ export class AgentRuntime {
         conversation.updatedAt = now;
       }
     });
-    this.store.persistPendingRequest?.(requestId);
-    this.store.persistConversation?.(request.conversationId);
-    if (currentOrder) this.store.persistOrder?.(request.tenantId, currentOrder.id);
+    await this.store.persistPendingRequest?.(requestId);
+    await this.store.persistConversation?.(request.conversationId);
+    if (currentOrder && !orderTransition) await this.store.persistOrder?.(request.tenantId, currentOrder.id);
     let responseDelivery = null;
     if (shouldReplyToCustomer && normalizedMode === 'whatsapp') {
       responseDelivery = await this.tools.call('whatsapp_business_messaging', request.tenantId, request.conversationId, {
@@ -630,7 +649,7 @@ export class AgentRuntime {
           };
         }
       });
-      this.store.persistPendingRequest?.(requestId);
+      await this.store.persistPendingRequest?.(requestId);
     }
     this.store.mutate((state) => {
       appendAuditEvent(state, {
@@ -712,7 +731,7 @@ export class AgentRuntime {
           updatedAt: now,
         });
       });
-      this.store.persistConversation?.(previous.id);
+      await this.store.persistConversation?.(previous.id);
       return this.getConversation(previous.id);
     }
     const created = {
@@ -739,13 +758,14 @@ export class AgentRuntime {
       lastTool: 'whatsapp_business_messaging',
       path: ['whatsapp', 'agent', 'catalog', 'quote', 'approval', 'payment'],
       messages: [],
+      traceId: normalized.traceId ?? null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.store.mutate((state) => {
       state.conversations.unshift(created);
     });
-    this.store.persistConversation?.(created.id);
+      await this.store.persistConversation?.(created.id);
     return created;
   }
 
@@ -757,7 +777,7 @@ export class AgentRuntime {
       conversation.need = message.text ?? conversation.need;
       conversation.updatedAt = new Date().toISOString();
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
   }
 
   async patchConversation(conversationId, patch) {
@@ -765,7 +785,7 @@ export class AgentRuntime {
       const conversation = state.conversations.find((item) => item.id === conversationId);
       if (conversation) Object.assign(conversation, patch, { updatedAt: new Date().toISOString() });
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
   }
 
   async activateManualWhatsApp(conversationId, { actorId = 'local-admin' } = {}) {
@@ -794,7 +814,7 @@ export class AgentRuntime {
       conversation.updatedAt = now;
     });
     if (!conversation) return null;
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
     return this.getConversation(conversationId);
   }
 
@@ -830,7 +850,7 @@ export class AgentRuntime {
       }
     });
     for (const conversationId of expired) {
-      this.store.persistConversation?.(conversationId);
+      await this.store.persistConversation?.(conversationId);
       this.events.emit({
         type: 'conversation.manual_timeout',
         tenantId: (await this.getConversation(conversationId))?.tenantId,
@@ -864,6 +884,14 @@ export class AgentRuntime {
       state.processedMessages = [...new Set(state.processedMessages)].slice(0, 1000);
     });
     await this.store.persistProcessedMessage?.(messageId, payload);
+  }
+
+  async claimProcessed(messageId, payload = {}) {
+    if (!messageId) return true;
+    if (this.store.claimProcessedMessage) return this.store.claimProcessedMessage(messageId, payload);
+    if (this.store.getState().processedMessages.includes(messageId)) return false;
+    await this.markProcessed(messageId, payload);
+    return true;
   }
 }
 

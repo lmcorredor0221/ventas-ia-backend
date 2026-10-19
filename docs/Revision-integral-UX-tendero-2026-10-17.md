@@ -77,3 +77,13 @@ La implementación no cambia el esquema de almacenamiento; solo añade operacion
 ## Verificación realizada
 
 La compilación de Vite pasa. La suite `npm run test:backend` pasa, incluidos contratos de autenticación, Google y WhatsApp. El recorrido Playwright `tests/verify_owner_ux.py` pasa en 1440, 390 y 320 px: estado vacío real, navegación, pedido desde Tienda viva, error de guardado, preparación, despacho, entrega, ajustes y regreso a pedidos desde la activación. El contrato backend prueba transiciones inválidas, rechazo cuando hay una tarea pendiente, recuperación de un pedido sin tarea y fallo de sincronización de hoja sin avanzar el pedido.
+
+## Documentación para operación
+
+La experiencia publicada queda acompañada por tres manuales según responsabilidad:
+
+- [Manual del dueño de tienda](Manual-de-usuario-tendero.md): puesta en marcha, pedidos, conversaciones, Tienda viva y solución de problemas cotidianos.
+- [Manual del operador](Manual-de-usuario-operador.md): atención de solicitudes, avance de etapas y coordinación del turno.
+- [Manual del administrador de plataforma](Manual-de-usuario-administrador.md): clientes, facturación, observabilidad, integraciones y controles de seguridad.
+
+El índice general está en [Manuales de usuario](Manuales-de-usuario.md). Los manuales usan el lenguaje visible de la interfaz y describen como límite operativo que marcar despacho o entrega no envía automáticamente un mensaje de WhatsApp.

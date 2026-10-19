@@ -25,6 +25,12 @@ export class EventService {
     return event;
   }
 
+  async emitAndWait(payload) {
+    const event = this.emit(payload);
+    await this.store.flush?.();
+    return event;
+  }
+
   async list({ tenantId, limit = 50 }) {
     if (this.store.listEvents) return this.store.listEvents({ tenantId, limit });
     return this.store

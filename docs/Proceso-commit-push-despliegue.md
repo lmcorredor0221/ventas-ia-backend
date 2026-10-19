@@ -127,6 +127,19 @@ curl.exe -sS https://via.leanagentbuilder.com/api/health
 - Configurar y probar callbacks reales de WhatsApp Cloud API y Mercado Pago.
 - Rotar la API key de DeepSeek compartida durante la conversación antes de abrir producción a clientes.
 
+## Actualización: revisión integral de operación — 2026-10-17
+
+Se publicó la revisión de experiencia para el dueño y el ciclo persistente de pedidos:
+
+- Frontend: commit `9c91258a3a5e1e4f77f3b137ca533916acf6c25d` en `main` de `ventas-ia-frontend`.
+- Backend: commit `32c9c2fbb9ee6833cbae629735e117087251f301` en `main` de `ventas-ia-backend`.
+- Render: deployment `dep-db9p1rjbc2fs73cndps0`, estado `live`, servicio `srv-db7sqqmq1p3s73elv1eg`.
+- Vercel: `via.leanagentbuilder.com` respondió `200` y sirvió el bundle de la nueva navegación, landing y flujo de pedidos.
+- Proxy y backend directo: `/api/health` y `/health` respondieron `200`; `/api/ops/overview` sin sesión respondió `401`.
+- Validación pública: `tests/verify_landing.py` pasó contra el dominio de producción en cinco tamaños, con interacción del ejemplo, precio real, prueba gratuita, estados de indisponibilidad, teclado y reduced motion.
+
+La documentación de uso quedó separada por rol en [Manuales de usuario](Manuales-de-usuario.md). La documentación técnica del ciclo de pedidos está en [Revisión integral UX](Revision-integral-UX-tendero-2026-10-17.md) y en `BACKEND.md`.
+
 ## Actualización: Meta Embedded Signup — 2026-10-16
 
 Se publicó la mejora de conexión autoservicio de WhatsApp con commits separados:

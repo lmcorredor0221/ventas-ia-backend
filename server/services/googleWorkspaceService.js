@@ -1,3 +1,5 @@
+import { SHEET_ORDER_STATUSES } from '../domain/orderStatus.js';
+
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const SHEETS_API = 'https://sheets.googleapis.com/v4';
 
@@ -150,7 +152,7 @@ export class GoogleWorkspaceService {
               rule: {
                 condition: {
                   type: 'ONE_OF_LIST',
-                  values: ['draft', 'confirmado', 'preparando', 'entregado', 'cancelado'].map((userEnteredValue) => ({ userEnteredValue })),
+                  values: SHEET_ORDER_STATUSES.map((userEnteredValue) => ({ userEnteredValue })),
                 },
                 inputMessage: 'Estado valido del pedido',
                 strict: true,
@@ -234,7 +236,7 @@ function validationRules() {
     'Catalogo.precio numerico mayor o igual a cero',
     'Catalogo.stock numerico mayor o igual a cero',
     'Clientes.telefono_whatsapp requerido',
-    'Pedidos.estado limitado a draft, confirmado, preparando, entregado, cancelado',
+    `Pedidos.estado limitado a ${SHEET_ORDER_STATUSES.join(', ')}`,
   ];
 }
 

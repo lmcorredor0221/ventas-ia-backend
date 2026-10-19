@@ -4,6 +4,7 @@ export const RUNTIME_CONFIG = {
   // The browser-facing application can live on a different origin than the API.
   // OAuth callbacks use this address to return the owner to its onboarding step.
   frontendAppUrl: process.env.FRONTEND_APP_URL ?? process.env.PUBLIC_APP_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? 3001}`,
+  corsAllowedOrigins: String(process.env.CORS_ALLOWED_ORIGINS ?? '').split(',').map((value) => value.trim()).filter(Boolean),
   storageDriver: process.env.STORAGE_DRIVER ?? (process.env.DATABASE_URL ? 'postgres' : 'json'),
   databaseUrl: process.env.DATABASE_URL,
   databaseSsl: process.env.DATABASE_SSL ?? 'auto',
@@ -30,6 +31,9 @@ export const RUNTIME_CONFIG = {
   manualCaseInactivityMinutes: Number(process.env.MANUAL_CASE_INACTIVITY_MINUTES ?? 5),
   manualCaseSweepIntervalMs: Number(process.env.MANUAL_CASE_SWEEP_INTERVAL_MS ?? 30_000),
   caseContinuationWindowMinutes: Number(process.env.CASE_CONTINUATION_WINDOW_MINUTES ?? 30),
+  integrationOutboxEnabled: process.env.INTEGRATION_OUTBOX_ENABLED === 'true',
+  integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 5000),
+  integrationOutboxBatchSize: Number(process.env.INTEGRATION_OUTBOX_BATCH_SIZE ?? 10),
 };
 
 export const REQUIRED_EVENTS = [

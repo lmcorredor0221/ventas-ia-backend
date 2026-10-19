@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RUNTIME_CONFIG } from './config.js';
@@ -21,6 +22,9 @@ import { createSaasRouter } from './routes/saas.js';
 import { createWhatsAppRouter } from './routes/whatsapp.js';
 import { createMercadoPagoRouter } from './routes/mercadoPago.js';
 import { createAdminRouter } from './routes/admin.js';
+import { OrderService } from './services/orderService.js';
+import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js';
+import { IntegrationOutbox } from './services/integrationOutbox.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -53,19 +57,65 @@ function createStore(config) {
 }
 
 function createExpressRuntime({ config, store }) {
+  const runtimeValidation = validateRuntimeConfig(config);
   const events = new EventService(store);
   const usage = new UsageService({ store, events });
   const secretVault = new SecretVault({ store });
   const googleWorkspace = new GoogleWorkspaceService({ config });
   const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault });
+  const integrationOutbox = new IntegrationOutbox({
+    store,
+    config,
+    handlers: {
+      'order.sheet_projection': async (entry) => {
+        const order = Object.values(store.getState().ordersByTenant ?? {})
+          .flat()
+          .find((item) => item.id === entry.payload.orderId && item.tenantId === entry.payload.tenantId);
+        if (!order) throw new Error(`Order ${entry.payload.orderId} not found for outbox projection`);
+        const result = await tools.syncLiveOrderStatus({
+          tenantId: entry.payload.tenantId,
+          order,
+          status: entry.payload.status,
+          updatedAt: entry.payload.updatedAt,
+        });
+        if (result.status === 'synced') {
+          store.mutate((state) => {
+            const current = (state.ordersByTenant?.[entry.payload.tenantId] ?? []).find((item) => item.id === entry.payload.orderId);
+            if (!current) return;
+            current.sheetSyncStatus = 'synced';
+            current.sheetSyncedAt = new Date().toISOString();
+          });
+          await store.persistOrder?.(entry.payload.tenantId, entry.payload.orderId);
+        }
+        return result;
+      },
+    },
+  });
+  const orders = new OrderService({ store, events, tools, outbox: integrationOutbox });
   const planner = new LLMPlanner({ store, events, usage, config });
-  const runtime = new AgentRuntime({ store, events, tools, planner, usage, config });
+  const runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders });
   runtime.start();
+  integrationOutbox.start();
   const controlPlane = new SaasControlPlane({ store, events, config, googleWorkspace, secretVault });
   const auth = new AuthService({ store, events, config });
 
   const app = express();
-  app.use(cors());
+  const allowedOrigins = resolveCorsOrigins(config);
+  app.use((req, res, next) => {
+    req.requestId = req.get('x-request-id') || crypto.randomUUID();
+    res.setHeader('x-request-id', req.requestId);
+    next();
+  });
+  app.use(cors({
+    credentials: true,
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      const error = new Error('CORS origin not allowed');
+      error.statusCode = 403;
+      error.code = 'cors_origin_not_allowed';
+      return callback(error);
+    },
+  }));
   app.use(
     express.json({
       limit: '2mb',
@@ -80,11 +130,24 @@ function createExpressRuntime({ config, store }) {
   app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'ventas-ia-agent-backend', version: '0.1.0', time: new Date().toISOString() });
   });
+  app.get('/health/ready', (_req, res) => {
+    const ready = runtimeValidation.errors.length === 0;
+    res.status(ready ? 200 : 503).json({
+      ok: ready,
+      service: 'ventas-ia-agent-backend',
+      production: runtimeValidation.production,
+      warnings: runtimeValidation.warnings,
+      errors: runtimeValidation.errors,
+      storageDriver: config.storageDriver,
+      whatsappMode: config.whatsappMode,
+      time: new Date().toISOString(),
+    });
+  });
   app.use('/api/auth', createAuthRouter({ auth }));
   app.use('/api/billing', createBillingRouter({ controlPlane, auth }));
   app.use('/api/saas', createSaasRouter({ controlPlane, auth }));
   app.use('/api/admin', createAdminRouter({ store, usage, auth, controlPlane }));
-  app.use('/api', createApiRouter({ store, events, runtime, tools, controlPlane, usage, auth }));
+  app.use('/api', createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }));
   app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane }));
   app.use('/webhooks', createMercadoPagoRouter({ controlPlane, store }));
 
@@ -105,15 +168,25 @@ function createExpressRuntime({ config, store }) {
     });
   });
 
-  return { app, store, events, tools, planner, runtime, controlPlane, usage, auth, config, googleWorkspace, secretVault };
+  return { app, store, events, tools, orders, planner, runtime, integrationOutbox, controlPlane, usage, auth, config, googleWorkspace, secretVault };
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
 const modulePath = fileURLToPath(import.meta.url);
 
 if (entryPath === modulePath) {
-  const { app, config } = await createAppAsync();
+  const runtime = await createAppAsync();
+  const { app, config } = runtime;
   app.listen(config.port, config.host, () => {
     console.log(`Ventas IA backend listening on http://${config.host}:${config.port} (${config.storageDriver})`);
   });
+  const shutdown = async (signal) => {
+    console.log(`Shutting down after ${signal}`);
+    runtime.runtime.stop();
+    await runtime.integrationOutbox.stop();
+    await runtime.store.close?.();
+    process.exit(0);
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
 }

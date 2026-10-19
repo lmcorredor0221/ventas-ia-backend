@@ -64,7 +64,7 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         httpStatus: 200,
         durationMs: Date.now() - startedAt,
         conversationId: result.conversation?.id,
-        metadata: { duplicate: result.duplicate, phoneNumberId: normalized.phoneNumberId, waId: normalized.waId },
+        metadata: { duplicate: result.duplicate, phoneNumberId: normalized.phoneNumberId, waId: normalized.waId, traceId: normalized.traceId, requestId: req.requestId },
       }));
       return res.status(200).json({ ok: true, duplicate: result.duplicate, conversationId: result.conversation?.id });
     } catch (error) {
@@ -77,7 +77,7 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         durationMs: Date.now() - startedAt,
         errorCode: error.code ?? 'webhook_processing_error',
         errorMessage: error.message,
-        metadata: { phoneNumberId: extractPhoneNumberId(req.body) },
+        metadata: { phoneNumberId: extractPhoneNumberId(req.body), traceId: normalized?.traceId ?? null, requestId: req.requestId },
       }));
       next(error);
     }
@@ -87,15 +87,17 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
 }
 
 function webhookRecordFromRequest(req, patch = {}) {
+  const externalId = patch.externalId ?? extractWhatsAppExternalId(req.body);
   return {
     provider: 'meta_whatsapp_cloud_api',
     tenantId: patch.tenantId ?? null,
     eventType: patch.eventType ?? 'message',
-    externalId: patch.externalId ?? extractWhatsAppExternalId(req.body),
-    idempotencyKey: patch.externalId ?? extractWhatsAppExternalId(req.body),
+    externalId,
+    idempotencyKey: patch.idempotencyKey ?? externalId,
     headers: req.headers,
     payload: req.body ?? req.query ?? {},
     ...patch,
+    metadata: { traceId: patch.traceId ?? externalId, ...(patch.metadata ?? {}) },
   };
 }
 
@@ -139,6 +141,7 @@ function normalizeWhatsAppPayload(payload, state) {
       waId: status.recipient_id,
       phoneNumberId,
       messageId: status.id,
+      traceId: `wa:${status.id}`,
       timestamp: Number(status.timestamp ?? Date.now() / 1000) * 1000,
       messageType: 'delivery_status',
       text: status.status,
@@ -157,6 +160,7 @@ function normalizeWhatsAppPayload(payload, state) {
     profileName: change?.contacts?.[0]?.profile?.name,
     phoneNumberId,
     messageId: message.id,
+    traceId: `wa:${message.id}`,
     timestamp: Number(message.timestamp ?? Date.now() / 1000) * 1000,
     messageType: type,
     text: type === 'text' ? message.text?.body : message[type]?.caption ?? '',

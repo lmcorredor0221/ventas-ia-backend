@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -31,12 +32,15 @@ export class ToolRegistry {
   }
 
   async call(toolName, tenantId, conversationId, payload = {}) {
+    const traceId = payload.traceId
+      ?? this.store.getState().conversations?.find((conversation) => conversation.id === conversationId)?.traceId
+      ?? null;
     this.events.emit({
       type: 'tool.call.started',
       tenantId,
       conversationId,
       detail: `${toolName} started`,
-      metadata: { toolName, payloadSummary: summarize(payload) },
+      metadata: { toolName, traceId, payloadSummary: summarize(payload) },
     });
     try {
       const result = await this.invoke(toolName, tenantId, conversationId, payload);
@@ -45,7 +49,7 @@ export class ToolRegistry {
         tenantId,
         conversationId,
         detail: `${toolName} completed`,
-        metadata: { toolName, resultSummary: summarize(result) },
+        metadata: { toolName, traceId, resultSummary: summarize(result) },
       });
       this.usage?.recordToolCall(tenantId, toolName, { conversationId });
       return result;
@@ -55,7 +59,7 @@ export class ToolRegistry {
         tenantId,
         conversationId,
         detail: `${toolName} failed: ${error.message}`,
-        metadata: { toolName },
+        metadata: { toolName, traceId },
       });
       throw error;
     }
@@ -161,7 +165,7 @@ export class ToolRegistry {
       };
       state.customerProfilesByTenant[tenantId][payload.wa_id] = profile;
     });
-    this.store.persistCustomerProfile?.(tenantId, payload.wa_id);
+    await this.store.persistCustomerProfile?.(tenantId, payload.wa_id);
     this.audit(tenantId, 'tool.google_sheets_customer_profile_upsert', 'customer_profile', {
       waId: payload.wa_id,
       sourceRef: profile.sheetRowId,
@@ -176,6 +180,7 @@ export class ToolRegistry {
     if (!live && !this.config.allowLocalCatalogFallback) {
       throw googleConnectionRequiredError('No se pudo registrar el pedido en Google Sheets de esta tienda.');
     }
+    const status = assertOrderStatus(payload.status ?? 'pending_human_preparation');
     const order = {
       id: `ord-${crypto.randomUUID().slice(0, 10)}`,
       tenantId,
@@ -185,10 +190,10 @@ export class ToolRegistry {
       deliveryAddress: payload.delivery_address,
       items: payload.items ?? [],
       subtotal: payload.subtotal ?? 0,
-      status: payload.status ?? 'pending_human_preparation',
+      status,
       createdAt: now,
       updatedAt: now,
-      statusHistory: [{ status: payload.status ?? 'pending_human_preparation', at: now, actorId: 'assistant' }],
+      statusHistory: [{ status, at: now, actorId: 'assistant' }],
     };
     this.store.mutate((state) => {
       state.ordersByTenant ??= {};
@@ -197,7 +202,7 @@ export class ToolRegistry {
     });
     let liveSourceRef = null;
     if (live) liveSourceRef = await this.appendLiveOrder({ tenantId, live, order });
-    this.store.persistOrder?.(tenantId, order.id);
+    await this.store.persistOrder?.(tenantId, order.id);
     this.audit(tenantId, 'tool.google_sheets_order_write', 'order', {
       orderId: order.id,
       conversationId,
@@ -264,7 +269,7 @@ export class ToolRegistry {
         state.customerProfilesByTenant[tenantId] ??= {};
         state.customerProfilesByTenant[tenantId][waId] = profile;
       });
-      this.store.persistCustomerProfile?.(tenantId, waId);
+      await this.store.persistCustomerProfile?.(tenantId, waId);
     }
     return profile;
   }
@@ -336,7 +341,7 @@ export class ToolRegistry {
       error.statusCode = 409;
       throw error;
     }
-    const nextOrder = { ...order, status, updatedAt };
+    const nextOrder = { ...order, status: assertOrderStatus(status), updatedAt };
     const rowNumber = rowIndex + 1;
     await this.googleWorkspace.updateValues({
       accessToken: live.accessToken,
@@ -380,8 +385,8 @@ export class ToolRegistry {
         nextStep: request.consequence,
       });
     });
-    this.store.persistPendingRequest?.(request.id);
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistPendingRequest?.(request.id);
+    await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'approval.requested', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
     this.audit(tenantId, 'tool.approval_gate.requested', 'pending_request', {
       requestId: request.id,
@@ -420,8 +425,8 @@ export class ToolRegistry {
         nextStep: request.consequence,
       });
     });
-    this.store.persistPendingRequest?.(request.id);
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistPendingRequest?.(request.id);
+    await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'fallback.activated', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
     this.audit(tenantId, 'tool.human_handoff.created', 'pending_request', {
       requestId: request.id,
@@ -448,7 +453,7 @@ export class ToolRegistry {
     this.store.mutate((state) => {
       state.transactions.unshift(transaction);
     });
-    this.store.persistTransaction?.(transaction.id);
+    await this.store.persistTransaction?.(transaction.id);
     this.audit(tenantId, 'tool.transactional_write.committed', 'transaction', {
       transactionId: transaction.id,
       conversationId,
@@ -480,7 +485,7 @@ export class ToolRegistry {
         conversation.updatedAt = new Date().toISOString();
       }
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
     this.audit(tenantId, 'tool.whatsapp_business_messaging.sent', 'whatsapp_message', {
       conversationId,
       providerMessageId,
@@ -640,7 +645,7 @@ function orderToSheetRow(order) {
     order.deliveryAddress ?? '',
     JSON.stringify(order.items ?? []),
     order.subtotal ?? 0,
-    order.status,
+    toGoogleSheetStatus(order.status ?? fromGoogleSheetStatus(order.sheetStatus) ?? 'pending_human_preparation'),
     order.handoffId ?? '',
     order.createdAt,
     order.updatedAt,

@@ -1,5 +1,7 @@
 # Ventas IA Backend
 
+La revisión técnica integral de la app, el agente, la persistencia, las integraciones y los riesgos está documentada en [Arquitectura profunda de la app y del agente](docs/Arquitectura-profunda-app-y-agente.md).
+
 Backend ejecutable para el agente de ventas definido por el ACP adjunto. Mantiene separadas la lógica del agente, las herramientas, la persistencia multi-tenant y la capa visual.
 
 ## Ejecutar
@@ -47,6 +49,7 @@ El helper `scripts/run-with-env.mjs` carga ese archivo local, replica `GOOGLE_CL
 ## Endpoints principales
 
 - `GET /health`
+- `GET /health/ready`
 - `GET /api/ops/overview?tenantId=andina`
 - `POST /api/auth/google`
 - `GET /api/auth/me`
@@ -56,6 +59,7 @@ El helper `scripts/run-with-env.mjs` carga ese archivo local, replica `GOOGLE_CL
 - `GET /api/conversations?tenantId=andina`
 - `GET /api/events?tenantId=andina`
 - `GET /api/pending-requests?tenantId=andina`
+- `PATCH /api/orders/:id/status`
 - `GET /api/usage?tenantId=andina`
 - `POST /api/pending-requests/:id/resolve`
 - `POST /api/agent/run`
@@ -91,9 +95,16 @@ El helper `scripts/run-with-env.mjs` carga ese archivo local, replica `GOOGLE_CL
 - Para preguntas de disponibilidad, el agente no exige coincidencia literal: el planner conserva candidatos multiples y genera un `toolPlan`; el runtime ejecuta esas consultas contra catalogo y responde disponibilidad parcial cuando algunos productos no aparecen.
 - Si el cliente no existe en Sheets, el identificador oficial es el número de WhatsApp y el agente pide nombre y dirección antes de guardar el perfil.
 - Cuando el cliente confirma una canasta completa, registra el pedido en Google Sheets con `google_sheets_order_write` y escala a humano para preparación y entrega.
+- Los pedidos aparecen en `GET /api/ops/overview` con su etapa efectiva. `PATCH /api/orders/:id/status` permite avanzar de `pending_human_preparation` a `preparing`, luego a `dispatched` y finalmente a `delivered`. La API rechaza saltos de etapa, evita avanzar mientras existe una solicitud humana pendiente y guarda `statusHistory` en el mismo pedido.
+- Las transiciones de pedido pasan por `server/services/orderService.js`. El estado interno es canónico; al proyectar a Google Sheets se traduce a `confirmado`, `preparando`, `en_camino`, `entregado` o `cancelado`.
+- `GET /health/ready` valida si el runtime está realmente listo para operar. En producción bloquea configuraciones incompletas de PostgreSQL, autenticación, Google, WhatsApp, secretos o proveedor LLM.
+- Todas las solicitudes reciben `x-request-id`; el identificador se propaga a eventos de agente, herramientas, webhooks y transiciones de pedido para soporte.
+- Si Google está conectado en modo live, cada avance actualiza la fila correspondiente de `Pedidos` antes de confirmar el cambio. Si la sincronización falla, el pedido conserva su etapa anterior; si Google no está conectado, el estado queda guardado en la plataforma con `sheetSyncStatus: pending` para que la interfaz lo advierta.
 - Escala imágenes a humano según el ACP.
 - Emite eventos ACP: `agent.started`, `tool.call.started`, `tool.call.completed`, `approval.requested`, `approval.granted`, `approval.denied`, `fallback.activated`, `agent.completed`, `agent.failed`.
 - Guarda conversaciones, eventos, pendientes, transacciones y mensajes en JSON local o PostgreSQL, segun `STORAGE_DRIVER`.
+- Las proyecciones externas de pedidos pueden procesarse con outbox durable activando `INTEGRATION_OUTBOX_ENABLED=true`. La tabla `integration_outbox` usa una clave idempotente, reintentos con backoff y un worker interno; el proceso espera el vaciado de la cola durante el apagado ordenado.
+- Para revisar una exportación de estados históricos de Sheets sin modificarla, ejecutar `node scripts/audit-order-statuses.mjs --input ./export-pedidos.json`. El reporte lista equivalencias canónicas y valores desconocidos que requieren revisión manual.
 
 ## Control plane SaaS
 
@@ -178,7 +189,7 @@ El backend tiene un adapter opcional `PostgresStore` para mover la persistencia 
 - Escrituras explícitas para operación del agente: `conversations`, `orders`, `customer_profiles`, `pending_requests`, `transactions` y `processed_messages`.
 - Lecturas SQL directas para rutas operativas (`tenants`, `conversations`, `events`, `pending_requests`, `ops/overview`), herramientas de catálogo, Drive y perfil de cliente, lookup de conversaciones por WhatsApp y deduplicación por `messageId`.
 - El `AgentRuntime` ya ejecuta su flujo principal en modo async para poder consultar repositorios SQL antes de decidir, marcar idempotencia persistente y devolver conversaciones actualizadas desde base de datos.
-- Migraciones SQL en `server/db/migrations`.
+- Migraciones SQL en `server/db/migrations`, incluida `008_integration_outbox.sql`.
 
 Esto permite desplegar en Render con Managed PostgreSQL y después granularizar el resto de repositorios por tabla sin reescribir el flujo del agente.
 

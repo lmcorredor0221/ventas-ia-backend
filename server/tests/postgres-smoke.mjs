@@ -59,9 +59,10 @@ try {
     'billing_access_exceptions',
     'billing_usage_cycles',
     'billing_funnel_events',
+    'integration_outbox',
     'schema_migrations',
   ]]);
-  assert.equal(tables.rows.length, 29);
+  assert.equal(tables.rows.length, 30);
 
   const seeded = await store.pool.query(`
     SELECT

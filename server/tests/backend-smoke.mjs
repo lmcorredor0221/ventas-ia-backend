@@ -21,6 +21,8 @@ try {
 
   const health = await getJson(`${base}/health`);
   assert.equal(health.ok, true);
+  const readiness = await getJson(`${base}/health/ready`);
+  assert.equal(readiness.ok, true);
 
   const overview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.ok(overview.conversations.length > 0);
@@ -98,7 +100,7 @@ try {
     tenantId: 'andina', order: lifecycleDispatched, status: 'delivered', updatedAt: '2026-10-17T10:00:00Z',
   });
   assert.equal(sheetWrites[0].range, 'Pedidos!G3:J3');
-  assert.equal(sheetWrites[0].values[0][0], 'delivered');
+  assert.equal(sheetWrites[0].values[0][0], 'entregado');
 
   store.mutate((state) => {
     state.conversations.unshift({

@@ -128,6 +128,8 @@ export function createSeedState() {
       metadata: { source: 'initial_seed' },
     })),
     processedMessages: [],
+    processedMessagePayloads: {},
+    integrationOutbox: [],
     transactions: [],
   };
 }

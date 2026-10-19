@@ -1346,10 +1346,10 @@ export class SaasControlPlane {
         ready: false,
         mode: 'guided_manual',
         reason: status.reason,
-        message: status.reason === 'meta_webhook_not_configured'
-          ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
-          : status.reason === 'meta_approval_pending'
-            ? 'Meta aún debe aprobar el acceso avanzado de Ventas IA para conectar tiendas de clientes.'
+        message: status.reason === 'meta_app_review_pending'
+          ? 'Meta verificó el negocio, pero aún revisa los permisos avanzados de WhatsApp de Ventas IA.'
+          : status.reason === 'meta_webhook_not_configured'
+            ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
             : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
         manualSteps: status.steps,
         status: this.getWhatsAppOnboarding(tenantId),
@@ -1372,6 +1372,13 @@ export class SaasControlPlane {
   async completeWhatsAppEmbeddedSignup(tenantId, payload = {}) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_embedded_signup');
+    const readiness = this.getWhatsAppOnboarding(tenantId);
+    if (!readiness.canAutomate) {
+      const error = new Error('La conexión con Meta aún no está habilitada por Ventas IA.');
+      error.statusCode = 428;
+      error.code = readiness.reason;
+      throw error;
+    }
     const code = String(payload.code ?? '').trim();
     const wabaId = String(payload.wabaId ?? '').trim();
     const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
@@ -2011,13 +2018,14 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     connected,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
+    platformReadiness: { appReviewApproved, metaConfigured, webhookConfigured },
     reason: canAutomate
       ? null
-      : !metaConfigured
-        ? 'meta_app_not_configured'
-        : !webhookConfigured
-          ? 'meta_webhook_not_configured'
-          : 'meta_approval_pending',
+      : !appReviewApproved
+        ? 'meta_app_review_pending'
+        : !metaConfigured
+          ? 'meta_app_not_configured'
+          : 'meta_webhook_not_configured',
     nextAction,
     hasWhatsAppBusiness: saved.hasWhatsAppBusiness ?? null,
     businessName: saved.businessName ?? tenant.name,
