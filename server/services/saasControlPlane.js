@@ -1347,7 +1347,11 @@ export class SaasControlPlane {
         mode: 'guided_manual',
         reason: status.reason,
         message: status.reason === 'meta_app_review_pending'
-          ? 'Meta verificó el negocio, pero aún revisa los permisos avanzados de WhatsApp de Ventas IA.'
+          ? status.platformReadiness.appReviewStatus === 'in_review'
+            ? 'Meta está revisando la solicitud de acceso avanzado de WhatsApp de Ventas IA.'
+            : status.platformReadiness.appReviewStatus === 'changes_requested'
+              ? 'Meta solicitó ajustes a la solicitud de WhatsApp de Ventas IA.'
+              : 'Ventas IA aún debe enviar a Meta la solicitud de acceso avanzado de WhatsApp.'
           : status.reason === 'meta_webhook_not_configured'
             ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
             : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
@@ -1994,6 +1998,12 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     && isHttpsUrl(whatsappWebhookPublicUrl()),
   );
   const appReviewApproved = process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED === 'true';
+  const reportedReviewStatus = process.env.META_WHATSAPP_APP_REVIEW_STATUS;
+  const appReviewStatus = appReviewApproved
+    ? 'approved'
+    : ['in_review', 'changes_requested'].includes(reportedReviewStatus)
+      ? reportedReviewStatus
+      : 'not_submitted';
   const canAutomate = metaConfigured && webhookConfigured && appReviewApproved;
   const connected = Boolean(whatsapp.phoneNumberId);
   const token = whatsappAccessTokenHealth({
@@ -2018,7 +2028,7 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     connected,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
-    platformReadiness: { appReviewApproved, metaConfigured, webhookConfigured },
+    platformReadiness: { appReviewApproved, appReviewStatus, metaConfigured, webhookConfigured },
     reason: canAutomate
       ? null
       : !appReviewApproved

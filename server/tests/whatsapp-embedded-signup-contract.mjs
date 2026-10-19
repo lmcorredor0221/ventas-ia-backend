@@ -9,6 +9,7 @@ const envKeys = [
   'META_APP_ID',
   'META_APP_SECRET',
   'META_WHATSAPP_ADVANCED_ACCESS_APPROVED',
+  'META_WHATSAPP_APP_REVIEW_STATUS',
   'WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID',
   'WHATSAPP_WEBHOOK_PUBLIC_URL',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
@@ -25,6 +26,7 @@ Object.assign(process.env, {
   META_APP_ID: 'meta-app-contract',
   META_APP_SECRET: 'meta-secret-contract',
   META_WHATSAPP_ADVANCED_ACCESS_APPROVED: 'false',
+  META_WHATSAPP_APP_REVIEW_STATUS: 'not_submitted',
   WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID: 'meta-config-contract',
   WHATSAPP_WEBHOOK_PUBLIC_URL: 'https://example.test/webhooks/whatsapp',
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-contract',
@@ -94,7 +96,18 @@ try {
   const pendingApproval = controlPlane.getWhatsAppOnboarding('andina');
   assert.equal(pendingApproval.canAutomate, false);
   assert.equal(pendingApproval.reason, 'meta_app_review_pending');
-  assert.equal(controlPlane.startWhatsAppEmbeddedSignup('andina').mode, 'guided_manual');
+  assert.equal(pendingApproval.platformReadiness.appReviewStatus, 'not_submitted');
+  const draftLaunch = controlPlane.startWhatsAppEmbeddedSignup('andina');
+  assert.equal(draftLaunch.mode, 'guided_manual');
+  assert.match(draftLaunch.message, /aún debe enviar/);
+  process.env.META_WHATSAPP_APP_REVIEW_STATUS = 'in_review';
+  const submittedLaunch = controlPlane.startWhatsAppEmbeddedSignup('andina');
+  assert.equal(submittedLaunch.status.platformReadiness.appReviewStatus, 'in_review');
+  assert.equal(submittedLaunch.status.canAutomate, false);
+  assert.match(submittedLaunch.message, /Meta está revisando/);
+  process.env.META_WHATSAPP_APP_REVIEW_STATUS = 'changes_requested';
+  assert.equal(controlPlane.getWhatsAppOnboarding('andina').platformReadiness.appReviewStatus, 'changes_requested');
+  process.env.META_WHATSAPP_APP_REVIEW_STATUS = 'not_submitted';
   await assert.rejects(
     controlPlane.completeWhatsAppEmbeddedSignup('andina', {
       code: 'embedded-code-contract',
@@ -105,6 +118,7 @@ try {
   );
   assert.equal(graphCalls.length, 0);
   process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED = 'true';
+  assert.equal(controlPlane.getWhatsAppOnboarding('andina').platformReadiness.appReviewStatus, 'approved');
   const result = await controlPlane.completeWhatsAppEmbeddedSignup('andina', {
     code: 'embedded-code-contract',
     wabaId: '300000000001',
