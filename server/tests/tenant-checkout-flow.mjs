@@ -69,6 +69,7 @@ try {
   });
 
   assert.equal(result.status, 'dispatched');
+  assert.equal(result.notification.status, 'sent');
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0].name, 'whatsapp_business_messaging');
   assert.match(sentMessages[0].payload.text, /va en camino/i);

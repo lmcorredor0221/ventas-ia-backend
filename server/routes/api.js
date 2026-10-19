@@ -134,7 +134,16 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
       const traceId = req.requestId ?? req.get('x-request-id') ?? `order:${order.id}:${Date.now()}`;
       const transition = await orders.transition({ orderId: order.id, tenantId: order.tenantId, nextStatus, actorId, source: 'api', traceId });
       auth.recordTenantAction(req, { tenantId: order.tenantId, action: `order.${nextStatus}`, resource: order.id, metadata: { eventId: transition.eventId, projectionStatus: transition.projection.status } });
-      return res.json({ ...transition.order, transition: { previousStatus: transition.previousStatus, status: transition.status, projection: transition.projection, eventId: transition.eventId } });
+      return res.json({
+        ...transition.order,
+        transition: {
+          previousStatus: transition.previousStatus,
+          status: transition.status,
+          projection: transition.projection,
+          notification: transition.notification,
+          eventId: transition.eventId,
+        },
+      });
     } catch (error) {
       return next(error);
     }
