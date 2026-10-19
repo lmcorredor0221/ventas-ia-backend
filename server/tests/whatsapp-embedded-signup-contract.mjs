@@ -48,16 +48,16 @@ global.fetch = async (url, options = {}) => {
   graphCalls.push({ url: href, options });
   if (href.includes('/oauth/access_token')) return jsonResponse({ access_token: 'tenant-a-meta-token' });
   if (href.includes('/200000000001?fields=')) {
-    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ id: '200000000001', display_phone_number: '+57 300 000 0000', verified_name: 'Tienda Contrato' });
   }
   if (href.includes('/300000000001/phone_numbers')) {
-    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ data: [{ id: '200000000001' }] });
   }
   if (href.includes('/300000000001/subscribed_apps')) {
     assert.equal(options.method, 'POST');
-    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ success: true });
   }
   if (href.includes('/200000000001/register')) {
@@ -177,6 +177,10 @@ try {
   assert.equal(pilotResult.whatsappOnboarding.status, 'connected');
   assert.equal(secretVault.readSecret(pilotResult.tenant.config.whatsapp.accessTokenRef), 'pilot-meta-token');
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.test_pilot.connected'));
+  process.env.META_WHATSAPP_TEST_ACCESS_TOKEN = 'pilot-meta-token-renewed';
+  const refreshedPilot = await controlPlane.refreshWhatsAppTestPilot(pilotBundle.tenant.id, { actor: { id: 'platform-admin' } });
+  assert.equal(secretVault.readSecret(refreshedPilot.tenant.config.whatsapp.accessTokenRef), 'pilot-meta-token-renewed');
+  assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.test_pilot.refreshed'));
   console.log('WhatsApp Embedded Signup contract tests passed');
 } finally {
   await store.close?.();

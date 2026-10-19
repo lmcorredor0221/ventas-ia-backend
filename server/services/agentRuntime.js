@@ -11,6 +11,7 @@ export class AgentRuntime {
     this.config = config;
     this.orders = orders;
     this.manualSweepTimer = null;
+    this.conversationEnsureLocks = new Map();
   }
 
   start() {
@@ -837,6 +838,28 @@ export class AgentRuntime {
   }
 
   async ensureConversation(tenantId, normalized) {
+    const key = `${tenantId}:${normalized.waId}`;
+    const inFlight = this.conversationEnsureLocks.get(key);
+    if (inFlight) return inFlight;
+
+    const ensure = this.ensureConversationUnlocked(tenantId, normalized);
+    this.conversationEnsureLocks.set(key, ensure);
+    try {
+      return await ensure;
+    } finally {
+      if (this.conversationEnsureLocks.get(key) === ensure) {
+        this.conversationEnsureLocks.delete(key);
+      }
+    }
+  }
+
+  async ensureConversationUnlocked(tenantId, normalized) {
+    const cached = this.store
+      .getState()
+      .conversations
+      .find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedCase(item));
+    if (cached) return cached;
+
     const existing = this.store.findConversationByWa
       ? await this.store.findConversationByWa(tenantId, normalized.waId)
       : this.store

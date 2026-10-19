@@ -1430,6 +1430,14 @@ export class SaasControlPlane {
   }
 
   async connectWhatsAppTestPilot(tenantId, { actor } = {}) {
+    return this.upsertWhatsAppTestPilot(tenantId, { actor, refresh: false });
+  }
+
+  async refreshWhatsAppTestPilot(tenantId, { actor } = {}) {
+    return this.upsertWhatsAppTestPilot(tenantId, { actor, refresh: true });
+  }
+
+  async upsertWhatsAppTestPilot(tenantId, { actor, refresh }) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_test_pilot');
     const pilot = whatsappTestPilotForTenant(tenantId);
@@ -1446,10 +1454,16 @@ export class SaasControlPlane {
       throw error;
     }
     const onboarding = this.getWhatsAppOnboarding(tenantId);
-    if (onboarding.connected) {
+    if (onboarding.connected && !refresh) {
       const error = new Error('Esta tienda ya tiene un WhatsApp conectado.');
       error.statusCode = 409;
       error.code = 'whatsapp_channel_already_connected';
+      throw error;
+    }
+    if (onboarding.connected && String(onboarding.binding?.phoneNumberId ?? '') !== pilot.phoneNumberId) {
+      const error = new Error('El piloto solo puede renovar el mismo número de prueba que ya tiene conectado.');
+      error.statusCode = 409;
+      error.code = 'whatsapp_test_pilot_phone_mismatch';
       throw error;
     }
 
@@ -1507,12 +1521,15 @@ export class SaasControlPlane {
       };
     });
     this.persistTenantCritical(tenantId);
+    const action = refresh ? 'whatsapp.test_pilot.refreshed' : 'whatsapp.test_pilot.connected';
     this.events.emit({
-      type: 'whatsapp.test_pilot.connected',
+      type: action,
       tenantId,
-      detail: 'Canal de prueba de Meta conectado al piloto controlado',
+      detail: refresh
+        ? 'Token del canal de prueba de Meta renovado para el piloto controlado'
+        : 'Canal de prueba de Meta conectado al piloto controlado',
     });
-    this.audit(tenantId, 'whatsapp.test_pilot.connected', 'whatsapp_connection', {
+    this.audit(tenantId, action, 'whatsapp_connection', {
       actorId: actor?.id ?? null,
       phoneNumberId: pilot.phoneNumberId,
       wabaId: pilot.wabaId,
