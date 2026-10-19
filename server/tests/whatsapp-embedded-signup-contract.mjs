@@ -17,6 +17,13 @@ const envKeys = [
   'WHATSAPP_GRAPH_API_VERSION',
   'WHATSAPP_TENANT_TOKEN_LIFETIME_DAYS',
   'WHATSAPP_TENANT_TOKEN_RENEWAL_WINDOW_DAYS',
+  'META_WHATSAPP_TEST_CHANNEL_ENABLED',
+  'META_WHATSAPP_TEST_TENANT_ID',
+  'META_WHATSAPP_TEST_PHONE_NUMBER_ID',
+  'META_WHATSAPP_TEST_WABA_ID',
+  'META_WHATSAPP_TEST_ACCESS_TOKEN',
+  'META_WHATSAPP_TEST_DISPLAY_PHONE_NUMBER',
+  'META_WHATSAPP_TEST_VERIFIED_NAME',
 ];
 const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-whatsapp-embedded-'));
@@ -41,16 +48,16 @@ global.fetch = async (url, options = {}) => {
   graphCalls.push({ url: href, options });
   if (href.includes('/oauth/access_token')) return jsonResponse({ access_token: 'tenant-a-meta-token' });
   if (href.includes('/200000000001?fields=')) {
-    assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
     return jsonResponse({ id: '200000000001', display_phone_number: '+57 300 000 0000', verified_name: 'Tienda Contrato' });
   }
   if (href.includes('/300000000001/phone_numbers')) {
-    assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
     return jsonResponse({ data: [{ id: '200000000001' }] });
   }
   if (href.includes('/300000000001/subscribed_apps')) {
     assert.equal(options.method, 'POST');
-    assert.equal(options.headers.authorization, 'Bearer tenant-a-meta-token');
+    assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token)$/);
     return jsonResponse({ success: true });
   }
   if (href.includes('/200000000001/register')) {
@@ -145,6 +152,31 @@ try {
     () => controlPlane.resetWhatsAppOnboarding('andina'),
     (error) => error.code === 'whatsapp_channel_already_connected' && error.statusCode === 409,
   );
+
+  process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED = 'false';
+  const pilotBundle = controlPlane.createTenant({
+    storeName: 'Piloto Meta Evidencia',
+    ownerEmail: 'admin@example.com',
+  });
+  Object.assign(process.env, {
+    META_WHATSAPP_TEST_CHANNEL_ENABLED: 'true',
+    META_WHATSAPP_TEST_TENANT_ID: pilotBundle.tenant.id,
+    META_WHATSAPP_TEST_PHONE_NUMBER_ID: '200000000001',
+    META_WHATSAPP_TEST_WABA_ID: '300000000001',
+    META_WHATSAPP_TEST_ACCESS_TOKEN: 'pilot-meta-token',
+    META_WHATSAPP_TEST_DISPLAY_PHONE_NUMBER: '+1 555 202-4079',
+    META_WHATSAPP_TEST_VERIFIED_NAME: 'Ventas IA Piloto',
+  });
+  const pilotStatus = controlPlane.getWhatsAppOnboarding(pilotBundle.tenant.id);
+  assert.equal(pilotStatus.canAutomate, false);
+  assert.equal(pilotStatus.testPilot.eligible, true);
+  assert.equal(pilotStatus.testPilot.configured, true);
+  assert.equal('accessToken' in pilotStatus.testPilot, false);
+  const pilotResult = await controlPlane.connectWhatsAppTestPilot(pilotBundle.tenant.id, { actor: { id: 'platform-admin' } });
+  assert.equal(pilotResult.tenant.config.whatsapp.phoneNumberId, '200000000001');
+  assert.equal(pilotResult.whatsappOnboarding.status, 'connected');
+  assert.equal(secretVault.readSecret(pilotResult.tenant.config.whatsapp.accessTokenRef), 'pilot-meta-token');
+  assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.test_pilot.connected'));
   console.log('WhatsApp Embedded Signup contract tests passed');
 } finally {
   await store.close?.();

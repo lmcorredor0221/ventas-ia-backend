@@ -223,6 +223,18 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
+  router.post('/tenants/:tenantId/whatsapp/test-pilot/connect', async (req, res, next) => {
+    try {
+      auth.requirePlatformAdmin(req);
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.connectWhatsAppTestPilot(req.params.tenantId, { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.test_pilot.connect.requested', resource: 'whatsapp_connection' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/tenants/:tenantId/whatsapp/embedded-signup/complete', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });

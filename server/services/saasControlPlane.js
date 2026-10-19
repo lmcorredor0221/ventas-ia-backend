@@ -1296,6 +1296,7 @@ export class SaasControlPlane {
     return whatsappOnboardingForTenant({
       tenant,
       saved,
+      testPilot: whatsappTestPilotForTenant(tenantId),
       tokenLifetimeDays: this.config.whatsappTenantTokenLifetimeDays,
       tokenRenewalWindowDays: this.config.whatsappTenantTokenRenewalWindowDays,
     });
@@ -1426,6 +1427,97 @@ export class SaasControlPlane {
       },
       status: this.getWhatsAppOnboarding(tenantId),
     };
+  }
+
+  async connectWhatsAppTestPilot(tenantId, { actor } = {}) {
+    this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_test_pilot');
+    const pilot = whatsappTestPilotForTenant(tenantId);
+    if (!pilot.eligible) {
+      const error = new Error('El canal de prueba de Meta no está autorizado para esta tienda.');
+      error.statusCode = 403;
+      error.code = 'whatsapp_test_pilot_not_authorized';
+      throw error;
+    }
+    if (!pilot.configured) {
+      const error = new Error('Faltan datos del canal de prueba de Meta en la configuración segura de la plataforma.');
+      error.statusCode = 428;
+      error.code = 'whatsapp_test_pilot_not_configured';
+      throw error;
+    }
+    const onboarding = this.getWhatsAppOnboarding(tenantId);
+    if (onboarding.connected) {
+      const error = new Error('Esta tienda ya tiene un WhatsApp conectado.');
+      error.statusCode = 409;
+      error.code = 'whatsapp_channel_already_connected';
+      throw error;
+    }
+
+    const headers = { authorization: `Bearer ${pilot.accessToken}` };
+    const phone = await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(pilot.phoneNumberId)}?fields=id,display_phone_number,verified_name`,
+      { headers },
+      'whatsapp_test_pilot_phone_validation',
+    );
+    if (String(phone.id ?? '') !== pilot.phoneNumberId) {
+      const error = new Error('El número de prueba configurado no coincide con el que devolvió Meta.');
+      error.statusCode = 422;
+      error.code = 'whatsapp_test_pilot_phone_mismatch';
+      throw error;
+    }
+    const wabaPhones = await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(pilot.wabaId)}/phone_numbers?fields=id`,
+      { headers },
+      'whatsapp_test_pilot_waba_validation',
+    );
+    if (!(wabaPhones.data ?? []).some((item) => String(item.id ?? '') === pilot.phoneNumberId)) {
+      const error = new Error('El número de prueba no pertenece a la cuenta WhatsApp Business configurada.');
+      error.statusCode = 422;
+      error.code = 'whatsapp_test_pilot_phone_not_in_waba';
+      throw error;
+    }
+    await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(pilot.wabaId)}/subscribed_apps`,
+      { method: 'POST', headers },
+      'whatsapp_test_pilot_webhook_subscription',
+    );
+
+    const accessTokenRef = this.secretVault.saveSecret({
+      tenantId,
+      name: 'WHATSAPP_ACCESS_TOKEN',
+      value: pilot.accessToken,
+      provider: 'meta_whatsapp_cloud_api',
+      purpose: 'Canal de prueba de Meta limitado al piloto de plataforma',
+    });
+    const now = new Date().toISOString();
+    const result = this.saveWhatsAppBinding(tenantId, {
+      phoneNumberId: pilot.phoneNumberId,
+      wabaId: pilot.wabaId,
+      displayPhoneNumber: phone.display_phone_number ?? pilot.displayPhoneNumber,
+      verifiedName: phone.verified_name ?? pilot.verifiedName,
+      accessTokenRef,
+      accessTokenIssuedAt: now,
+      accessTokenExpiresAt: null,
+    }, { verifiedByProvider: true });
+    this.store.mutate((state) => {
+      state.whatsappOnboardingByTenant[tenantId] = {
+        ...(state.whatsappOnboardingByTenant[tenantId] ?? {}),
+        connectionMode: 'meta_test_pilot',
+        updatedAt: now,
+      };
+    });
+    this.persistTenantCritical(tenantId);
+    this.events.emit({
+      type: 'whatsapp.test_pilot.connected',
+      tenantId,
+      detail: 'Canal de prueba de Meta conectado al piloto controlado',
+    });
+    this.audit(tenantId, 'whatsapp.test_pilot.connected', 'whatsapp_connection', {
+      actorId: actor?.id ?? null,
+      phoneNumberId: pilot.phoneNumberId,
+      wabaId: pilot.wabaId,
+    });
+    return this.getTenantBundle(tenantId);
   }
 
   async completeWhatsAppEmbeddedSignup(tenantId, payload = {}) {
@@ -2075,7 +2167,7 @@ function normalizeWhatsAppSetupPath(value) {
   return allowed.has(value) ? value : 'business_app_existing';
 }
 
-function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, tokenRenewalWindowDays = 14 }) {
+function whatsappOnboardingForTenant({ tenant, saved, testPilot, tokenLifetimeDays = 60, tokenRenewalWindowDays = 14 }) {
   const whatsapp = tenant.config?.whatsapp ?? {};
   const setupPath = saved.setupPath ?? (whatsapp.phoneNumberId ? 'cloud_api_existing' : null);
   const metaConfigured = Boolean(
@@ -2119,6 +2211,7 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
     platformReadiness: { appReviewApproved, appReviewStatus, metaConfigured, webhookConfigured },
+    testPilot: publicWhatsAppTestPilot(testPilot),
     reason: canAutomate
       ? null
       : !appReviewApproved
@@ -2152,6 +2245,35 @@ function whatsappOnboardingForTenant({ tenant, saved, tokenLifetimeDays = 60, to
     },
     lastAttemptAt: saved.lastAttemptAt ?? null,
     updatedAt: saved.updatedAt ?? null,
+  };
+}
+
+function whatsappTestPilotForTenant(tenantId) {
+  const enabled = process.env.META_WHATSAPP_TEST_CHANNEL_ENABLED === 'true';
+  const targetTenantId = String(process.env.META_WHATSAPP_TEST_TENANT_ID ?? '').trim();
+  const phoneNumberId = String(process.env.META_WHATSAPP_TEST_PHONE_NUMBER_ID ?? '').trim();
+  const wabaId = String(process.env.META_WHATSAPP_TEST_WABA_ID ?? '').trim();
+  const accessToken = String(process.env.META_WHATSAPP_TEST_ACCESS_TOKEN ?? '').trim();
+  const eligible = enabled && Boolean(targetTenantId) && targetTenantId === tenantId;
+  const configured = eligible && Boolean(phoneNumberId && wabaId && accessToken);
+  return {
+    eligible,
+    configured,
+    status: !eligible ? 'unavailable' : configured ? 'ready' : 'configuration_required',
+    displayPhoneNumber: String(process.env.META_WHATSAPP_TEST_DISPLAY_PHONE_NUMBER ?? '').trim() || null,
+    verifiedName: String(process.env.META_WHATSAPP_TEST_VERIFIED_NAME ?? '').trim() || null,
+    // IDs and the token never leave the backend status response.
+    ...(configured ? { phoneNumberId, wabaId, accessToken } : {}),
+  };
+}
+
+function publicWhatsAppTestPilot(pilot = {}) {
+  return {
+    eligible: Boolean(pilot.eligible),
+    configured: Boolean(pilot.configured),
+    status: pilot.status ?? 'unavailable',
+    displayPhoneNumber: pilot.displayPhoneNumber ?? null,
+    verifiedName: pilot.verifiedName ?? null,
   };
 }
 
