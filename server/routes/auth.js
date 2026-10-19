@@ -15,6 +15,7 @@ export function createAuthRouter({ auth }) {
       res.setHeader('Set-Cookie', result.cookie);
       res.json({
         user: result.user,
+        isPlatformAdmin: result.isPlatformAdmin,
         memberships: result.memberships,
         session: {
           expiresAt: result.session.expiresAt,
@@ -31,6 +32,7 @@ export function createAuthRouter({ auth }) {
       const authState = auth.requireSession(req);
       res.json({
         user: authState.user,
+        isPlatformAdmin: authState.isPlatformAdmin,
         memberships: authState.memberships,
         session: {
           expiresAt: authState.session.expiresAt,
