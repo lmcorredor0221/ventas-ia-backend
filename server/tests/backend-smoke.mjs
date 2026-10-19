@@ -394,6 +394,9 @@ try {
   assert.equal(unknownWhatsappTenant.ignored, true);
   assert.equal(unknownWhatsappTenant.reason, 'whatsapp_tenant_not_found');
 
+  // The billing-flow contract below starts from payment pending; the separate
+  // autoservicio contract covers the published seven-day trial.
+  controlPlane.updateBillingPlan('ventas_ia_400_domicilios', { trialEnabled: false, trialDays: 0 });
   const createdTenant = await postJson(`${base}/api/saas/tenants`, {
     storeName: 'Tienda Prueba SaaS',
     ownerEmail: 'dueno@example.com',
@@ -643,7 +646,7 @@ try {
   const funnel = await getJson(`${base}/api/admin/billing/funnel`);
   assert.ok(funnel.stages.some((stage) => stage.stage === 'checkout_started' && stage.total >= 1));
 
-  const browserOAuthStart = await fetch(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/oauth/start?redirect=1`, {
+  const browserOAuthStart = await fetch(`${base}/api/saas/connect/google/${createdTenant.tenant.id}/start?redirect=1`, {
     redirect: 'manual',
   });
   assert.equal(browserOAuthStart.status, 302);

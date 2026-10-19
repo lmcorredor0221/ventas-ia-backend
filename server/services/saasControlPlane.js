@@ -134,6 +134,12 @@ export class SaasControlPlane {
     const checkoutExpiresAt = createCheckoutExpiration(now);
 
     if (!accessToken) {
+      if (!this.config.allowMockBillingActivation) {
+        const error = new Error('El pago todavía no está configurado para esta plataforma. Contacta a soporte antes de continuar.');
+        error.statusCode = 503;
+        error.code = 'billing_provider_not_configured';
+        throw error;
+      }
       const checkoutUrl = `/api/saas/tenants/${tenantId}/subscription/mock-activate`;
       const mock = {
         mode: 'sandbox_contract',
@@ -220,6 +226,55 @@ export class SaasControlPlane {
       };
     }
     return this.createSubscriptionCheckout({ tenantId, payerEmail });
+  }
+
+  startSubscriptionTrial(tenantId, { actor } = {}) {
+    const tenant = this.requireTenant(tenantId);
+    const previous = this.ensureSubscription(tenantId, tenant.lifecycle?.ownerEmail);
+    const plan = planById(this.store.getState(), previous.planId) ?? defaultPlan(this.store.getState());
+    if (!plan.trialEnabled || Number(plan.trialDays) <= 0) {
+      const error = new Error('La prueba gratuita no está disponible para este plan.');
+      error.statusCode = 409;
+      error.code = 'trial_unavailable';
+      throw error;
+    }
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(previous.status)) {
+      return { subscription: previous, status: this.getOnboardingStatus(tenantId), reused: true };
+    }
+    if (previous.trialStartedAt || previous.trialEndedAt) {
+      const error = new Error('Esta tienda ya usó su prueba gratuita.');
+      error.statusCode = 409;
+      error.code = 'trial_already_used';
+      throw error;
+    }
+
+    const now = new Date().toISOString();
+    const trialEndsAt = addDays(now, plan.trialDays);
+    const subscription = this.updateSubscription(tenantId, {
+      status: 'trial',
+      providerMode: previous.providerMode ?? 'mercado_pago',
+      trialStartedAt: now,
+      trialEndsAt,
+      currentPeriodStart: now,
+      currentPeriodEnd: trialEndsAt,
+      nextBillingDate: trialEndsAt,
+      checkoutUrl: null,
+      checkoutCreatedAt: null,
+      checkoutExpiresAt: null,
+    });
+    this.patchTenant(tenantId, { status: 'trial' });
+    this.patchTenantLifecycle(tenantId, { access: 'active', activationStatus: 'draft', subscriptionStatus: 'trial' });
+    this.ensureCurrentUsageCycle(tenantId);
+    this.completeOnboardingStep(tenantId, 'subscription');
+    this.recordBillingFunnel(tenantId, 'trial_started', { trialEndsAt, trialDays: plan.trialDays, source: 'owner_requested' });
+    this.events.emit({ type: 'subscription.trial.started', tenantId, detail: `Prueba de ${plan.trialDays} dias iniciada` });
+    this.audit(tenantId, 'subscription.trial.started', 'subscription', {
+      trialEndsAt,
+      trialDays: plan.trialDays,
+      actorId: actor?.id,
+      source: 'owner_requested',
+    });
+    return { subscription, status: this.getOnboardingStatus(tenantId), reused: false };
   }
 
   mockActivateSubscription(tenantId) {
@@ -1570,10 +1625,18 @@ export class SaasControlPlane {
       throw error;
     }
     const subscription = state.subscriptionsByTenant[tenantId] ?? null;
+    const setupAccess = this.getSetupAccess(tenantId, subscription);
     const googleConnection = state.googleConnectionsByTenant[tenantId] ?? null;
     const googleWorkspace = state.googleWorkspacesByTenant[tenantId] ?? null;
     const checks = [
-      { key: 'subscription', label: 'Suscripcion activa en Mercado Pago', ok: ACTIVE_SUBSCRIPTION_STATUSES.has(subscription?.status), detail: subscription?.status ?? 'missing' },
+      {
+        key: 'subscription',
+        label: 'Prueba o suscripción activa',
+        ok: setupAccess.allowed,
+        detail: setupAccess.source === 'billing_access_exception'
+          ? `Acceso temporal hasta ${setupAccess.expiresAt}`
+          : subscription?.status ?? 'missing',
+      },
       { key: 'google_oauth', label: 'Google conectado', ok: googleConnection?.status === 'connected', detail: googleConnection?.accountEmail ?? 'missing' },
       { key: 'google_provisioning', label: 'Drive y Sheets aprovisionados', ok: googleWorkspace?.status === 'provisioned', detail: googleWorkspace?.spreadsheet?.id ?? 'missing' },
       { key: 'llm', label: 'DeepSeek global de plataforma', ok: platformLlmConfig(state).provider === 'deepseek' && Boolean(platformLlmConfig(state).apiKeyRef), detail: platformLlmConfig(state).model ?? 'missing' },
@@ -1589,6 +1652,7 @@ export class SaasControlPlane {
       readyForActivation,
       readyForOperation,
       nextStep: nextStepFromChecks(checks, tenant.lifecycle),
+      setupAccess,
     };
   }
 
@@ -1680,12 +1744,38 @@ export class SaasControlPlane {
 
   requireActiveSubscriptionForSetup(tenantId, step) {
     const subscription = this.ensureSubscription(tenantId);
-    if (ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) return subscription;
+    const setupAccess = this.getSetupAccess(tenantId, subscription);
+    if (setupAccess.allowed) {
+      if (setupAccess.source === 'billing_access_exception') {
+        this.audit(tenantId, 'billing.access_exception.used_for_setup', 'billing_access_exception', {
+          exceptionId: setupAccess.exceptionId,
+          expiresAt: setupAccess.expiresAt,
+          step,
+        });
+      }
+      return subscription;
+    }
     const error = new Error('Active subscription is required before operational setup');
     error.statusCode = 402;
     error.code = 'subscription_required_for_setup';
-    error.status = { tenantId, step, subscriptionStatus: subscription.status };
+    error.status = { tenantId, step, subscriptionStatus: subscription.status, setupAccess };
     throw error;
+  }
+
+  getSetupAccess(tenantId, subscription = this.ensureSubscription(tenantId)) {
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(subscription?.status)) {
+      return { allowed: true, source: 'subscription', exceptionId: null, expiresAt: null };
+    }
+    const exception = activeItemsForTenant(this.store.getState().billingAccessExceptions, tenantId, 'expiresAt')[0];
+    if (exception) {
+      return {
+        allowed: true,
+        source: 'billing_access_exception',
+        exceptionId: exception.id,
+        expiresAt: exception.expiresAt,
+      };
+    }
+    return { allowed: false, source: null, exceptionId: null, expiresAt: null };
   }
 
   recordPayment(tenantId, payment) {

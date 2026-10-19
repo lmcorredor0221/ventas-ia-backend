@@ -23,6 +23,11 @@ export const RUNTIME_CONFIG = {
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 1200),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
+  // The simulated payment endpoint exists for local contracts only. A pending
+  // subscription must never become active through it in production.
+  allowMockBillingActivation: process.env.ALLOW_MOCK_BILLING_ACTIVATION
+    ? process.env.ALLOW_MOCK_BILLING_ACTIVATION === 'true'
+    : process.env.NODE_ENV !== 'production',
   allowDevGoogleLogin: process.env.ALLOW_DEV_GOOGLE_LOGIN
     ? process.env.ALLOW_DEV_GOOGLE_LOGIN === 'true'
     : !process.env.GOOGLE_CLIENT_ID,

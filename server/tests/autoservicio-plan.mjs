@@ -17,10 +17,7 @@ try {
   const base = `http://127.0.0.1:${port}`;
   const basicPlanId = 'ventas_ia_400_domicilios';
 
-  const trialPlan = controlPlane.updateBillingPlan(basicPlanId, {
-    trialEnabled: true,
-    trialDays: 7,
-  });
+  const trialPlan = controlPlane.listBillingPlans().find((plan) => plan.id === basicPlanId);
   assert.equal(trialPlan.trialEnabled, true);
   assert.equal(trialPlan.trialDays, 7);
 
@@ -39,6 +36,19 @@ try {
   assert.ok(maintenance.actions.some((action) => action.tenantId === trialBundle.tenant.id && action.action === 'trial_ended'));
   assert.equal(store.getState().subscriptionsByTenant[trialBundle.tenant.id].status, 'pending_payment');
   assert.equal(store.getState().tenants.find((tenant) => tenant.id === trialBundle.tenant.id).lifecycle.access, 'blocked');
+
+  controlPlane.updateBillingPlan(basicPlanId, { trialEnabled: false, trialDays: 0 });
+  const historicalPending = controlPlane.createTenant({
+    storeName: 'Tienda Pendiente Historica',
+    ownerEmail: 'historica@example.com',
+  });
+  assert.equal(historicalPending.subscription.status, 'pending_payment');
+
+  controlPlane.updateBillingPlan(basicPlanId, { trialEnabled: true, trialDays: 7 });
+  const startedTrial = controlPlane.startSubscriptionTrial(historicalPending.tenant.id);
+  assert.equal(startedTrial.subscription.status, 'trial');
+  assert.ok(startedTrial.subscription.trialStartedAt);
+  assert.equal(startedTrial.status.setupAccess.allowed, true);
 
   controlPlane.updateBillingPlan(basicPlanId, { trialEnabled: false, trialDays: 0 });
 

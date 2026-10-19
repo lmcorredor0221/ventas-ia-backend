@@ -61,6 +61,12 @@ export function createSaasRouter({ controlPlane, auth }) {
   router.post('/tenants/:tenantId/subscription/mock-activate', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      if (!controlPlane.config.allowMockBillingActivation) {
+        const error = new Error('Mock subscription activation is disabled in production');
+        error.statusCode = 404;
+        error.code = 'mock_subscription_activation_disabled';
+        throw error;
+      }
       const result = controlPlane.mockActivateSubscription(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'subscription.mock_activate.requested', resource: 'subscription' });
       res.json(result);
@@ -69,7 +75,18 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
-  router.get('/tenants/:tenantId/google/oauth/start', (req, res, next) => {
+  router.post('/tenants/:tenantId/subscription/start-trial', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.startSubscriptionTrial(req.params.tenantId, { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'subscription.trial.requested', resource: 'subscription' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const startGoogleOAuth = (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
       const result = controlPlane.beginGoogleOAuth(req.params.tenantId, {
@@ -82,7 +99,11 @@ export function createSaasRouter({ controlPlane, auth }) {
     } catch (error) {
       next(error);
     }
-  });
+  };
+  // The neutral entrypoint avoids privacy extensions that block browser paths
+  // containing /oauth/ before the server can redirect to Google.
+  router.get('/tenants/:tenantId/google/oauth/start', startGoogleOAuth);
+  router.get('/connect/google/:tenantId/start', startGoogleOAuth);
 
   router.get('/google/oauth/callback', async (req, res, next) => {
     try {
