@@ -1,5 +1,6 @@
 import { appendAuditEvent } from './authService.js';
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
+import { findOpenPendingRequest } from './pendingRequestPolicy.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -361,6 +362,23 @@ export class ToolRegistry {
   }
 
   async approvalGate(tenantId, conversationId, payload) {
+    const existing = findOpenPendingRequest(this.store.getState(), {
+      tenantId,
+      conversationId,
+      type: 'approval.requested',
+      gateKey: payload.gate_key,
+      action: payload.payload_summary?.action,
+      title: payload.proposed_action,
+    });
+    if (existing) {
+      return {
+        approved: false,
+        approver_id: null,
+        resolution_note: 'pending_human_approval',
+        request_id: existing.id,
+        reused: true,
+      };
+    }
     const request = {
       id: `hitl-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
@@ -398,6 +416,19 @@ export class ToolRegistry {
   }
 
   async humanHandoff(tenantId, conversationId, payload) {
+    const existing = findOpenPendingRequest(this.store.getState(), {
+      tenantId,
+      conversationId,
+      type: 'human_handoff',
+    });
+    if (existing) {
+      return {
+        handoff_id: existing.id,
+        assigned_user: 'equipo.ventas@example.local',
+        ticket_ref: `VENTAS-${existing.id.slice(-4)}`,
+        reused: true,
+      };
+    }
     const request = {
       id: `handoff-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,

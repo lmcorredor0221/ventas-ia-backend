@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null }) {
@@ -77,6 +78,15 @@ export class AgentRuntime {
         this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
         return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
       }
+      if (hasOpenHumanRequest(this.store.getState(), conversation.id)) {
+        await this.patchConversation(conversation.id, {
+          need: normalized.text || `[${normalized.messageType}]`,
+          nextStep: 'El equipo de la tienda debe resolver la solicitud humana abierta antes de reanudar el agente.',
+        });
+        const result = { summary: 'Customer message recorded while human review is pending' };
+        this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
+        return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
+      }
       const result = await this.routeConversation(tenantId, conversation.id, normalized);
       this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
       return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
@@ -112,19 +122,21 @@ export class AgentRuntime {
     }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
-      await this.tools.call('human_handoff', tenantId, conversationId, {
+      const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
         reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente' : 'Cliente solicita asesor humano',
         assigned_team: 'ventas',
         context_snapshot: { summary: normalized.text || 'Caso requiere apoyo humano.', normalized, plan },
       });
-      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
-        action: 'send_session_message',
-        wa_id: normalized.waId,
-        text: normalized.messageType === 'image' || normalized.mediaRef
-          ? 'Recibimos tu imagen. Un asesor la revisara y retomaremos la cotizacion con el producto identificado.'
-          : 'Te conecto con un asesor. Dejamos tu solicitud registrada para continuar sin perder el contexto.',
-      });
-      return { summary: 'Human handoff requested', plan };
+      if (!handoff.reused) {
+        await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+          action: 'send_session_message',
+          wa_id: normalized.waId,
+          text: normalized.messageType === 'image' || normalized.mediaRef
+            ? 'Recibimos tu imagen. Un asesor la revisara y retomaremos la cotizacion con el producto identificado.'
+            : 'Te conecto con un asesor. Dejamos tu solicitud registrada para continuar sin perder el contexto.',
+        });
+      }
+      return { summary: handoff.reused ? 'Human handoff already pending' : 'Human handoff requested', plan };
     }
 
     if (plan.intent === 'discount_request') {
@@ -255,7 +267,7 @@ export class AgentRuntime {
       nextStep: 'El tendero debe conectar Google o validar el pedido manualmente.',
       lastTool: 'google_sheets_customer_profile_lookup',
     });
-    await this.tools.call('human_handoff', tenantId, conversationId, {
+    const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
       reason: 'Google Drive/Sheets no disponible para validar catalogo y pedido',
       urgency: 'Alta',
       assigned_team: 'ventas',
@@ -267,12 +279,14 @@ export class AgentRuntime {
         action: 'connect_google_or_validate_order_manually',
       },
     });
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
-      action: 'send_session_message',
-      wa_id: normalized.waId,
-      text: message,
-    });
-    return { summary: 'Google unavailable; human handoff requested', plan };
+    if (!handoff.reused) {
+      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+        action: 'send_session_message',
+        wa_id: normalized.waId,
+        text: message,
+      });
+    }
+    return { summary: handoff.reused ? 'Google unavailable; human handoff already pending' : 'Google unavailable; human handoff requested', plan };
   }
 
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {

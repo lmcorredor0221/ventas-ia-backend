@@ -8,6 +8,7 @@ import { ensureIdentityState } from '../services/authService.js';
 import { ensureUsageState } from '../services/usageService.js';
 import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
+import { collapseDuplicateOpenPendingRequests } from '../services/pendingRequestPolicy.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
 
 const { Pool } = pg;
@@ -38,6 +39,7 @@ export class PostgresStore {
       ensureUsageState(this.state);
       ensureSecretState(this.state);
       ensurePlatformState(this.state);
+      collapseDuplicateOpenPendingRequests(this.state);
       await this.save();
       return this.state;
     }

@@ -371,6 +371,26 @@ try {
   assert.ok(realLargeOrderRun.conversation.orderDraft.missingFields.some((field) => field.includes('malboro')));
   assert.ok(realLargeOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
 
+  const pendingHandoffsBeforeFollowUp = store.getState().pendingRequests.filter((request) => (
+    request.conversationId === realLargeOrderRun.conversation.id
+    && request.type === 'human_handoff'
+    && request.status === 'pending'
+  )).length;
+  const assistantMessagesBeforeFollowUp = realLargeOrderRun.conversation.messages.filter((message) => message.role === 'assistant').length;
+  const followUpDuringHandoff = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573001112247',
+    profileName: 'Conversacion Real',
+    text: 'Entonces cámbialo por otro producto.',
+  });
+  assert.equal(followUpDuringHandoff.result.summary, 'Customer message recorded while human review is pending');
+  assert.equal(store.getState().pendingRequests.filter((request) => (
+    request.conversationId === realLargeOrderRun.conversation.id
+    && request.type === 'human_handoff'
+    && request.status === 'pending'
+  )).length, pendingHandoffsBeforeFollowUp);
+  assert.equal(followUpDuringHandoff.conversation.messages.filter((message) => message.role === 'assistant').length, assistantMessagesBeforeFollowUp);
+
   const usage = await getJson(`${base}/api/usage?tenantId=andina`);
   assert.equal(usage.limits.includedDeliveries, 400);
   assert.equal(usage.limits.includedInteractions, 2700);
