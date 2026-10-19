@@ -789,6 +789,53 @@ export class AgentRuntime {
     return this.store.getState().pendingRequests.find((item) => item.id === requestId) ?? request;
   }
 
+  async deleteConversation(conversationId, { actorId = 'local-owner' } = {}) {
+    const currentState = this.store.getState();
+    const conversation = currentState.conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      const error = new Error('La conversación ya no existe. Actualiza la pantalla.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const relatedOrders = (currentState.ordersByTenant?.[conversation.tenantId] ?? [])
+      .filter((order) => order.conversationId === conversationId);
+    if (relatedOrders.length) {
+      const error = new Error('No se puede eliminar una conversación con pedidos registrados. Ciérrala desde el flujo de pedidos para conservar su trazabilidad.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const removedRequestIds = currentState.pendingRequests
+      .filter((request) => request.conversationId === conversationId)
+      .map((request) => request.id);
+
+    this.store.mutate((state) => {
+      state.conversations = state.conversations.filter((item) => item.id !== conversationId);
+      state.pendingRequests = state.pendingRequests.filter((request) => request.conversationId !== conversationId);
+      appendAuditEvent(state, {
+        tenantId: conversation.tenantId,
+        actorId,
+        action: 'conversation.deleted',
+        resource: conversationId,
+        metadata: {
+          customerWaId: conversation.waId ?? null,
+          removedPendingRequestIds: removedRequestIds,
+          reason: 'owner_requested',
+        },
+      });
+    });
+    await this.store.deleteConversation?.(conversationId);
+    this.events.emit({
+      type: 'conversation.deleted',
+      tenantId: conversation.tenantId,
+      conversationId,
+      detail: 'Conversación eliminada por el propietario.',
+      metadata: { actorId, removedPendingRequestIds: removedRequestIds },
+    });
+    return { id: conversationId, tenantId: conversation.tenantId, removedPendingRequestIds: removedRequestIds };
+  }
+
   async ensureConversation(tenantId, normalized) {
     const existing = this.store.findConversationByWa
       ? await this.store.findConversationByWa(tenantId, normalized.waId)

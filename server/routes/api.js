@@ -52,6 +52,24 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     }
   });
 
+  router.delete('/conversations/:id', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner'] });
+      const deleted = await runtime.deleteConversation(req.params.id, { actorId: req.auth?.user?.id ?? 'local-owner' });
+      auth.recordTenantAction(req, {
+        tenantId: deleted.tenantId,
+        action: 'conversation.deleted',
+        resource: deleted.id,
+        metadata: { removedPendingRequestIds: deleted.removedPendingRequestIds },
+      });
+      return res.json({ status: 'deleted', ...deleted });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/events', async (req, res, next) => {
     try {
       const scope = authorizeTenantQuery(auth, req, req.query.tenantId);

@@ -251,6 +251,23 @@ export class PostgresStore {
     }, 'conversation write');
   }
 
+  deleteConversation(conversationId) {
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('DELETE FROM pending_requests WHERE conversation_id = $1', [conversationId]);
+        await client.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'conversation delete');
+  }
+
   persistOrder(tenantId, orderId) {
     return this.queueWrite(async () => {
       const order = (this.getState().ordersByTenant?.[tenantId] ?? []).find((item) => item.id === orderId);
