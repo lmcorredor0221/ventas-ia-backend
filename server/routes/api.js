@@ -325,7 +325,7 @@ async function readConversations(store, { tenantId, includeClosed = true } = {})
 }
 
 function isClosedCase(conversation) {
-  return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+  return ['closed_no_confirmation', 'closed_dispatched', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
 }
 
 function isInboxConversation(conversation) {

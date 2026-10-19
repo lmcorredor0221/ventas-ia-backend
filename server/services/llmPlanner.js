@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { platformLlmConfig } from './platformService.js';
+import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -80,14 +81,17 @@ export class LLMPlanner {
     const tenant = await this.getTenant(tenantId);
     const platformConfig = platformLlmConfig(this.store.getState());
     const config = {
-      timeoutMs: this.config?.llmRequestTimeoutMs,
-      maxTokens: this.config?.llmMaxTokens,
       ...platformConfig,
+      // El plan sólo necesita intención y canasta estructurada. Limitamos el
+      // presupuesto incluso si una configuración anterior era más amplia.
+      timeoutMs: Math.min(Number(platformConfig.timeoutMs ?? Infinity), Number(this.config?.llmRequestTimeoutMs ?? 8000)),
+      maxTokens: Math.min(Number(platformConfig.maxTokens ?? Infinity), Number(this.config?.llmMaxTokens ?? 600)),
       responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
       tone: tenant?.config?.agentPolicy?.tone,
     };
     if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
     const products = await this.listProducts(tenantId);
+    const paymentMethods = paymentMethodsForTenant(tenant);
     const text = normalized.text ?? '';
     const provider = config.provider ?? 'deepseek';
     let executionMode = 'mock_structured_fallback';
@@ -95,7 +99,7 @@ export class LLMPlanner {
     let providerMetadata = null;
     try {
       if (provider === 'deepseek' && config.simulator === 'codex_cli') {
-        const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) });
+        const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods }) });
         parsed = {
           ...cliResult.plan,
           simulatedBy: 'codex_cli',
@@ -105,27 +109,34 @@ export class LLMPlanner {
         providerMetadata = cliResult.providerMetadata;
         executionMode = 'codex_cli_simulated_deepseek';
       } else if (provider === 'deepseek' && config.simulator === 'codex') {
-        parsed = this.codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products });
+        parsed = this.codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products, paymentMethods });
         providerMetadata = { simulated: true, simulator: 'codex' };
         executionMode = 'codex_simulated_deepseek';
       } else {
-        const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
+        const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products, paymentMethods });
         parsed = apiResult.plan;
         providerMetadata = apiResult.providerMetadata;
         executionMode = 'provider_api';
       }
     } catch (error) {
-      parsed = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
-      executionMode = provider === 'mock' ? 'mock_structured' : 'mock_structured_fallback';
+      const strictProduction = this.config?.allowLocalCatalogFallback === false && this.config?.whatsappMode === 'live';
+      parsed = strictProduction
+        ? providerUnavailableHandoffPlan({ text, conversation })
+        : this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products, paymentMethods });
+      executionMode = strictProduction
+        ? 'provider_unavailable_handoff'
+        : provider === 'mock'
+          ? 'mock_structured'
+          : 'mock_structured_fallback';
       this.events.emit({
         type: 'llm.plan.fallback',
         tenantId,
         conversationId,
         detail: `${provider} unavailable: ${error.message}`,
-        metadata: { provider, model: config.model, simulator: config.simulator },
+        metadata: { provider, model: config.model, simulator: config.simulator, executionMode, reason: shorten(error.message, 180) },
       });
     }
-    const coerced = coercePlanWithConversation(parsed, { text, conversation });
+    const coerced = coercePlanWithConversation(parsed, { text, conversation, paymentMethods });
     const enriched = enrichPlannerOutput(coerced, text);
     const plan = {
       schemaVersion: 'ventas-ia-llm-plan.v2',
@@ -143,6 +154,7 @@ export class LLMPlanner {
       detail: `${plan.intent} via ${plan.provider}/${plan.model}`,
       metadata: {
         mode: plan.mode,
+        executionMode,
         recommendedTools: plan.recommendedTools,
         missingFields: plan.missingFields,
         providerMetadata,
@@ -158,18 +170,18 @@ export class LLMPlanner {
     return plan;
   }
 
-  async apiStructuredParse({ text, customerProfile, conversation, config, products }) {
+  async apiStructuredParse({ text, customerProfile, conversation, config, products, paymentMethods }) {
     if ((config.provider ?? 'deepseek') === 'mock') throw new Error('mock provider selected');
     const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(config.provider));
     if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(config.provider).join('/')}`);
-    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products });
+    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods });
 
     if (config.provider === 'google') return callGemini({ config, apiKey, prompt });
     return callChatCompletions({ config, apiKey, prompt });
   }
 
-  codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products }) {
-    const plan = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
+  codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products, paymentMethods }) {
+    const plan = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products, paymentMethods });
     return {
       ...plan,
       simulatedBy: 'codex',
@@ -178,7 +190,7 @@ export class LLMPlanner {
     };
   }
 
-  mockStructuredParse({ tenantId, text, customerProfile, conversation, products: providedProducts }) {
+  mockStructuredParse({ tenantId, text, customerProfile, conversation, products: providedProducts, paymentMethods }) {
     const normalized = normalize(text);
 
     if (conversation?.orderDraft && isRemovalRequest(normalized)) {
@@ -191,12 +203,12 @@ export class LLMPlanner {
       };
     }
 
-    if (conversation?.orderDraft && isPaymentMethodPreference(normalized)) {
+    if (conversation?.orderDraft && isPaymentMethodPreference(normalized, paymentMethods)) {
       return {
         intent: 'order_clarification',
         order: {
           ...conversation.orderDraft,
-          paymentMethod: inferPaymentMethod(normalized),
+          paymentMethod: inferPaymentMethod(normalized, paymentMethods),
         },
         recommendedTools: ['whatsapp_business_messaging'],
         missingFields: conversation.orderDraft.missingFields ?? [],
@@ -620,8 +632,8 @@ function isRemovalRequest(text) {
   return containsAny(text, ['sin ese', 'sin esa', 'sin el', 'sin la', 'sin los', 'sin las', 'quitale', 'quítale', 'quita', 'no lo mandes', 'no la mandes']);
 }
 
-function isPaymentMethodPreference(text) {
-  return containsAny(text, ['pago con tarjeta', 'tarjeta debito', 'tarjeta débito', 'datafono', 'datáfono', 'efectivo', 'nequi', 'daviplata']);
+function isPaymentMethodPreference(text, paymentMethods) {
+  return Boolean(resolvePaymentMethod(text, paymentMethods));
 }
 
 function isComplaintOrDeliveryIssue(text) {
@@ -641,12 +653,8 @@ function isComplaintOrDeliveryIssue(text) {
   ]);
 }
 
-function inferPaymentMethod(text) {
-  if (containsAny(text, ['datafono', 'datáfono', 'tarjeta debito', 'tarjeta débito', 'tarjeta'])) return 'card_terminal';
-  if (containsAny(text, ['nequi'])) return 'nequi';
-  if (containsAny(text, ['daviplata'])) return 'daviplata';
-  if (containsAny(text, ['efectivo'])) return 'cash';
-  return 'unspecified';
+function inferPaymentMethod(text, paymentMethods) {
+  return resolvePaymentMethod(text, paymentMethods)?.id ?? 'unspecified';
 }
 
 function looksLikeNewOrder(text) {
@@ -674,7 +682,7 @@ function looksLikeNewOrder(text) {
   ]);
 }
 
-function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
+function buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods }) {
   const catalog = (products ?? []).map(({ sku, name, aliases, category, stock }) => ({
     sku,
     name,
@@ -702,7 +710,7 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
     'Si parte de la lista no aparece en catalogo, conserva el termino crudo para que el runtime pueda responder disponibilidad parcial o escalar.',
     'Si un termino parece mal escrito, conserva rawName original y usa catalogQuery con la mejor hipotesis razonada; si no estas seguro, marca confidence bajo y ambiguityReason.',
     'Si el cliente pide "5000 de X", no lo trates como 5000 unidades: usa budgetAmount 5000 y quantity null o 1 segun contexto.',
-    'Si el cliente indica forma de pago ("tarjeta debito", "datafono", "efectivo", "Nequi"), registralo como preferencia de pago; no lo clasifiques como pago confirmado sin comprobante.',
+    'Si el cliente indica forma de pago, registralo como preferencia en order.paymentMethod usando solo uno de los identificadores configurados. No lo clasifiques como pago confirmado sin comprobante.',
     'Si el cliente reclama un faltante, entrega equivocada, demora, producto danado o pregunta por que llego incompleto, usa human_handoff con contexto operativo.',
     'El identificador del cliente es wa_id; no inventes nombre ni direccion.',
     'Para pedido confirmado completo recomienda google_sheets_order_write, human_handoff y whatsapp_business_messaging.',
@@ -710,12 +718,13 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
       text,
       customerProfile,
       existingOrderDraft: conversation?.orderDraft ?? null,
+      paymentMethods: (paymentMethods ?? []).map(({ id, label, aliases }) => ({ id, label, aliases })),
       products: catalog,
     }),
   ].join('\n');
 }
 
-function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) {
+function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods }) {
   const catalog = compactCatalogHints(products, text);
   return [
     'Responde solo JSON valido, sin markdown.',
@@ -726,6 +735,7 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
     'Para cada item usa rawName original, catalogQuery inferido, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
     'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
+    `Medios de pago disponibles: ${(paymentMethods ?? []).map((method) => `${method.label} (${method.id})`).join(', ')}. Si el cliente elige uno, usa ese id en order.paymentMethod.`,
     'Si el cliente reclama entrega incompleta, producto equivocado, demora o faltante, escala a humano con human_handoff.',
     'Usa google_sheets_read_table para validar cada item; usa query generica razonada cuando haya duda.',
     'Si hay producto ambiguo o presentacion no confirmada, responde con estrategia ask_clarification o handoff: reconoce lo que entendiste, explica la duda sin afirmar disponibilidad y pide nombre/direccion si faltan.',
@@ -734,6 +744,7 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
       text,
       customerProfile,
       existingOrderDraft: conversation?.orderDraft ?? null,
+      paymentMethods: (paymentMethods ?? []).map(({ id, label, aliases }) => ({ id, label, aliases })),
       catalogHints: catalog,
     }),
   ].join('\n');
@@ -925,7 +936,7 @@ function normalizeProviderPlan(plan) {
   }, customerUnderstanding.rawNeed ?? '');
 }
 
-function coercePlanWithConversation(plan, { text, conversation }) {
+function coercePlanWithConversation(plan, { text, conversation, paymentMethods }) {
   const normalized = normalize(text);
   if (isComplaintOrDeliveryIssue(normalized)) {
     return {
@@ -939,7 +950,7 @@ function coercePlanWithConversation(plan, { text, conversation }) {
   }
   if (
     conversation?.orderDraft &&
-    isPaymentMethodPreference(normalized) &&
+    isPaymentMethodPreference(normalized, paymentMethods) &&
     !isPaymentProofOrConfirmation(normalized)
   ) {
     return {
@@ -947,7 +958,7 @@ function coercePlanWithConversation(plan, { text, conversation }) {
       intent: 'order_clarification',
       order: {
         ...conversation.orderDraft,
-        paymentMethod: inferPaymentMethod(normalized),
+        paymentMethod: inferPaymentMethod(normalized, paymentMethods),
       },
       recommendedTools: ['whatsapp_business_messaging'],
       missingFields: conversation.orderDraft.missingFields ?? [],
@@ -1232,6 +1243,23 @@ function buildCodexReasoningNotes({ text, plan, customerProfile }) {
     notes.push(`Faltantes detectados: ${plan.missingFields.join(', ')}.`);
   }
   return notes;
+}
+
+function providerUnavailableHandoffPlan({ text, conversation }) {
+  return {
+    intent: 'human_handoff',
+    reasoningMode: 'shopkeeper_guided_sale',
+    customerUnderstanding: {
+      rawNeed: String(text ?? '').trim(),
+      certainty: 'unavailable',
+      delivery: Boolean(conversation?.orderDraft?.delivery),
+    },
+    order: conversation?.orderDraft ?? { delivery: false, items: [] },
+    recommendedTools: ['human_handoff', 'whatsapp_business_messaging'],
+    missingFields: [],
+    responseStrategy: 'handoff',
+    confidence: 0,
+  };
 }
 
 function resolveBaseUrl(config, provider) {

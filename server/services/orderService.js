@@ -98,6 +98,8 @@ export class OrderService {
         updatedAt: now,
       });
     let updatedOrder;
+    let conversationChanged = false;
+    let dispatchRecipient = null;
     this.store.mutate((state) => {
       updatedOrder = (state.ordersByTenant?.[order.tenantId] ?? []).find((item) => item.id === order.id);
       if (!updatedOrder) return;
@@ -116,34 +118,79 @@ export class OrderService {
         conversation.zone = 'agent';
         conversation.nextStep = 'Pedido tomado por la tienda para alistar.';
         conversation.updatedAt = now;
+        conversationChanged = true;
+      }
+      if (conversation && nextStatus === ORDER_STATUSES.DISPATCHED) {
+        Object.assign(conversation, {
+          stage: 'closed',
+          zone: 'whatsapp',
+          status: 'closed_dispatched',
+          caseStatus: 'completed',
+          inboxState: 'history',
+          manualMode: 'none',
+          aiPaused: true,
+          closedAt: now,
+          closeReason: 'order_dispatched',
+          orderStatus: ORDER_STATUSES.DISPATCHED,
+          progress: 100,
+          nextStep: 'Pedido en camino; la conversación quedó cerrada.',
+          updatedAt: now,
+        });
+        conversationChanged = true;
+        dispatchRecipient = updatedOrder.waId ?? conversation.waId ?? null;
       }
     });
     await this.store.persistOrder?.(order.tenantId, order.id);
-    if (previousStatus === ORDER_STATUSES.PENDING_HUMAN_PREPARATION) {
+    if (conversationChanged) {
       await this.store.persistConversation?.(order.conversationId);
     }
+    const notification = nextStatus === ORDER_STATUSES.DISPATCHED
+      ? await this.notifyDispatch({ order: updatedOrder, recipient: dispatchRecipient })
+      : { status: 'not_applicable' };
     const event = this.events?.emitAndWait
       ? await this.events.emitAndWait({
       type: `order.${nextStatus}`,
       tenantId: order.tenantId,
       conversationId: order.conversationId,
       detail: `Pedido ${order.id}: ${nextStatus}`,
-      metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status },
+      metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status, notificationStatus: notification.status },
       })
       : this.events?.emit({
         type: `order.${nextStatus}`,
         tenantId: order.tenantId,
         conversationId: order.conversationId,
         detail: `Pedido ${order.id}: ${nextStatus}`,
-        metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status },
+        metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status, notificationStatus: notification.status },
       });
     return {
       order: updatedOrder,
       previousStatus,
       status: nextStatus,
       projection: { provider: 'google_sheets', status: sheetSync.status },
+      notification,
       eventId: event?.id ?? null,
     };
+  }
+
+  async notifyDispatch({ order, recipient }) {
+    if (!recipient) return { status: 'not_sent', reason: 'recipient_missing' };
+    try {
+      await this.tools.call('whatsapp_business_messaging', order.tenantId, order.conversationId, {
+        action: 'send_session_message',
+        wa_id: recipient,
+        text: `Tu pedido ya va en camino. Gracias por comprar con nosotros. Referencia: ${order.id}.`,
+      });
+      return { status: 'sent' };
+    } catch (error) {
+      this.events?.emit({
+        type: 'order.dispatch_notification_failed',
+        tenantId: order.tenantId,
+        conversationId: order.conversationId,
+        detail: `No se pudo notificar el despacho del pedido ${order.id}.`,
+        metadata: { orderId: order.id, code: error.code ?? null },
+      });
+      return { status: 'failed', reason: error.code ?? 'send_failed' };
+    }
   }
 
   async enqueueSheetProjection({ order, nextStatus, now, traceId }) {

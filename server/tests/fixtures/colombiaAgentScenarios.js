@@ -343,6 +343,15 @@ export const colombiaAgentScenarioSet = [
         },
       },
       {
+        text: 'Pago en efectivo',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'cash',
+          replyIncludes: ['Confirmas el pedido'],
+        },
+      },
+      {
         text: 'Dale, hagale',
         expect: {
           intent: 'order_confirmation',
@@ -464,6 +473,15 @@ export const colombiaAgentScenarioSet = [
           intent: 'delivery_order',
           missingFields: [],
           replyIncludes: ['1 x Pan tajado Bimbo', 'Confirmas el pedido'],
+        },
+      },
+      {
+        text: 'Pago por Bre-B',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'breb',
+          replyIncludes: ['Confirmas el pedido'],
         },
       },
       {
@@ -652,6 +670,15 @@ export const colombiaAgentScenarioSet = [
           intent: 'delivery_order',
           missingFields: [],
           replyIncludes: ['1 x Yogurt Alpina fresa', 'Confirmas el pedido'],
+        },
+      },
+      {
+        text: 'Pago con tarjeta',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'card_terminal',
+          replyIncludes: ['Confirmas el pedido'],
         },
       },
       {

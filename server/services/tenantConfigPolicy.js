@@ -1,6 +1,9 @@
+import { normalizePaymentMethods } from './paymentMethods.js';
+
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
+  ['orderPolicy', new Set(['paymentMethods'])],
 ]);
 
 const ADMIN_EDITABLE_SECTIONS = new Map([
@@ -12,7 +15,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['googleDrive', new Set(['rootFolderRef', 'customerProfileFolderRef', 'filePolicyRef', 'refreshMode', 'allowedMimeTypes'])],
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
   ['agentPolicy', new Set(['tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
-  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff'])],
+  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
   ['secretsPolicy', null],
 ]);
 
@@ -81,6 +84,9 @@ export function mergeTenantConfig(base, patch) {
 }
 
 function normalizeOwnerField(section, field, value) {
+  if (section === 'orderPolicy' && field === 'paymentMethods') {
+    return normalizePaymentMethodsValue(value);
+  }
   if (section === 'businessHours' && field === 'weekdays') {
     if (!Array.isArray(value) || value.some((item) => !Number.isInteger(Number(item)) || Number(item) < 1 || Number(item) > 7)) {
       throw configError('businessHours.weekdays debe contener dias del 1 al 7.');
@@ -93,6 +99,7 @@ function normalizeOwnerField(section, field, value) {
 }
 
 function normalizeAdminValue(field, value) {
+  if (field === 'orderPolicy.paymentMethods') return normalizePaymentMethodsValue(value);
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (Array.isArray(value)) return value.map((item) => normalizeAdminValue(field, item));
   if (isPlainObject(value)) {
@@ -101,6 +108,14 @@ function normalizeAdminValue(field, value) {
   const normalized = String(value ?? '').trim();
   if (!normalized) throw configError(`${field} no puede quedar vacio.`);
   return normalized;
+}
+
+function normalizePaymentMethodsValue(value) {
+  try {
+    return normalizePaymentMethods(value);
+  } catch (error) {
+    throw configError(error.message);
+  }
 }
 
 function isPlainObject(value) {

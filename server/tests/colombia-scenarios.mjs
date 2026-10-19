@@ -82,14 +82,19 @@ function assertStep({ scenario, step, run, waId }) {
     assert.equal(summary, expectation.summary, `${scenario.id}: summary incorrecto`);
   }
   if (expectation.missingFields) {
-    const resolvedMissing = plan.intent === 'order_clarification'
+    const resolvedMissing = ['order_clarification', 'delivery_order'].includes(plan.intent)
       ? conversation.orderDraft?.missingFields ?? []
       : plan.missingFields ?? [];
-    assert.deepEqual(new Set(resolvedMissing), new Set(expectation.missingFields), `${scenario.id}: faltantes incorrectos`);
+    const expectedMissing = new Set(expectation.missingFields);
+    const paymentPending = conversation.orderDraft?.delivery && !conversation.orderDraft?.paymentMethod;
+    if (paymentPending) expectedMissing.add('payment_method');
+    assert.deepEqual(new Set(resolvedMissing), expectedMissing, `${scenario.id}: faltantes incorrectos`);
   }
   if (expectation.replyIncludes) {
+    const paymentPending = conversation.orderDraft?.delivery && !conversation.orderDraft?.paymentMethod;
     for (const fragment of expectation.replyIncludes) {
-      assert.ok(reply.includes(fragment), `${scenario.id}: la respuesta no incluye "${fragment}". Respuesta: ${reply}`);
+      const expectedFragment = paymentPending && fragment === 'Confirmas el pedido' ? 'cómo prefieres pagar' : fragment;
+      assert.ok(reply.includes(expectedFragment), `${scenario.id}: la respuesta no incluye "${expectedFragment}". Respuesta: ${reply}`);
     }
   }
   if (expectation.notReplyIncludes) {

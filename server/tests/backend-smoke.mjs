@@ -275,8 +275,21 @@ try {
     profileName: 'Prueba Local',
     text: '2',
   });
-  assert.equal(quantityRun.result.summary, 'Order clarified and quote sent');
-  assert.equal(quantityRun.conversation.orderDraft.missingFields.length, 0);
+  assert.equal(quantityRun.result.summary, 'Order still needs clarification');
+  assert.ok(quantityRun.conversation.orderDraft.missingFields.includes('payment_method'));
+  assert.match(quantityRun.conversation.messages.at(-1).text, /Subtotal de productos/i);
+  assert.match(quantityRun.conversation.messages.at(-1).text, /Efectivo.*Tarjeta.*Bre-B/i);
+
+  const paymentMethodRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998877',
+    profileName: 'Prueba Local',
+    text: 'Efectivo',
+  });
+  assert.equal(paymentMethodRun.result.summary, 'Order clarified and quote sent');
+  assert.equal(paymentMethodRun.conversation.orderDraft.missingFields.length, 0);
+  assert.equal(paymentMethodRun.conversation.orderDraft.paymentMethod, 'cash');
+  assert.match(paymentMethodRun.conversation.messages.at(-1).text, /Subtotal de productos/i);
 
   const confirmRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',

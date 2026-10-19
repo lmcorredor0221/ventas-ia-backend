@@ -9,8 +9,8 @@ export const DEFAULT_PLATFORM_SETTINGS = {
     apiKeyRef: 'DEEPSEEK_API_KEY',
     baseUrlRef: 'DEEPSEEK_BASE_URL',
     temperature: 0,
-    maxTokens: 1200,
-    timeoutMs: 15000,
+    maxTokens: 600,
+    timeoutMs: 8000,
     responseLanguage: 'es-CO',
   },
 };

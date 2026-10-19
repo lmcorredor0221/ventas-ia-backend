@@ -1,5 +1,6 @@
 import { appendAuditEvent } from './authService.js';
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
+import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null }) {
@@ -130,6 +131,12 @@ export class AgentRuntime {
     const plan = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile, conversation: currentConversation });
     await this.patchConversation(conversationId, {
       reasoningPlan: plan,
+      aiExecution: {
+        mode: plan.executionMode,
+        provider: plan.provider,
+        model: plan.model,
+        plannedAt: new Date().toISOString(),
+      },
       lastTool: 'llm_core',
       stage: 'planning',
       zone: 'agent',
@@ -326,19 +333,18 @@ export class AgentRuntime {
     const catalogSearches = catalogSearchesFromPlan(plan, catalogItems, text);
 
     if (catalogSearches.length > 1) {
-      const matches = [];
-      for (const search of catalogSearches) {
+      const matches = await Promise.all(catalogSearches.map(async (search) => {
         const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
           range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
           filters: search.filters,
           cache_policy: 'short_ttl',
         });
-        matches.push({
+        return {
           query: search.query,
           selected: catalog.rows[0] ?? null,
           alternatives: catalog.rows.slice(1, 2),
-        });
-      }
+        };
+      }));
       const selectedRows = matches.map((match) => match.selected).filter(Boolean);
       const drive = await this.resolveDriveContext({ tenantId, conversationId, selectedRows });
       const quote = buildMultiCatalogReply({ matches, drive, delivery: Boolean(plan.order?.delivery) });
@@ -405,6 +411,7 @@ export class AgentRuntime {
 
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const tenant = await this.getTenant(tenantId);
+    const paymentMethods = paymentMethodsForTenant(tenant);
     const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         range: tenant?.config?.googleSheets?.range,
@@ -436,6 +443,9 @@ export class AgentRuntime {
     });
 
     const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
+    const selectedPaymentMethod = resolvePaymentMethod(normalized.text, paymentMethods)
+      ?? resolvePaymentMethod(plan.order?.paymentMethod, paymentMethods)
+      ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods);
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
@@ -446,28 +456,39 @@ export class AgentRuntime {
         missingFields.push(`presentation:${item.catalogQuery}`);
       }
     }
+    const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
+    if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     const requiresHumanResolution = needsHumanProductResolution(missingFields);
     const reply = requiresHumanResolution
       ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile })
-      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields, customerProfile, subtotal });
+      : buildOrderReply({
+        orderItems: effectiveOrderItems,
+        missingFields,
+        customerProfile,
+        subtotal,
+        paymentMethods,
+        paymentMethod: selectedPaymentMethod?.id ?? null,
+      });
     const canQuote = missingFields.length === 0;
 
     await this.patchConversation(conversationId, {
       stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
       zone: requiresHumanResolution ? 'approval' : canQuote ? 'quote' : 'agent',
       status: requiresHumanResolution ? 'blocked' : 'live',
-      value: canQuote ? formatCurrency(subtotal) : 'Pendiente',
+      value: subtotal > 0 ? formatCurrency(subtotal) : 'Pendiente',
       progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
       need: normalized.text,
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
       orderDraft: {
-        delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
+        delivery: isDelivery,
         items: effectiveOrderItems,
         missingFields: [...new Set(missingFields)],
         subtotal,
+        paymentMethod: selectedPaymentMethod?.id ?? null,
+        paymentMethodLabel: selectedPaymentMethod?.label ?? null,
         driveRefs: drive.source_refs ?? [],
         driveStatus: drive.status,
       },
@@ -510,7 +531,29 @@ export class AgentRuntime {
 
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
-    const orderDraft = plan.order;
+    const tenant = await this.getTenant(tenantId);
+    const paymentMethods = paymentMethodsForTenant(tenant);
+    const orderDraft = structuredClone(plan.order ?? {});
+    const selectedPaymentMethod = resolvePaymentMethod(orderDraft.paymentMethod, paymentMethods)
+      ?? resolvePaymentMethod(normalized.text, paymentMethods);
+    if (orderDraft.delivery && !selectedPaymentMethod) {
+      return this.handleOrderClarification({
+        tenantId,
+        conversationId,
+        normalized,
+        customerProfile,
+        plan: {
+          ...plan,
+          intent: 'order_clarification',
+          order: {
+            ...orderDraft,
+            missingFields: [...new Set([...(orderDraft.missingFields ?? []), 'payment_method'])],
+          },
+        },
+      });
+    }
+    orderDraft.paymentMethod = selectedPaymentMethod?.id ?? null;
+    const paymentLabel = selectedPaymentMethod?.label ?? null;
     const order = await this.tools.call('google_sheets_order_write', tenantId, conversationId, {
       wa_id: normalized.waId,
       customer_name: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
@@ -523,6 +566,8 @@ export class AgentRuntime {
         lineTotal: item.lineTotal ?? null,
       })),
       subtotal: orderDraft.subtotal,
+      payment_method: orderDraft.paymentMethod,
+      payment_method_label: paymentLabel,
       status: 'pending_human_preparation',
     });
 
@@ -546,7 +591,8 @@ export class AgentRuntime {
         customerWaId: normalized.waId,
         deliveryAddress,
         items: confirmedItems,
-        paymentMethod: orderDraft.paymentMethod ?? customerProfile?.preferredPaymentMethod ?? null,
+        paymentMethod: orderDraft.paymentMethod,
+        paymentMethodLabel: paymentLabel,
       },
     });
 
@@ -564,7 +610,7 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
+      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Subtotal de productos: ${formatCurrency(orderDraft.subtotal ?? 0)}.${paymentLabel ? ` Pago: ${paymentLabel}.` : ''} Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
     });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
@@ -578,7 +624,10 @@ export class AgentRuntime {
 
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const draft = structuredClone(plan.order);
-    const collected = extractClarification(normalized.text);
+    const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
+    const collected = extractClarification(normalized.text, paymentMethods);
+    const plannedPaymentMethod = resolvePaymentMethod(draft.paymentMethod, paymentMethods);
+    if (plannedPaymentMethod) draft.paymentMethod = plannedPaymentMethod.id;
     let nextProfile = customerProfile;
     if (collected.paymentMethod) {
       draft.paymentMethod = collected.paymentMethod;
@@ -609,6 +658,7 @@ export class AgentRuntime {
     const missingFields = (draft.missingFields ?? []).filter((field) => {
       if (field === 'customer_name') return !(nextProfile?.name || collected.name);
       if (field === 'delivery_address') return !(nextProfile?.defaultAddress || collected.defaultAddress);
+      if (field === 'payment_method') return !draft.paymentMethod;
       if (field.startsWith('quantity:')) {
         const query = field.replace('quantity:', '');
         const item = (draft.items ?? []).find((candidate) => candidate.catalogQuery === query);
@@ -623,7 +673,14 @@ export class AgentRuntime {
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
 
     const canQuote = draft.missingFields.length === 0;
-    const reply = buildOrderReply({ orderItems: draft.items ?? [], missingFields: draft.missingFields, customerProfile: nextProfile, subtotal: draft.subtotal });
+    const reply = buildOrderReply({
+      orderItems: draft.items ?? [],
+      missingFields: draft.missingFields,
+      customerProfile: nextProfile,
+      subtotal: draft.subtotal,
+      paymentMethods,
+      paymentMethod: draft.paymentMethod,
+    });
 
     await this.patchConversation(conversationId, {
       stage: canQuote ? 'quote' : 'clarification',
@@ -1087,7 +1144,7 @@ export class AgentRuntime {
 }
 
 function isClosedCase(conversation) {
-  return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+  return ['closed_no_confirmation', 'closed_dispatched', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
 }
 
 function isCancellationRequest(text) {
@@ -1437,7 +1494,7 @@ function describeOperationalFailure(error) {
   };
 }
 
-function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal }) {
+function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod }) {
   const uniqueMissing = [...new Set(missingFields)];
   const foundLines = orderItems
     .filter((item) => item.product)
@@ -1447,13 +1504,17 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
       );
       const name = presentationMissing ? item.rawName : item.product.name;
       if (item.budgetAmount) return `${formatCurrency(item.budgetAmount)} de ${name}`;
-      return `${item.quantity ?? 'cantidad pendiente'} x ${name}`;
+      const price = Number(item.product?.price ?? 0);
+      const unitPrice = price > 0 ? ` (${formatCurrency(price)} c/u)` : '';
+      return `${item.quantity ?? 'cantidad pendiente'} x ${name}${unitPrice}`;
     });
+  const subtotalLine = Number(subtotal ?? 0) > 0 ? ` Subtotal de productos: ${formatCurrency(subtotal)}.` : '';
   if (uniqueMissing.length) {
     const asks = [];
     const presentationNotes = [];
     if (uniqueMissing.includes('customer_name')) asks.push('tu nombre');
     if (uniqueMissing.includes('delivery_address')) asks.push('la direccion del domicilio');
+    if (uniqueMissing.includes('payment_method')) asks.push(`cómo prefieres pagar: ${paymentMethodOptionsLabel(paymentMethods)}`);
     if (uniqueMissing.includes('order_items')) asks.push('que productos quieres pedir');
     for (const missing of uniqueMissing.filter((item) => item.startsWith('quantity:'))) {
       asks.push(`la cantidad de ${missing.replace('quantity:', '')}`);
@@ -1479,10 +1540,11 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     const prefix = foundLines.length ? `Claro. Tengo en la solicitud: ${foundLines.join(', ')}.` : 'Claro, te ayudo con el domicilio.';
     const optionsReply = presentationNotes.length ? ` ${presentationNotes.join(' ')}` : '';
     const dataAsk = asks.length ? ` Para continuar necesito ${joinSpanish(asks)}.` : '';
-    return `${prefix}${optionsReply}${dataAsk}`;
+    return `${prefix}${subtotalLine}${optionsReply}${dataAsk}`;
   }
   const address = customerProfile?.defaultAddress ? ` a tu direccion guardada (${customerProfile.defaultAddress})` : '';
-  return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal: ${formatCurrency(subtotal)}. ¿Confirmas el pedido?`;
+  const payment = paymentMethodLabel(paymentMethod, paymentMethods);
+  return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal de productos: ${formatCurrency(subtotal)}.${payment ? ` Pago: ${payment}.` : ''} ¿Confirmas el pedido?`;
 }
 
 function needsHumanProductResolution(missingFields) {
@@ -1610,7 +1672,7 @@ function joinSentences(sentences) {
   return sentences.map((sentence) => String(sentence ?? '').trim()).filter(Boolean).join(' ');
 }
 
-function extractClarification(text) {
+function extractClarification(text, paymentMethods) {
   const value = String(text ?? '').trim();
   const name = value.match(/\b(?:me llamo|soy|mi nombre es|nombre)\s+([^,.]+)/i)?.[1]?.trim();
   const defaultAddress = value.match(/\b(?:direccion|dirección|dir)\s*(?:es|:)?\s+(.+)$/i)?.[1]?.trim();
@@ -1619,17 +1681,9 @@ function extractClarification(text) {
     name,
     defaultAddress,
     quantity,
-    paymentMethod: extractPaymentMethod(value),
+    paymentMethod: resolvePaymentMethod(value, paymentMethods)?.id ?? null,
     removeProductQuery: extractRemovalQuery(value),
   };
-}
-
-function extractPaymentMethod(text) {
-  if (containsAny(text, ['datafono', 'datáfono', 'tarjeta debito', 'tarjeta débito', 'tarjeta'])) return 'card_terminal';
-  if (containsAny(text, ['nequi'])) return 'nequi';
-  if (containsAny(text, ['daviplata'])) return 'daviplata';
-  if (containsAny(text, ['efectivo'])) return 'cash';
-  return null;
 }
 
 function extractRemovalQuery(text) {

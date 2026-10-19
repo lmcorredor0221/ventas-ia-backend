@@ -196,6 +196,8 @@ export class ToolRegistry {
       deliveryAddress: payload.delivery_address,
       items: payload.items ?? [],
       subtotal: payload.subtotal ?? 0,
+      paymentMethod: payload.payment_method ?? null,
+      paymentMethodLabel: payload.payment_method_label ?? null,
       status,
       createdAt: now,
       updatedAt: now,
@@ -726,7 +728,11 @@ function orderToSheetRow(order) {
     order.updatedAt,
     'whatsapp',
     order.llmModel ?? '',
-    JSON.stringify({ conversationId: order.conversationId }),
+    JSON.stringify({
+      conversationId: order.conversationId,
+      paymentMethod: order.paymentMethod ?? null,
+      paymentMethodLabel: order.paymentMethodLabel ?? null,
+    }),
   ];
 }
 

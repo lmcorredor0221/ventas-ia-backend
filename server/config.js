@@ -19,8 +19,8 @@ export const RUNTIME_CONFIG = {
   whatsappTenantTokenLifetimeDays: Number(process.env.WHATSAPP_TENANT_TOKEN_LIFETIME_DAYS ?? 60),
   whatsappTenantTokenRenewalWindowDays: Number(process.env.WHATSAPP_TENANT_TOKEN_RENEWAL_WINDOW_DAYS ?? 14),
   whatsappMode: process.env.WHATSAPP_PROVIDER_MODE ?? 'mock',
-  llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 15000),
-  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 1200),
+  llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 8000),
+  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 600),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The simulated payment endpoint exists for local contracts only. A pending

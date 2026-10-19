@@ -1,5 +1,6 @@
 import { conversations, pendingRequests, tenants, tools } from '../../src/data/acpModel.js';
 import { colombiaDriveFiles, colombiaProducts20 } from './colombiaProducts.js';
+import { DEFAULT_PAYMENT_METHODS } from '../services/paymentMethods.js';
 
 const now = () => new Date().toISOString();
 
@@ -52,6 +53,7 @@ export function createSeedState() {
           customerProfileStore: 'google_sheets',
           confirmedOrderStore: 'google_sheets',
           confirmedOrderHandoff: 'preparation_and_delivery',
+          paymentMethods: DEFAULT_PAYMENT_METHODS,
         },
         secretsPolicy: 'references_only_no_plaintext_values',
       },

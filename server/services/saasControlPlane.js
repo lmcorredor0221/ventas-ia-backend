@@ -21,6 +21,7 @@ import {
 import { sandboxWorkspaceForTenant } from './googleWorkspaceService.js';
 import { catalogHeaders, catalogRowToProduct, catalogRowsToSheetValues, validateCatalogCsv } from './catalogImportService.js';
 import { platformLlmConfig } from './platformService.js';
+import { DEFAULT_PAYMENT_METHODS, normalizePaymentMethods } from './paymentMethods.js';
 
 const GOOGLE_SCOPES = [
   'openid',
@@ -2066,6 +2067,11 @@ export function ensureSaasState(state) {
       ...(tenant.config.saas ?? {}),
       enforceEntitlement: tenant.config.saas?.enforceEntitlement ?? tenant.status === 'active',
     };
+    tenant.config.orderPolicy = {
+      ...tenantConfigFor(tenant.id).orderPolicy,
+      ...(tenant.config.orderPolicy ?? {}),
+      paymentMethods: normalizePaymentMethods(tenant.config.orderPolicy?.paymentMethods),
+    };
     tenant.lifecycle ??= {
       access: tenant.status === 'active' || tenant.status === 'sandbox_ready' ? 'active' : 'blocked',
       activationStatus: tenant.status === 'active' || tenant.status === 'sandbox_ready' ? 'active' : 'draft',
@@ -2156,6 +2162,7 @@ function tenantConfigFor(tenantId) {
       customerProfileStore: 'google_sheets',
       confirmedOrderStore: 'google_sheets',
       confirmedOrderHandoff: 'preparation_and_delivery',
+      paymentMethods: DEFAULT_PAYMENT_METHODS,
     },
     secretsPolicy: 'references_only_no_plaintext_values',
   };

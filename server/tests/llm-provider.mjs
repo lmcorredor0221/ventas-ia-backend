@@ -189,6 +189,39 @@ try {
   assert.ok(mixedKnownUnknownPlan.order.items.some((item) => item.catalogQuery.includes('coca') && item.requestedPresentation));
   assert.ok(mixedKnownUnknownPlan.toolPlan.some((step) => step.filters?.query === 'calchichon'));
 
+  store.mutate((state) => {
+    state.platformSettings.llm = {
+      ...state.platformSettings.llm,
+      provider: 'mock',
+      simulator: null,
+      apiKeyRef: 'MISSING_PRODUCTION_LLM_KEY',
+    };
+  });
+  const strictPlanner = new LLMPlanner({
+    store,
+    events: { emit: (event) => events.push(event) },
+    config: {
+      allowLocalCatalogFallback: false,
+      whatsappMode: 'live',
+      llmRequestTimeoutMs: 5000,
+      llmMaxTokens: 600,
+    },
+  });
+  const unavailablePlan = await strictPlanner.plan({
+    tenantId: 'andina',
+    conversationId: 'conv-llm-live-unavailable',
+    normalized: {
+      text: 'Para un domicilio me regalas dos chocorramos',
+      waId: '573001112237',
+      provider: 'whatsapp',
+    },
+    customerProfile: null,
+    conversation: null,
+  });
+  assert.equal(unavailablePlan.executionMode, 'provider_unavailable_handoff');
+  assert.equal(unavailablePlan.intent, 'human_handoff');
+  assert.deepEqual(unavailablePlan.order.items, []);
+
   console.log('LLM provider contract tests passed');
 } finally {
   globalThis.fetch = previousFetch;
