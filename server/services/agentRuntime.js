@@ -404,21 +404,22 @@ export class AgentRuntime {
   }
 
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
-    const orderItems = [];
-    for (const [index, item] of (plan.order?.items ?? []).entries()) {
+    const tenant = await this.getTenant(tenantId);
+    const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-        range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+        range: tenant?.config?.googleSheets?.range,
         filters: deliveryItemFiltersFromPlan(plan, item, index),
         cache_policy: 'short_ttl',
       });
       const product = selectAcceptableOrderProduct(catalog.rows, item);
-      orderItems.push({
+      return {
         ...item,
         product,
+        presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
         lineTotal: product && item.quantity ? product.price * item.quantity : product && item.budgetAmount ? item.budgetAmount : null,
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
-      });
-    }
+      };
+    }));
 
     const currentConversation = await this.getConversation(conversationId);
     const previousDraft = currentConversation?.orderDraft;
@@ -442,7 +443,7 @@ export class AgentRuntime {
       if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
       if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
-        missingFields.push(`product:${item.catalogQuery}`);
+        missingFields.push(`presentation:${item.catalogQuery}`);
       }
     }
 
@@ -1289,7 +1290,31 @@ function removeResolvedBudgetMissingFields(missingFields, item) {
 }
 
 function selectAcceptableOrderProduct(rows = [], item = {}) {
-  return rows.find((row) => isAcceptableOrderProduct(row, item));
+  const eligible = rows.filter((row) => isAcceptableOrderProduct(row, item));
+  if (!item.requestedPresentation) return eligible[0];
+  return eligible.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? eligible[0];
+}
+
+function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null) {
+  const familyTokens = productFamilyTokens(item.rawName ?? item.catalogQuery);
+  const candidates = rows.filter((row) => {
+    if (!row) return false;
+    if (!familyTokens.length) return row.sku === selectedProduct?.sku;
+    const productText = normalizeText([row.name, row.brand, ...(row.aliases ?? [])].filter(Boolean).join(' '));
+    return familyTokens.every((token) => productText.includes(token));
+  });
+  const unique = new Map();
+  for (const product of [selectedProduct, ...candidates].filter(Boolean)) {
+    unique.set(product.sku ?? `${product.name}:${product.presentation}`, product);
+  }
+  return [...unique.values()];
+}
+
+function productFamilyTokens(value) {
+  return normalizeText(value)
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cc|l|litro|litros|g|gr|kg)\b/g, ' ')
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !['para', 'domicilio', 'pedido', 'quiero', 'una', 'uno'].includes(token));
 }
 
 function isAcceptableOrderProduct(product, item = {}) {
@@ -1426,6 +1451,7 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     });
   if (uniqueMissing.length) {
     const asks = [];
+    const presentationNotes = [];
     if (uniqueMissing.includes('customer_name')) asks.push('tu nombre');
     if (uniqueMissing.includes('delivery_address')) asks.push('la direccion del domicilio');
     if (uniqueMissing.includes('order_items')) asks.push('que productos quieres pedir');
@@ -1435,10 +1461,14 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     for (const missing of uniqueMissing.filter((item) => item.startsWith('presentation:'))) {
       const query = missing.replace('presentation:', '');
       const item = orderItems.find((candidate) => matchesMissingPresentation(candidate, query));
-      const options = item?.presentationOptions?.map((option) => option.name).filter(Boolean) ?? [];
-      asks.push(options.length > 1
-        ? `escoger la presentacion de ${query}: ${joinSpanish(options)}`
-        : `confirmar la presentacion de ${query}`);
+      const options = item?.presentationOptions?.map(describeProductOption).filter(Boolean) ?? [];
+      if (options.length) {
+        const requestedName = requestedProductName(item, query);
+        const requestedPresentation = item?.requestedPresentation ? ` de ${item.requestedPresentation}` : '';
+        presentationNotes.push(`Pediste ${requestedName}${requestedPresentation}. Tengo ${joinSpanish(options)}. ¿Cual prefieres?`);
+      } else {
+        asks.push(`confirmar la presentacion de ${query}`);
+      }
     }
     for (const missing of uniqueMissing.filter((item) => item.startsWith('product:'))) {
       asks.push(`una referencia mas clara para ${missing.replace('product:', '')}`);
@@ -1447,7 +1477,9 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
       asks.push(`confirmar alternativa para ${missing.replace('stock:', '')}`);
     }
     const prefix = foundLines.length ? `Claro. Tengo en la solicitud: ${foundLines.join(', ')}.` : 'Claro, te ayudo con el domicilio.';
-    return `${prefix} Para continuar necesito ${joinSpanish(asks)}.`;
+    const optionsReply = presentationNotes.length ? ` ${presentationNotes.join(' ')}` : '';
+    const dataAsk = asks.length ? ` Para continuar necesito ${joinSpanish(asks)}.` : '';
+    return `${prefix}${optionsReply}${dataAsk}`;
   }
   const address = customerProfile?.defaultAddress ? ` a tu direccion guardada (${customerProfile.defaultAddress})` : '';
   return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal: ${formatCurrency(subtotal)}. ¿Confirmas el pedido?`;
@@ -1461,10 +1493,37 @@ function needsHumanProductResolution(missingFields) {
 }
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {
+  const requestedVolume = presentationVolumeInMilliliters(requestedPresentation);
+  const fields = normalizeText([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  if (requestedVolume) return presentationVolumeInMilliliters(fields) === requestedVolume;
   const requestedNumber = normalizeText(requestedPresentation).match(/\d{2,4}/)?.[0];
   if (!requestedNumber) return true;
-  const fields = normalizeText([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   return fields.includes(requestedNumber);
+}
+
+function presentationVolumeInMilliliters(value) {
+  const match = normalizeText(value).match(/\b(\d+(?:[.,]\d+)?)\s*(ml|cc|l|litro|litros)\b/);
+  if (!match) return null;
+  const amount = Number(match[1].replace(',', '.'));
+  if (!Number.isFinite(amount)) return null;
+  return ['l', 'litro', 'litros'].includes(match[2]) ? Math.round(amount * 1000) : Math.round(amount);
+}
+
+function describeProductOption(product) {
+  if (!product?.name) return null;
+  const presentation = product.presentation && !normalizeText(product.name).includes(normalizeText(product.presentation))
+    ? ` ${product.presentation}`
+    : '';
+  return `${product.name}${presentation} (${formatCurrency(product.price)})`;
+}
+
+function requestedProductName(item, fallback) {
+  const raw = String(item?.rawName ?? item?.catalogQuery ?? fallback ?? '').trim();
+  const withoutPresentation = raw
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cc|l|litro|litros|g|gr|kg)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return withoutPresentation || fallback;
 }
 
 function buildHumanResolutionReply({ orderItems, missingFields, customerProfile }) {

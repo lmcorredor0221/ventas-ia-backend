@@ -14,6 +14,7 @@ import { exponentialBackoff } from '../services/integrationOutbox.js';
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, '../db/migrations');
+const SNAPSHOT_IDLE_DELAY_MS = 10_000;
 
 export class PostgresStore {
   constructor({ databaseUrl, ssl = 'auto', max = 5 }) {
@@ -25,7 +26,10 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
-    this.snapshotSaveQueued = null;
+    this.snapshotSaveTimer = null;
+    this.snapshotSaveDeferred = null;
+    this.snapshotSaving = false;
+    this.snapshotDirty = false;
   }
 
   async load() {
@@ -494,15 +498,36 @@ export class PostgresStore {
   }
 
   queueSave() {
-    if (this.snapshotSaveQueued) return this.snapshotSaveQueued;
-    this.snapshotSaveQueued = this.queueWrite(async () => {
-      try {
-        await this.save();
-      } finally {
-        this.snapshotSaveQueued = null;
-      }
-    }, 'save');
-    return this.snapshotSaveQueued;
+    this.snapshotDirty = true;
+    if (!this.snapshotSaveDeferred) this.snapshotSaveDeferred = deferred();
+    this.scheduleSnapshotSave();
+    return this.snapshotSaveDeferred.promise;
+  }
+
+  scheduleSnapshotSave() {
+    if (this.snapshotSaving || !this.snapshotDirty || this.snapshotSaveTimer) return;
+    this.snapshotSaveTimer = setTimeout(() => {
+      this.snapshotSaveTimer = null;
+      this.startSnapshotSave();
+    }, SNAPSHOT_IDLE_DELAY_MS);
+    this.snapshotSaveTimer.unref?.();
+  }
+
+  startSnapshotSave() {
+    if (this.snapshotSaving || !this.snapshotDirty) return this.saveQueue;
+    const snapshot = this.snapshotSaveDeferred;
+    this.snapshotSaveDeferred = null;
+    this.snapshotDirty = false;
+    this.snapshotSaving = true;
+    const write = this.queueWrite(() => this.save(), 'deferred snapshot save');
+    write.then(
+      () => snapshot?.resolve(),
+      (error) => snapshot?.reject(error),
+    ).finally(() => {
+      this.snapshotSaving = false;
+      this.scheduleSnapshotSave();
+    });
+    return write;
   }
 
   queueWrite(operation, label) {
@@ -514,7 +539,16 @@ export class PostgresStore {
   }
 
   async flush() {
+    if (this.snapshotSaveTimer) {
+      clearTimeout(this.snapshotSaveTimer);
+      this.snapshotSaveTimer = null;
+    }
+    this.startSnapshotSave();
     await this.saveQueue;
+    if (this.snapshotDirty) {
+      this.startSnapshotSave();
+      await this.saveQueue;
+    }
   }
 
   async close() {
@@ -1476,6 +1510,17 @@ async function upsertUsageCounter(client, tenantId, period, metric, value) {
     `,
     [tenantId, period, metric, Math.trunc(Number(value) || 0)],
   );
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  promise.catch(() => undefined);
+  return { promise, resolve, reject };
 }
 
 function resolveSsl(databaseUrl, ssl) {

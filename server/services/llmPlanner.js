@@ -413,6 +413,7 @@ function cleanOrderRequest(text) {
 
 function splitOrderFragments(text) {
   return String(text ?? '')
+    .replace(/\b(?:un\s+)?litro\s+y\s+medio\b/gi, '1.5 l')
     .split(/\s+(?:y|tambien|también|ademas|además)\s+|,/)
     .map((fragment) => fragment.trim())
     .filter(Boolean);
@@ -459,11 +460,11 @@ function inferFragmentQuantity(fragment) {
 }
 
 function isCoveredByMatchedItem(candidate, matchedItems) {
-  const query = normalize(candidate.catalogQuery ?? candidate.rawName);
+  const query = normalizePresentationText(candidate.catalogQuery ?? candidate.rawName);
   const queryTokens = splitCatalogWords(query);
   return matchedItems.some((item) => {
-    const raw = normalize(item.rawName);
-    const catalog = normalize(item.catalogQuery);
+    const raw = normalizePresentationText(item.rawName);
+    const catalog = normalizePresentationText(item.catalogQuery);
     if (!raw && !catalog) return false;
     if (query === raw || query === catalog) return true;
     if (query.includes(raw) && item.requestedPresentation) return true;
@@ -471,6 +472,14 @@ function isCoveredByMatchedItem(candidate, matchedItems) {
     if (rawTokens.length > 1 && rawTokens.every((token) => queryTokens.some((queryToken) => sameSimpleWord(queryToken, token)))) return true;
     return raw.length >= 4 && queryTokens.some((token) => sameSimpleWord(token, raw));
   });
+}
+
+function normalizePresentationText(value) {
+  return normalize(value)
+    .replace(/\b(?:un\s+)?litro\s+y\s+medio\b/g, '1.5 l')
+    .replace(/(\d+(?:[.,]\d+)?)\s*(litros?|l)\b/g, '$1l')
+    .replace(/(\d+)\s*(mililitros?|ml|cc)\b/g, '$1ml')
+    .replace(/,/g, '.');
 }
 
 function splitCatalogWords(value) {
@@ -486,7 +495,7 @@ function sameSimpleWord(a, b) {
 
 function presentationFromNearbyText(text, matchIndex, alias, product) {
   const window = normalize(text.slice(matchIndex, matchIndex + alias.length + 18));
-  const requestedPresentation = window.match(/\b(\d{2,4})\s*(ml|mililitros?|cc)?\b/)?.[0] ?? null;
+  const requestedPresentation = nearbyPresentation(window);
   if (!requestedPresentation) return {};
   const fields = [product.name, product.presentation, ...(product.aliases ?? [])].map(normalize).join(' ');
   const requestedNumber = requestedPresentation.match(/\d{2,4}/)?.[0];
@@ -499,6 +508,16 @@ function presentationFromNearbyText(text, matchIndex, alias, product) {
     confidence: 0.7,
     ambiguityReason: 'presentacion_solicitada_no_coincide_con_sku_alias',
   };
+}
+
+function nearbyPresentation(value) {
+  const text = normalize(value);
+  if (/\b(?:un\s+)?litro\s+y\s+medio\b/.test(text)) return '1.5 L';
+  if (/\bmedio\s+litro\b/.test(text)) return '500 ml';
+  const match = text.match(/\b(\d+(?:[.,]\d+)?)\s*(ml|mililitros?|cc|l|litro|litros)\b/);
+  if (!match) return text.match(/\b(\d{2,4})\b/)?.[1] ?? null;
+  const unit = ['l', 'litro', 'litros'].includes(match[2]) ? 'L' : 'ml';
+  return `${match[1].replace(',', '.')} ${unit}`;
 }
 
 function findAliasIndex(text, alias) {
@@ -575,6 +594,7 @@ function findPresentationVariants(item, products) {
 
 function mentionsPresentation(text) {
   return /\b\d+\s*(ml|litro|litros|l|g|gr|kg)\b/.test(text) ||
+    /\b(?:un\s+)?litro\s+y\s+medio\b|\bmedio\s+litro\b/.test(text) ||
     /\bx\s*\d+\b/.test(text) ||
     containsAny(text, ['personal', 'familiar', 'grande', 'pequena', 'pequeno', 'pequenita', 'pequenito', 'sin gas', 'entera', 'sachet', 'barra']);
 }

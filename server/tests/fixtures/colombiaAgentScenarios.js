@@ -325,7 +325,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: ['customer_name', 'delivery_address', 'presentation:coca cola'],
-      replyIncludes: ['tu nombre', 'direccion del domicilio', 'escoger la presentacion de coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
+      replyIncludes: ['tu nombre', 'direccion del domicilio', 'Pediste coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
       orderItems: ['Coca-Cola 400ml'],
     },
   },

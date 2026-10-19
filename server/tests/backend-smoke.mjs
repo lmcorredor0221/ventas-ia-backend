@@ -102,6 +102,43 @@ try {
   assert.equal(sheetWrites[0].range, 'Pedidos!G3:J3');
   assert.equal(sheetWrites[0].values[0][0], 'entregado');
 
+  let tokenRefreshes = 0;
+  let catalogReads = 0;
+  const liveCatalogState = {
+    tenants: [{ id: 'andina', config: { googleSheets: { catalogRange: 'Catalogo!A1:J1000' } } }],
+    googleConnectionsByTenant: { andina: { status: 'connected', mode: 'live', refreshTokenRef: 'ref' } },
+    googleWorkspacesByTenant: { andina: { spreadsheet: { id: 'sheet-1' } } },
+    productsByTenant: {},
+    driveFilesByTenant: {},
+  };
+  const cachedCatalogRegistry = new ToolRegistry({
+    store: {
+      getState: () => liveCatalogState,
+      mutate: (mutator) => mutator(liveCatalogState),
+    },
+    secretVault: { readSecret: () => 'refresh-token' },
+    googleWorkspace: {
+      refreshAccessToken: async () => {
+        tokenRefreshes += 1;
+        return 'access-token';
+      },
+      readValues: async () => {
+        catalogReads += 1;
+        return [
+          ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock'],
+          ['COC-400', 'Coca-Cola original', 'Gaseosas', 'Coca-Cola', '400 ml', '3300', '48'],
+        ];
+      },
+    },
+    config: {},
+  });
+  await Promise.all([
+    cachedCatalogRegistry.googleSheetsReadTable('andina', { filters: { query: 'coca cola' } }),
+    cachedCatalogRegistry.googleSheetsReadTable('andina', { filters: { query: 'coca cola' } }),
+  ]);
+  assert.equal(tokenRefreshes, 1);
+  assert.equal(catalogReads, 1);
+
   store.mutate((state) => {
     state.conversations.unshift({
       id: 'wa-smoke-decision',
@@ -220,6 +257,17 @@ try {
   assert.ok(orderRun.result.plan.missingFields.includes('quantity:Cifrut granadilla'));
   assert.equal(orderRun.conversation.orderDraft.items.length, 2);
   assert.ok(orderRun.conversation.messages.at(-1).text.includes('cantidad de Cifrut granadilla'));
+
+  const unavailablePresentationRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573001112255',
+    profileName: 'Presentacion Pendiente',
+    text: 'Para un domicilio, quiero una coca cola litro y medio',
+  });
+  const unavailablePresentationReply = unavailablePresentationRun.conversation.messages.at(-1).text;
+  assert.equal(unavailablePresentationRun.result.plan.intent, 'delivery_order');
+  assert.ok(unavailablePresentationReply.includes('Coca-Cola 400ml'));
+  assert.match(unavailablePresentationReply, /\$[\s\u00a0]*3\.200/);
 
   const quantityRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',

@@ -3,6 +3,8 @@ import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '.
 import { findOpenPendingRequest } from './pendingRequestPolicy.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
+const LIVE_CATALOG_CACHE_TTL_MS = 30 * 1000;
 
 function googleConnectionRequiredError(message) {
   const error = new Error(message);
@@ -30,6 +32,8 @@ export class ToolRegistry {
     this.config = config;
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
+    this.googleAccessTokenCache = new Map();
+    this.liveCatalogCache = new Map();
   }
 
   async call(toolName, tenantId, conversationId, payload = {}) {
@@ -225,36 +229,75 @@ export class ToolRegistry {
     if (!spreadsheetId) return null;
     const refreshToken = this.secretVault.readSecret(connection.refreshTokenRef);
     if (!refreshToken) return null;
-    const accessToken = await this.googleWorkspace.refreshAccessToken(refreshToken);
+    const accessToken = await this.googleAccessToken({ tenantId, refreshTokenRef: connection.refreshTokenRef, refreshToken });
     return { accessToken, spreadsheetId, connection, workspace };
+  }
+
+  async googleAccessToken({ tenantId, refreshTokenRef, refreshToken }) {
+    const key = `${tenantId}:${refreshTokenRef}`;
+    const now = Date.now();
+    const cached = this.googleAccessTokenCache.get(key);
+    if (cached?.accessToken && cached.expiresAt > now) return cached.accessToken;
+    if (cached?.promise) return cached.promise;
+
+    const promise = this.googleWorkspace.refreshAccessToken(refreshToken)
+      .then((accessToken) => {
+        this.googleAccessTokenCache.set(key, {
+          accessToken,
+          expiresAt: Date.now() + GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS,
+        });
+        return accessToken;
+      })
+      .catch((error) => {
+        this.googleAccessTokenCache.delete(key);
+        throw error;
+      });
+    this.googleAccessTokenCache.set(key, { promise });
+    return promise;
   }
 
   async readLiveCatalogRows({ tenantId, tenant, live, range }) {
     const sheetRange = range ?? 'Catalogo!A1:J1000';
-    const values = await this.googleWorkspace.readValues({
+    const key = `${tenantId}:${live.spreadsheetId}:${sheetRange}`;
+    const now = Date.now();
+    const cached = this.liveCatalogCache.get(key);
+    if (cached?.rows && cached.expiresAt > now) return cached.rows;
+    if (cached?.promise) return cached.promise;
+
+    const promise = this.googleWorkspace.readValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
       range: sheetRange,
+    }).then((values) => {
+      const rows = parseCatalogRows(values);
+      this.store.mutate((state) => {
+        state.productsByTenant ??= {};
+        state.driveFilesByTenant ??= {};
+        state.productsByTenant[tenantId] = mergeByKey(state.productsByTenant[tenantId] ?? [], rows, 'sku');
+        state.driveFilesByTenant[tenantId] = mergeByKey(
+          state.driveFilesByTenant[tenantId] ?? [],
+          rows
+            .filter((row) => row.driveFileId)
+            .map((row) => ({
+              fileId: row.driveFileId,
+              name: `${row.name} - ficha comercial`,
+              mimeType: 'application/vnd.google-apps.document',
+              summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
+            })),
+          'fileId',
+        );
+      });
+      this.liveCatalogCache.set(key, {
+        rows,
+        expiresAt: Date.now() + LIVE_CATALOG_CACHE_TTL_MS,
+      });
+      return rows;
+    }).catch((error) => {
+      this.liveCatalogCache.delete(key);
+      throw error;
     });
-    const rows = parseCatalogRows(values);
-    this.store.mutate((state) => {
-      state.productsByTenant ??= {};
-      state.driveFilesByTenant ??= {};
-      state.productsByTenant[tenantId] = mergeByKey(state.productsByTenant[tenantId] ?? [], rows, 'sku');
-      state.driveFilesByTenant[tenantId] = mergeByKey(
-        state.driveFilesByTenant[tenantId] ?? [],
-        rows
-          .filter((row) => row.driveFileId)
-          .map((row) => ({
-            fileId: row.driveFileId,
-            name: `${row.name} - ficha comercial`,
-            mimeType: 'application/vnd.google-apps.document',
-            summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
-          })),
-        'fileId',
-      );
-    });
-    return rows;
+    this.liveCatalogCache.set(key, { promise });
+    return promise;
   }
 
   async lookupLiveCustomerProfile({ tenantId, tenant, live, waId }) {
