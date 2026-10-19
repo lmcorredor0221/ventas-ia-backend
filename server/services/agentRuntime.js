@@ -412,6 +412,15 @@ export class AgentRuntime {
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
+    const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
+    let nextProfile = await this.upsertCapturedCustomerProfile({
+      tenantId,
+      conversationId,
+      normalized,
+      customerProfile,
+      customerDetails: collected,
+      delivery: Boolean(plan.order?.delivery),
+    });
     const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         range: tenant?.config?.googleSheets?.range,
@@ -445,7 +454,8 @@ export class AgentRuntime {
     const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
     const selectedPaymentMethod = resolvePaymentMethod(normalized.text, paymentMethods)
       ?? resolvePaymentMethod(plan.order?.paymentMethod, paymentMethods)
-      ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods);
+      ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods)
+      ?? resolvePaymentMethod(collected.paymentMethod, paymentMethods);
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
@@ -457,16 +467,18 @@ export class AgentRuntime {
       }
     }
     const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
+    if (nextProfile?.name) removeMissingField(missingFields, 'customer_name');
+    if (nextProfile?.defaultAddress) removeMissingField(missingFields, 'delivery_address');
     if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     const requiresHumanResolution = needsHumanProductResolution(missingFields);
     const reply = requiresHumanResolution
-      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile })
+      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile })
       : buildOrderReply({
         orderItems: effectiveOrderItems,
         missingFields,
-        customerProfile,
+        customerProfile: nextProfile,
         subtotal,
         paymentMethods,
         paymentMethod: selectedPaymentMethod?.id ?? null,
@@ -481,7 +493,14 @@ export class AgentRuntime {
       progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
       need: normalized.text,
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
-      lastTool: drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
+      lastTool: collected.name || collected.defaultAddress
+        ? 'google_sheets_customer_profile_upsert'
+        : drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
+      customerCapture: {
+        nameSource: collected.nameSource,
+        addressSource: collected.defaultAddressSource,
+        capturedAt: collected.name || collected.defaultAddress ? new Date().toISOString() : null,
+      },
       orderDraft: {
         delivery: isDelivery,
         items: effectiveOrderItems,
@@ -500,10 +519,10 @@ export class AgentRuntime {
         urgency: 'Alta',
         assigned_team: 'ventas',
         context_snapshot: {
-          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields, customerProfile, text: normalized.text }),
+          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile, text: normalized.text }),
           orderItems: effectiveOrderItems,
           missingFields: [...new Set(missingFields)],
-          customerProfile,
+          customerProfile: nextProfile,
           driveStatus: drive.status,
           driveRefs: drive.source_refs ?? [],
           plan,
@@ -511,12 +530,14 @@ export class AgentRuntime {
       });
     }
 
-    if (!customerProfile && canQuote && normalized.profileName) {
-      await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
-        wa_id: normalized.waId,
-        name: normalized.profileName ?? normalized.waId,
-        defaultAddress: customerProfile?.defaultAddress,
-        preferences: { channel: 'whatsapp', deliveryDefault: Boolean(plan.order?.delivery) },
+    if (!nextProfile && canQuote && normalized.profileName) {
+      nextProfile = await this.upsertCapturedCustomerProfile({
+        tenantId,
+        conversationId,
+        normalized,
+        customerProfile,
+        customerDetails: { name: normalized.profileName, defaultAddress: null },
+        delivery: isDelivery,
       });
     }
 
@@ -527,6 +548,25 @@ export class AgentRuntime {
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
+  }
+
+  async upsertCapturedCustomerProfile({ tenantId, conversationId, normalized, customerProfile, customerDetails, delivery }) {
+    if (!customerDetails.name && !customerDetails.defaultAddress) return customerProfile;
+    const defaultAddress = customerDetails.defaultAddress ?? customerProfile?.defaultAddress ?? null;
+    const addresses = customerDetails.defaultAddress
+      ? [
+        { label: 'principal', address: customerDetails.defaultAddress },
+        ...(customerProfile?.addresses ?? []).filter((item) => normalizeText(item?.address) !== normalizeText(customerDetails.defaultAddress)),
+      ]
+      : undefined;
+    const saved = await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
+      wa_id: normalized.waId,
+      name: customerDetails.name ?? customerProfile?.name ?? normalized.profileName ?? normalized.waId,
+      defaultAddress,
+      addresses,
+      preferences: { channel: 'whatsapp', deliveryDefault: delivery },
+    });
+    return saved.profile;
   }
 
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
@@ -625,23 +665,19 @@ export class AgentRuntime {
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const draft = structuredClone(plan.order);
     const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
-    const collected = extractClarification(normalized.text, paymentMethods);
+    const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
     const plannedPaymentMethod = resolvePaymentMethod(draft.paymentMethod, paymentMethods);
     if (plannedPaymentMethod) draft.paymentMethod = plannedPaymentMethod.id;
-    let nextProfile = customerProfile;
+    let nextProfile = await this.upsertCapturedCustomerProfile({
+      tenantId,
+      conversationId,
+      normalized,
+      customerProfile,
+      customerDetails: collected,
+      delivery: Boolean(draft.delivery),
+    });
     if (collected.paymentMethod) {
       draft.paymentMethod = collected.paymentMethod;
-    }
-
-    if (!nextProfile && (collected.name || collected.defaultAddress)) {
-      const saved = await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
-        wa_id: normalized.waId,
-        name: collected.name ?? normalized.profileName ?? normalized.waId,
-        defaultAddress: collected.defaultAddress,
-        addresses: collected.defaultAddress ? [{ label: 'principal', address: collected.defaultAddress }] : [],
-        preferences: { channel: 'whatsapp', deliveryDefault: Boolean(draft.delivery) },
-      });
-      nextProfile = saved.profile;
     }
 
     for (const item of draft.items ?? []) {
@@ -690,6 +726,11 @@ export class AgentRuntime {
       progress: canQuote ? 64 : 48,
       nextStep: canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: collected.name || collected.defaultAddress ? 'google_sheets_customer_profile_upsert' : 'llm_core',
+      customerCapture: {
+        nameSource: collected.nameSource,
+        addressSource: collected.defaultAddressSource,
+        capturedAt: collected.name || collected.defaultAddress ? new Date().toISOString() : null,
+      },
       orderDraft: draft,
     });
 
@@ -1672,10 +1713,45 @@ function joinSentences(sentences) {
   return sentences.map((sentence) => String(sentence ?? '').trim()).filter(Boolean).join(' ');
 }
 
+function collectCustomerDetails({ plan, text, paymentMethods }) {
+  const fromText = extractClarification(text, paymentMethods);
+  const fromPlan = normalizePlannedCustomerDetails(plan?.customerDetails);
+  return {
+    ...fromText,
+    name: fromText.name ?? fromPlan.name,
+    defaultAddress: fromText.defaultAddress ?? fromPlan.defaultAddress,
+    nameSource: fromText.name ? 'text' : fromPlan.name ? 'llm' : null,
+    defaultAddressSource: fromText.defaultAddress ? 'text' : fromPlan.defaultAddress ? 'llm' : null,
+  };
+}
+
+function normalizePlannedCustomerDetails(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { name: null, defaultAddress: null };
+  }
+  return {
+    name: normalizeCapturedCustomerText(value.name ?? value.customerName, { maxLength: 120 }),
+    defaultAddress: normalizeCapturedCustomerText(value.deliveryAddress ?? value.defaultAddress ?? value.address, { maxLength: 220 }),
+  };
+}
+
+function normalizeCapturedCustomerText(value, { maxLength }) {
+  const normalized = String(value ?? '').replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '');
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
 function extractClarification(text, paymentMethods) {
   const value = String(text ?? '').trim();
-  const name = value.match(/\b(?:me llamo|soy|mi nombre es|nombre)\s+([^,.]+)/i)?.[1]?.trim();
-  const defaultAddress = value.match(/\b(?:direccion|dirección|dir)\s*(?:es|:)?\s+(.+)$/i)?.[1]?.trim();
+  const explicitName = value.match(/\b(?:me llamo|soy|mi nombre es|nombre)\s+([^,.]+)/i)?.[1]?.trim();
+  const labeledAddress = value.match(/\b(?:direccion|dirección|dir)\s*(?:es|:)?\s+(.+)$/i)?.[1]?.trim();
+  const streetMatch = value.match(/\b(?:calle|cl\.?|carrera|cra\.?|kr\.?|avenida|av\.?|transversal|tv\.?|diagonal|dg\.?)\s*\d[^\n]*$/i);
+  const defaultAddress = normalizeCapturedCustomerText(labeledAddress ?? streetMatch?.[0], { maxLength: 220 })
+    ?.replace(/\s*[,.]?\s*(?:pago|pagar[ée]?|efectivo|tarjeta|bre[- ]?b|transferencia)\b.*$/i, '')
+    .trim()
+    .replace(/[.,;]+$/, '') || null;
+  const precedingText = streetMatch?.index > 0 ? value.slice(0, streetMatch.index).replace(/[,:;\-\s]+$/, '') : '';
+  const inferredName = isLikelyCustomerName(precedingText) ? precedingText : null;
+  const name = normalizeCapturedCustomerText(explicitName ?? inferredName, { maxLength: 120 });
   const quantity = Number(value.match(/^\s*(\d+)\b/)?.[1] ?? 0) || null;
   return {
     name,
@@ -1684,6 +1760,23 @@ function extractClarification(text, paymentMethods) {
     paymentMethod: resolvePaymentMethod(value, paymentMethods)?.id ?? null,
     removeProductQuery: extractRemovalQuery(value),
   };
+}
+
+function isLikelyCustomerName(value) {
+  const candidate = String(value ?? '').replace(/^(?:mi nombre es|soy|me llamo|nombre)\s+/i, '').trim();
+  const normalized = normalizeText(candidate);
+  const words = candidate.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 5) return false;
+  if (containsAny(normalized, ['quiero', 'necesito', 'domicilio', 'direccion', 'dirección', 'pago', 'efectivo', 'tarjeta', 'breb'])) return false;
+  return words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+$/u.test(word));
+}
+
+function removeMissingField(fields, field) {
+  let index = fields.indexOf(field);
+  while (index >= 0) {
+    fields.splice(index, 1);
+    index = fields.indexOf(field);
+  }
 }
 
 function extractRemovalQuery(text) {

@@ -50,6 +50,10 @@ try {
                 occasion: 'desayuno',
                 delivery: true,
               },
+              customerDetails: {
+                name: 'Laura Gomez',
+                deliveryAddress: 'Calle 10 # 20-30, Bogotá',
+              },
               candidateItems: [
                 { rawName: 'cafe tostado premium', catalogQuery: 'cafe tostado premium', quantity: null, skuHint: null },
               ],
@@ -107,6 +111,10 @@ try {
   assert.equal(plan.provider, 'deepseek');
   assert.equal(plan.intent, 'catalog_query');
   assert.equal(plan.reasoningMode, 'shopkeeper_guided_sale');
+  assert.deepEqual(plan.customerDetails, {
+    name: 'Laura Gomez',
+    deliveryAddress: 'Calle 10 # 20-30, Bogotá',
+  });
 
   const createdEvent = events.find((event) => event.type === 'llm.plan.created');
   assert.ok(createdEvent);

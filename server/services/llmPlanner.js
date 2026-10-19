@@ -692,11 +692,12 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products, pay
   }));
   return [
     'Eres el planner estructurado de un agente comercial por WhatsApp.',
-    'Devuelve solo JSON valido con: intent, reasoningMode, customerUnderstanding, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
+    'Devuelve solo JSON valido con: intent, reasoningMode, customerUnderstanding, customerDetails, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
     'No incluyas markdown, explicaciones ni texto fuera del JSON.',
     'Intents permitidos: delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     'reasoningMode debe ser shopkeeper_guided_sale para ventas de tienda de barrio.',
     'customerUnderstanding debe incluir rawNeed, certainty, occasion y delivery.',
+    'customerDetails debe ser {name, deliveryAddress}; incluye solo datos que el cliente dijo expresamente en este mensaje. Usa null para cada dato ausente: no inventes ni copies el nombre del perfil de WhatsApp.',
     'Debes actuar como tendero colombiano razonando la canasta antes de validar disponibilidad: interpreta modismos, errores de escritura, marcas incompletas, presentaciones, sabores, cantidades y pedidos por valor.',
     'No hagas parsing deterministico por alias exacto. Primero extrae hipotesis de producto desde el lenguaje del cliente; luego decide como validarlas con herramientas.',
     'candidateItems conserva cada producto, ingrediente o categoria candidata con rawName, catalogQuery, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
@@ -731,10 +732,11 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
     'Eres un planner de pedidos por WhatsApp para una tienda de barrio en Colombia.',
     'Tu tarea es inferir heurísticamente la canasta: corrige errores ortográficos probables, modismos, marcas incompletas, presentaciones, cantidades y pedidos por valor.',
     'No confirmes disponibilidad: solo propone candidatos y herramientas para validar en Google Sheets/Drive.',
-    'Contrato JSON: intent, reasoningMode, customerUnderstanding, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
+    'Contrato JSON: intent, reasoningMode, customerUnderstanding, customerDetails, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
     'Para cada item usa rawName original, catalogQuery inferido, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
     'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
+    'customerDetails debe contener {name, deliveryAddress} solo si el mensaje actual los expresa. Para valores ausentes usa null; nunca los inventes ni copies el perfil de WhatsApp.',
     `Medios de pago disponibles: ${(paymentMethods ?? []).map((method) => `${method.label} (${method.id})`).join(', ')}. Si el cliente elige uno, usa ese id en order.paymentMethod.`,
     'Si el cliente reclama entrega incompleta, producto equivocado, demora o faltante, escala a humano con human_handoff.',
     'Usa google_sheets_read_table para validar cada item; usa query generica razonada cuando haya duda.',
@@ -929,6 +931,7 @@ function normalizeProviderPlan(plan) {
     missingInfo: Array.isArray(plan.missingInfo) ? plan.missingInfo : plan.missingFields,
     reasoningMode: plan.reasoningMode,
     customerUnderstanding,
+    customerDetails: normalizeCustomerDetails(plan.customerDetails),
     candidateItems: plan.candidateItems,
     toolPlan: plan.toolPlan,
     responseStrategy: normalizeResponseStrategy(plan.responseStrategy),
@@ -1079,6 +1082,21 @@ function normalizeCustomerUnderstanding(value) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value;
   if (typeof value === 'string') return { rawNeed: value };
   return {};
+}
+
+function normalizeCustomerDetails(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { name: null, deliveryAddress: null };
+  }
+  return {
+    name: normalizeCustomerDetail(value.name ?? value.customerName, 120),
+    deliveryAddress: normalizeCustomerDetail(value.deliveryAddress ?? value.defaultAddress ?? value.address, 220),
+  };
+}
+
+function normalizeCustomerDetail(value, maxLength) {
+  const normalized = String(value ?? '').replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '');
+  return normalized ? normalized.slice(0, maxLength) : null;
 }
 
 function normalizeCandidateItems(value) {

@@ -346,6 +346,20 @@ try {
   assert.equal(newCustomerRun.result.plan.intent, 'delivery_order');
   assert.ok(newCustomerRun.result.plan.missingFields.includes('customer_name'));
   assert.ok(newCustomerRun.result.plan.missingFields.includes('delivery_address'));
+
+  const naturalCustomerDetailsRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573001112233',
+    profileName: '',
+    text: 'Luis Corredor Castillo, Calle 153 # 114B-58 Int 2 Casa 10, Bogotá. Efectivo.',
+  });
+  assert.equal(naturalCustomerDetailsRun.result.summary, 'Order clarified and quote sent');
+  assert.equal(naturalCustomerDetailsRun.conversation.orderDraft.missingFields.length, 0);
+  assert.equal(naturalCustomerDetailsRun.conversation.orderDraft.paymentMethod, 'cash');
+  const capturedNaturalCustomer = store.getState().customerProfilesByTenant.andina['573001112233'];
+  assert.equal(capturedNaturalCustomer.name, 'Luis Corredor Castillo');
+  assert.match(capturedNaturalCustomer.defaultAddress, /Calle 153 # 114B-58 Int 2 Casa 10, Bogotá/);
+
   const savedProfile = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.ok(savedProfile.tools.some((tool) => tool.name === 'google_sheets_customer_profile_lookup'));
   assert.ok(savedProfile.usage.metrics.agent_interactions >= 7);
