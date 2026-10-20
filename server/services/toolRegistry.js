@@ -599,10 +599,13 @@ export class ToolRegistry {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(`WhatsApp Cloud API send failed: ${response.status}`);
+      const providerError = summarizeWhatsAppProviderError(result);
+      const detail = providerError.detail ? `: ${providerError.detail}` : '';
+      const error = new Error(`WhatsApp Cloud API send failed: ${response.status}${detail}`);
       error.statusCode = 502;
       error.code = 'whatsapp_send_failed';
       error.payload = result;
+      error.providerError = providerError;
       throw error;
     }
     return {
@@ -621,6 +624,16 @@ export class ToolRegistry {
       });
     });
   }
+}
+
+function summarizeWhatsAppProviderError(payload = {}) {
+  const error = payload?.error ?? {};
+  return {
+    code: error.code ?? null,
+    type: error.type ?? null,
+    detail: String(error.error_data?.details ?? error.error_user_msg ?? error.message ?? '').trim() || null,
+    fbtraceId: error.fbtrace_id ?? null,
+  };
 }
 
 function filterRows(rows, filters = {}) {

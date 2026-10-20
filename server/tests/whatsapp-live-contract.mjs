@@ -49,6 +49,27 @@ try {
     event.metadata?.live === true
   ));
 
+  global.fetch = async () => jsonResponse({
+    error: {
+      code: 131005,
+      type: 'OAuthException',
+      message: '(#131005) Access denied',
+      error_data: { details: 'The test recipient is not permitted for this app.' },
+      fbtrace_id: 'trace-contract',
+    },
+  }, 403);
+  await assert.rejects(
+    tools.call('whatsapp_business_messaging', 'andina', 'whatsapp-live-contract', {
+      action: 'send_session_message',
+      wa_id: '573001110002',
+      text: 'Mensaje live de prueba',
+    }),
+    (error) => error.code === 'whatsapp_send_failed'
+      && error.providerError?.code === 131005
+      && error.providerError?.fbtraceId === 'trace-contract'
+      && error.message.includes('The test recipient is not permitted for this app.'),
+  );
+
   console.log('WhatsApp live contract tests passed');
 } finally {
   await store.close?.();
