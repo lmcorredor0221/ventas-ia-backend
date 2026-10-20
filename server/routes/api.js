@@ -1,5 +1,6 @@
 import express from 'express';
 import { mergeTenantConfig, sanitizeOwnerConfigPatch } from '../services/tenantConfigPolicy.js';
+import { isClosedConversation } from '../domain/conversationStatus.js';
 
 export function createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }) {
   const router = express.Router();
@@ -174,7 +175,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
         tenants: visibleTenants,
         tenant: visibleTenants.find((item) => item.id === tenantId),
         conversations,
-        conversationHistory: allConversations.filter(isClosedCase),
+        conversationHistory: allConversations.filter(isClosedConversation),
         orders: [
           ...tenantOrders.filter((order) => !['delivered', 'cancelled'].includes(order.status)),
           ...tenantOrders.filter((order) => ['delivered', 'cancelled'].includes(order.status)).slice(0, 200),
@@ -185,7 +186,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
         tools: deriveTenantToolStatuses(state, tenantId),
         metrics: {
           active: allConversations.filter((item) => ['live', 'degraded', 'manual_active'].includes(item.status)).length,
-          completed: allConversations.filter((item) => isClosedCase(item)).length,
+          completed: allConversations.filter((item) => isClosedConversation(item)).length,
           pending: pendingRequests.length,
           failed: allConversations.filter((item) => ['blocked', 'degraded'].includes(item.status)).length,
           response: 'contract',
@@ -333,12 +334,8 @@ async function readConversations(store, { tenantId, includeClosed = true } = {})
   return includeClosed ? conversations : conversations.filter(isInboxConversation);
 }
 
-function isClosedCase(conversation) {
-  return ['closed_no_confirmation', 'closed_dispatched', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
-}
-
 function isInboxConversation(conversation) {
-  return !isClosedCase(conversation);
+  return !isClosedConversation(conversation);
 }
 
 async function readConversation(store, conversationId) {

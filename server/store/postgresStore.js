@@ -10,6 +10,7 @@ import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
 import { collapseDuplicateOpenPendingRequests } from '../services/pendingRequestPolicy.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
+import { CLOSED_CONVERSATION_STATUSES } from '../domain/conversationStatus.js';
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -151,9 +152,9 @@ export class PostgresStore {
       `SELECT payload FROM conversations
        WHERE tenant_id = $1
          AND wa_id = $2
-         AND COALESCE(payload->>'caseStatus', payload->>'status', status) NOT IN ('closed_no_confirmation', 'completed', 'resolved', 'cancelled')
+          AND COALESCE(payload->>'caseStatus', payload->>'status', status) <> ALL($3::text[])
        ORDER BY updated_at DESC LIMIT 1`,
-      [tenantId, waId],
+      [tenantId, waId, CLOSED_CONVERSATION_STATUSES],
     );
     return result.rows[0]?.payload ?? null;
   }

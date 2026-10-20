@@ -15,7 +15,7 @@
     "test:postgres": "node server/tests/postgres-smoke.mjs",
     "test:plan": "node server/tests/autoservicio-plan.mjs",
     "test:catalog-import": "node server/tests/catalog-import.mjs",
-    "test:architecture": "node server/tests/order-status-contract.mjs && node server/tests/config-validation.mjs && node server/tests/integration-outbox.mjs && node server/tests/concurrency-contract.mjs && node server/tests/tenant-checkout-flow.mjs",
+    "test:architecture": "node server/tests/order-status-contract.mjs && node server/tests/conversation-status-contract.mjs && node server/tests/config-validation.mjs && node server/tests/integration-outbox.mjs && node server/tests/concurrency-contract.mjs && node server/tests/tenant-checkout-flow.mjs",
     "test:postgres:google": "node scripts/run-with-env.mjs .env.google.local AUTH_REQUIRED=false CSRF_REQUIRED=false node server/tests/postgres-smoke.mjs",
     "billing:maintenance": "node scripts/run-with-env.mjs .env.google.local node scripts/run-billing-maintenance.mjs"
   },

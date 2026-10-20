@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { isClosedConversation, isDispatchedConversation } from '../domain/conversationStatus.js';
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 
@@ -989,14 +990,14 @@ export class AgentRuntime {
     const cached = this.store
       .getState()
       .conversations
-      .find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedCase(item));
+      .find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedConversation(item));
     if (cached) return cached;
 
     const existing = this.store.findConversationByWa
       ? await this.store.findConversationByWa(tenantId, normalized.waId)
       : this.store
         .getState()
-        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedCase(item));
+        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedConversation(item));
     if (existing) return existing;
 
     const previous = this.store.findLatestConversationByWa
@@ -1006,7 +1007,7 @@ export class AgentRuntime {
         .conversations
         .filter((item) => item.tenantId === tenantId && item.waId === normalized.waId)
         .sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? 0) - Date.parse(left.updatedAt ?? left.createdAt ?? 0))[0];
-    if (previous && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
+    if (previous && !isDispatchedConversation(previous) && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
       const now = new Date().toISOString();
       this.store.mutate((state) => {
         const conversation = state.conversations.find((item) => item.id === previous.id);
@@ -1188,10 +1189,6 @@ export class AgentRuntime {
   }
 }
 
-function isClosedCase(conversation) {
-  return ['closed_no_confirmation', 'closed_dispatched', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
-}
-
 function isCancellationRequest(text) {
   const normalized = normalizeText(text)
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
@@ -1212,7 +1209,7 @@ function isCancellationRequest(text) {
 }
 
 function isExplicitCaseContinuation(text, previous, config = {}) {
-  if (!isClosedCase(previous)) return false;
+  if (!isClosedConversation(previous)) return false;
   const windowMs = Number(config.caseContinuationWindowMinutes ?? 30) * 60_000;
   const lastActivity = Date.parse(previous.closedAt ?? previous.updatedAt ?? previous.createdAt ?? 0);
   if (!Number.isFinite(lastActivity) || Date.now() - lastActivity > windowMs) return false;
