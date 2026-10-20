@@ -28,6 +28,7 @@ const envKeys = [
 const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-whatsapp-embedded-'));
 const graphCalls = [];
+let pilotPermissions = ['whatsapp_business_management', 'whatsapp_business_messaging'];
 
 Object.assign(process.env, {
   META_APP_ID: 'meta-app-contract',
@@ -47,6 +48,10 @@ global.fetch = async (url, options = {}) => {
   const href = String(url);
   graphCalls.push({ url: href, options });
   if (href.includes('/oauth/access_token')) return jsonResponse({ access_token: 'tenant-a-meta-token' });
+  if (href.includes('/me/permissions')) {
+    assert.match(options.headers.authorization, /^Bearer (pilot-meta-token|pilot-meta-token-renewed)$/);
+    return jsonResponse({ data: pilotPermissions.map((permission) => ({ permission, status: 'granted' })) });
+  }
   if (href.includes('/200000000001?fields=')) {
     assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ id: '200000000001', display_phone_number: '+57 300 000 0000', verified_name: 'Tienda Contrato' });
@@ -181,6 +186,13 @@ try {
   const refreshedPilot = await controlPlane.refreshWhatsAppTestPilot(pilotBundle.tenant.id, { actor: { id: 'platform-admin' } });
   assert.equal(secretVault.readSecret(refreshedPilot.tenant.config.whatsapp.accessTokenRef), 'pilot-meta-token-renewed');
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.test_pilot.refreshed'));
+  pilotPermissions = ['whatsapp_business_management'];
+  await assert.rejects(
+    controlPlane.refreshWhatsAppTestPilot(pilotBundle.tenant.id, { actor: { id: 'platform-admin' } }),
+    (error) => error.statusCode === 422
+      && error.code === 'whatsapp_test_pilot_permissions_missing'
+      && error.missingPermissions.includes('whatsapp_business_messaging'),
+  );
   console.log('WhatsApp Embedded Signup contract tests passed');
 } finally {
   await store.close?.();

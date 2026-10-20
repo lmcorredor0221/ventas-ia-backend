@@ -1469,6 +1469,21 @@ export class SaasControlPlane {
     }
 
     const headers = { authorization: `Bearer ${pilot.accessToken}` };
+    const permissions = await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/me/permissions`,
+      { headers },
+      'whatsapp_test_pilot_permission_validation',
+    );
+    const missingPermissions = missingWhatsAppMessagingPermissions(permissions.data);
+    if (missingPermissions.length) {
+      const error = new Error(
+        `El token de prueba de Meta no permite enviar mensajes. Faltan los permisos: ${missingPermissions.join(', ')}.`,
+      );
+      error.statusCode = 422;
+      error.code = 'whatsapp_test_pilot_permissions_missing';
+      error.missingPermissions = missingPermissions;
+      throw error;
+    }
     const phone = await fetchGraphJson(
       `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(pilot.phoneNumberId)}?fields=id,display_phone_number,verified_name`,
       { headers },
@@ -2299,6 +2314,16 @@ function publicWhatsAppTestPilot(pilot = {}) {
     displayPhoneNumber: pilot.displayPhoneNumber ?? null,
     verifiedName: pilot.verifiedName ?? null,
   };
+}
+
+function missingWhatsAppMessagingPermissions(permissions = []) {
+  const granted = new Set(
+    (Array.isArray(permissions) ? permissions : [])
+      .filter((permission) => permission?.status === 'granted')
+      .map((permission) => permission.permission),
+  );
+  return ['whatsapp_business_management', 'whatsapp_business_messaging']
+    .filter((permission) => !granted.has(permission));
 }
 
 function whatsappAccessTokenHealth({ connected, issuedAt, expiresAt, tokenLifetimeDays, tokenRenewalWindowDays }) {
