@@ -49,6 +49,9 @@ npm run test:mercadopago-sandbox
 - `MERCADOPAGO_ACCESS_TOKEN=<mercado-pago-token>`
 - `MERCADOPAGO_PREAPPROVAL_PLAN_ID=<plan-id-opcional>`
 - `MERCADOPAGO_WEBHOOK_SECRET=<mercado-pago-webhook-secret>`
+- `WHATSAPP_ASYNC_INBOUND_ENABLED=true`
+- `INTEGRATION_OUTBOX_ENABLED=true`
+- `BACKGROUND_WORKERS_ENABLED=false` en el servicio web y `true` en el worker.
 
 ## 3. Configuración Google Cloud
 
@@ -72,7 +75,9 @@ npm run test:mercadopago-sandbox
 - Tenant nuevo queda asociado al owner autenticado.
 - Suscripción activa habilita el onboarding.
 - OAuth Drive/Sheets conecta el Google del cliente.
-- Herramientas live leen `Catalogo` desde Sheets y escriben/leen `Clientes` y `Pedidos`.
+- Herramientas live leen `Catalogo` desde Sheets y escriben/leen `Clientes`; los pedidos se confirman primero en PostgreSQL y se proyectan a `Pedidos` mediante la cola durable.
+- Meta recibe `200` después de persistir el mensaje y la tarea de proceso, sin esperar LLM, Google Sheets, Drive ni el envío de WhatsApp.
+- El worker procesa mensajes encolados y las proyecciones de Sheets; sus reintentos y errores terminales se revisan antes de habilitar una tienda real.
 - Aprovisionamiento reintentado no duplica recursos.
 - El agente no responde si el tenant está suspendido o sin checklist completo.
 - Webhook WhatsApp rechaza `phone_number_id` no asociado a un tenant.

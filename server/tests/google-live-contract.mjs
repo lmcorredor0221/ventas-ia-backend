@@ -221,8 +221,10 @@ try {
       subtotal: 5000,
     },
   });
-  assert.equal(orderWrite.result.source, 'google_sheets_live');
-  assert.equal(liveSheets.Pedidos.length, 2);
+  // Order writes are durable locally first; the worker appends to the tenant
+  // sheet through the integration outbox after the API returns.
+  assert.equal(orderWrite.result.source, 'integration_outbox');
+  assert.equal(liveSheets.Pedidos.length, 1);
 
   console.log('Google live contract tests passed');
 } finally {

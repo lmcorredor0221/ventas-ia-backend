@@ -180,6 +180,48 @@ export class LLMPlanner {
     return callChatCompletions({ config, apiKey, prompt });
   }
 
+  async composeReply({ tenantId, conversationId, facts, fallbackText }) {
+    const tenant = await this.getTenant(tenantId);
+    const platformConfig = platformLlmConfig(this.store.getState());
+    const config = {
+      timeoutMs: this.config?.llmRequestTimeoutMs,
+      maxTokens: Math.min(Number(this.config?.llmMaxTokens ?? 350), 500),
+      ...platformConfig,
+      responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
+      tone: tenant?.config?.agentPolicy?.tone ?? 'tendero_colombiano',
+    };
+    if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
+    const provider = config.provider ?? 'deepseek';
+    const canCompose = this.config?.llmResponseComposerEnabled && !config.simulator && provider !== 'mock';
+    if (!canCompose) return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    try {
+      const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(provider));
+      if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(provider).join('/')}`);
+      const prompt = buildReplyPrompt({ facts, fallbackText, config });
+      const result = provider === 'google'
+        ? await callGeminiReply({ config, apiKey, prompt })
+        : await callChatReply({ config, apiKey, prompt });
+      const text = validateComposedReply(result.text, { facts, fallbackText });
+      this.events.emit({
+        type: 'llm.reply.composed',
+        tenantId,
+        conversationId,
+        detail: `Customer reply composed via ${result.providerMetadata.provider}/${result.providerMetadata.model}`,
+        metadata: { providerMetadata: result.providerMetadata, voice: normalizeVoiceProfile(config.tone) },
+      });
+      return { text, executionMode: 'provider_api', providerMetadata: result.providerMetadata };
+    } catch (error) {
+      this.events.emit({
+        type: 'llm.reply.fallback',
+        tenantId,
+        conversationId,
+        detail: `${provider} reply composer unavailable: ${error.message}`,
+        metadata: { provider, model: config.model, voice: normalizeVoiceProfile(config.tone) },
+      });
+      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    }
+  }
+
   codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products, paymentMethods }) {
     const plan = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products, paymentMethods });
     return {
@@ -725,6 +767,60 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products, pay
   ].join('\n');
 }
 
+function buildReplyPrompt({ facts, fallbackText, config }) {
+  const requiredTerms = replyRequiredTerms(facts);
+  return [
+    'Redacta la respuesta final para un comprador de una tienda colombiana por WhatsApp.',
+    'Devuelve solo JSON valido con la propiedad reply.',
+    `Perfil de voz: ${normalizeVoiceProfile(config.tone)}. Usa cercania colombiana solo si encaja; nunca caricaturices ni repitas muletillas.`,
+    'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
+    'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
+    'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
+    JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
+  ].join('\n');
+}
+
+function validateComposedReply(text, { facts, fallbackText }) {
+  const reply = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (reply.length < 3 || reply.length > 1200) return fallbackText;
+  const normalizedReply = normalize(reply);
+  const requiredTerms = replyRequiredTerms(facts);
+  if (requiredTerms.some((term) => !normalizedReply.includes(normalize(term)))) return fallbackText;
+  const allowedMoney = extractMoneyTokens(JSON.stringify(facts ?? {}).concat(` ${fallbackText}`));
+  const replyMoney = extractMoneyTokens(reply);
+  if (replyMoney.some((value) => !allowedMoney.has(value))) return fallbackText;
+  return reply;
+}
+
+function replyRequiredTerms(facts) {
+  const products = facts?.products ?? facts?.items ?? [];
+  const names = products
+    .map((item) => item?.name ?? item?.product?.name)
+    .filter(Boolean)
+    .slice(0, 6);
+  const required = [...names, ...(facts?.requiredTerms ?? [])]
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  if (facts?.subtotal !== undefined && facts?.subtotal !== null) required.push(formatMoneyForReply(facts.subtotal));
+  return [...new Set(required)];
+}
+
+function extractMoneyTokens(value) {
+  return new Set((String(value ?? '').match(/\$\s?[\d.]+/g) ?? []).map((item) => item.replace(/\s+/g, '')));
+}
+
+function formatMoneyForReply(value) {
+  return `$ ${Number(value ?? 0).toLocaleString('es-CO')}`;
+}
+
+function normalizeVoiceProfile(value) {
+  const tone = String(value ?? 'tendero_colombiano').trim().toLowerCase();
+  if (tone === 'tendero_bogotano' || tone === 'tendero_colombiano') {
+    return 'tendero_colombiano: cercano, respetuoso, claro, breve y natural; puede usar modismos locales con moderación';
+  }
+  return tone || 'tendero_colombiano: cercano, respetuoso, claro y breve';
+}
+
 function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods }) {
   const catalog = compactCatalogHints(products, text);
   return [
@@ -887,6 +983,41 @@ async function callChatCompletions({ config, apiKey, prompt }) {
   };
 }
 
+async function callChatReply({ config, apiKey, prompt }) {
+  const provider = config.provider ?? 'deepseek';
+  const url = resolveBaseUrl(config, provider) ?? (provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions');
+  const startedAt = Date.now();
+  const model = config.model ?? defaultModel(provider);
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      temperature: Number(config.temperature ?? 0.2),
+      max_tokens: Number(config.maxTokens ?? 350),
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  }, Number(config.timeoutMs ?? 15000));
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
+  const payload = JSON.parse(text || '{}');
+  const parsed = JSON.parse(stripJson(payload.choices?.[0]?.message?.content ?? '{}'));
+  return {
+    text: String(parsed.reply ?? '').trim(),
+    providerMetadata: {
+      provider,
+      model,
+      endpoint: redactedEndpoint(url),
+      durationMs: Date.now() - startedAt,
+      usage: payload.usage ?? null,
+    },
+  };
+}
+
 async function callGemini({ config, apiKey, prompt }) {
   const model = config.model ?? defaultModel('google');
   const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
@@ -910,6 +1041,40 @@ async function callGemini({ config, apiKey, prompt }) {
   const payload = JSON.parse(text || '{}');
   return {
     plan: normalizeProviderPlan(JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'))),
+    providerMetadata: {
+      provider: 'google',
+      model,
+      endpoint: redactedEndpoint(endpoint),
+      durationMs: Date.now() - startedAt,
+      usage: payload.usageMetadata ?? null,
+    },
+  };
+}
+
+async function callGeminiReply({ config, apiKey, prompt }) {
+  const model = config.model ?? defaultModel('google');
+  const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const joiner = baseUrl.includes('?') ? '&' : '?';
+  const endpoint = `${baseUrl}${joiner}key=${encodeURIComponent(apiKey)}`;
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      generationConfig: {
+        temperature: Number(config.temperature ?? 0.2),
+        maxOutputTokens: Number(config.maxTokens ?? 350),
+        responseMimeType: 'application/json',
+      },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    }),
+  }, Number(config.timeoutMs ?? 15000));
+  const text = await response.text();
+  if (!response.ok) throw new Error(`google API ${response.status}: ${shorten(text)}`);
+  const payload = JSON.parse(text || '{}');
+  const parsed = JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'));
+  return {
+    text: String(parsed.reply ?? '').trim(),
     providerMetadata: {
       provider: 'google',
       model,

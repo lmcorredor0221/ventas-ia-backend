@@ -32,8 +32,13 @@ export class ToolRegistry {
     this.config = config;
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
+    this.outbox = null;
     this.googleAccessTokenCache = new Map();
     this.liveCatalogCache = new Map();
+  }
+
+  setOutbox(outbox) {
+    this.outbox = outbox;
   }
 
   async call(toolName, tenantId, conversationId, payload = {}) {
@@ -182,10 +187,6 @@ export class ToolRegistry {
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
     await sleep(25);
     const now = new Date().toISOString();
-    const live = await this.liveGoogleContext(tenantId);
-    if (!live && !this.config.allowLocalCatalogFallback) {
-      throw googleConnectionRequiredError('No se pudo registrar el pedido en Google Sheets de esta tienda.');
-    }
     const status = assertOrderStatus(payload.status ?? 'pending_human_preparation');
     const order = {
       id: `ord-${crypto.randomUUID().slice(0, 10)}`,
@@ -199,6 +200,7 @@ export class ToolRegistry {
       paymentMethod: payload.payment_method ?? null,
       paymentMethodLabel: payload.payment_method_label ?? null,
       status,
+      sheetSyncStatus: this.outbox ? 'pending' : 'not_queued',
       createdAt: now,
       updatedAt: now,
       statusHistory: [{ status, at: now, actorId: 'assistant' }],
@@ -208,9 +210,20 @@ export class ToolRegistry {
       state.ordersByTenant[tenantId] ??= [];
       state.ordersByTenant[tenantId].unshift(order);
     });
-    let liveSourceRef = null;
-    if (live) liveSourceRef = await this.appendLiveOrder({ tenantId, live, order });
-    await this.store.persistOrder?.(tenantId, order.id);
+    const projectionEntry = this.outbox?.createEntry({
+      tenantId,
+      kind: 'order.sheet_create',
+      aggregateType: 'order',
+      aggregateId: order.id,
+      idempotencyKey: `order-sheet-create:${order.id}`,
+      payload: { tenantId, orderId: order.id, conversationId },
+    }) ?? null;
+    if (this.store.persistOrderWithOutbox) {
+      await this.store.persistOrderWithOutbox(tenantId, order.id, projectionEntry ? [projectionEntry] : []);
+    } else {
+      await this.store.persistOrder?.(tenantId, order.id);
+      if (projectionEntry) await this.store.enqueueOutbox?.(projectionEntry);
+    }
     this.audit(tenantId, 'tool.google_sheets_order_write', 'order', {
       orderId: order.id,
       conversationId,
@@ -218,7 +231,7 @@ export class ToolRegistry {
       subtotal: order.subtotal,
       itemCount: order.items.length,
     });
-    return { status: 'saved', order, source_ref: liveSourceRef ?? order.id, source: live ? 'google_sheets_live' : 'local_test_fixture' };
+    return { status: 'saved', order, source_ref: order.id, source: projectionEntry ? 'integration_outbox' : 'local_test_fixture' };
   }
 
   async liveGoogleContext(tenantId) {
@@ -366,6 +379,19 @@ export class ToolRegistry {
       values: [orderToSheetRow(order)],
     });
     return 'Pedidos!A:M';
+  }
+
+  async appendOrderProjection({ tenantId, order }) {
+    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live) {
+      if (connection?.status === 'connected' && connection.mode === 'live') {
+        throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión antes de continuar.');
+      }
+      return { status: 'not_connected' };
+    }
+    const sourceRef = await this.appendLiveOrder({ tenantId, live, order });
+    return { status: 'synced', sourceRef };
   }
 
   async syncLiveOrderStatus({ tenantId, order, status, updatedAt }) {
@@ -761,6 +787,46 @@ function buildWhatsAppMessagePayload(payload) {
         components: payload.components ?? [],
       },
     };
+  }
+  if (payload.interactive?.kind === 'button') {
+    const buttons = (payload.interactive.buttons ?? []).slice(0, 3).map((button) => ({
+      type: 'reply',
+      reply: { id: String(button.id).slice(0, 256), title: String(button.title).slice(0, 20) },
+    }));
+    if (buttons.length) {
+      return {
+        messaging_product: 'whatsapp',
+        to: payload.wa_id,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: payload.interactive.body ?? payload.text ?? 'Elige una opción' },
+          action: { buttons },
+        },
+      };
+    }
+  }
+  if (payload.interactive?.kind === 'list') {
+    const rows = (payload.interactive.rows ?? []).slice(0, 10).map((row) => ({
+      id: String(row.id).slice(0, 256),
+      title: String(row.title).slice(0, 24),
+      description: row.description ? String(row.description).slice(0, 72) : undefined,
+    }));
+    if (rows.length) {
+      return {
+        messaging_product: 'whatsapp',
+        to: payload.wa_id,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text: payload.interactive.body ?? payload.text ?? 'Elige una opción' },
+          action: {
+            button: String(payload.interactive.buttonLabel ?? 'Ver opciones').slice(0, 20),
+            sections: [{ title: String(payload.interactive.sectionTitle ?? 'Opciones').slice(0, 24), rows }],
+          },
+        },
+      };
+    }
   }
   return {
     messaging_product: 'whatsapp',

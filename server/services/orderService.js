@@ -83,14 +83,8 @@ export class OrderService {
     }
 
     const now = new Date().toISOString();
-    const sheetSync = this.outbox?.enabled
-      ? await this.enqueueSheetProjection({ order, nextStatus, now, traceId })
-      : await this.tools.syncLiveOrderStatus({
-        tenantId: order.tenantId,
-        order,
-        status: nextStatus,
-        updatedAt: now,
-      });
+    const sheetProjectionEntry = this.createSheetProjectionEntry({ order, nextStatus, now, traceId });
+    const sheetSync = { provider: 'google_sheets', status: sheetProjectionEntry ? 'queued' : 'not_queued' };
     let updatedOrder;
     let conversationChanged = false;
     let dispatchRecipient = null;
@@ -134,7 +128,12 @@ export class OrderService {
         dispatchRecipient = updatedOrder.waId ?? conversation.waId ?? null;
       }
     });
-    await this.store.persistOrder?.(order.tenantId, order.id);
+    if (this.store.persistOrderWithOutbox) {
+      await this.store.persistOrderWithOutbox(order.tenantId, order.id, sheetProjectionEntry ? [sheetProjectionEntry] : []);
+    } else {
+      await this.store.persistOrder?.(order.tenantId, order.id);
+      if (sheetProjectionEntry) await this.store.enqueueOutbox?.(sheetProjectionEntry);
+    }
     if (conversationChanged) {
       await this.store.persistConversation?.(order.conversationId);
     }
@@ -183,8 +182,9 @@ export class OrderService {
     }
   }
 
-  async enqueueSheetProjection({ order, nextStatus, now, traceId }) {
-    await this.outbox.enqueue({
+  createSheetProjectionEntry({ order, nextStatus, now, traceId }) {
+    if (!this.outbox) return null;
+    return this.outbox.createEntry({
       tenantId: order.tenantId,
       kind: 'order.sheet_projection',
       aggregateType: 'order',
@@ -199,7 +199,6 @@ export class OrderService {
         traceId,
       },
     });
-    return { provider: 'google_sheets', status: 'queued' };
   }
 }
 

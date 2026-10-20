@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
+    "worker": "node server/worker.js",
     "test": "npm run test:backend",
     "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/agent-runtime-concurrency.mjs && node server/tests/agent-runtime-failure-contract.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs && node server/tests/whatsapp-embedded-signup-contract.mjs",
     "test:colombia": "node server/tests/colombia-scenarios.mjs",
@@ -13,6 +14,7 @@
     "test:deepseek-real": "node scripts/run-with-env.mjs .env.google.local node server/tests/deepseek-real-scenarios.mjs",
     "test:mercadopago-sandbox": "node scripts/run-with-env.mjs .env.google.local node server/tests/mercadopago-sandbox.mjs",
     "test:postgres": "node server/tests/postgres-smoke.mjs",
+    "test:postgres:local": "powershell -ExecutionPolicy Bypass -File scripts/test-postgres-local.ps1",
     "test:plan": "node server/tests/autoservicio-plan.mjs",
     "test:catalog-import": "node server/tests/catalog-import.mjs",
     "test:architecture": "node server/tests/order-status-contract.mjs && node server/tests/conversation-status-contract.mjs && node server/tests/config-validation.mjs && node server/tests/integration-outbox.mjs && node server/tests/concurrency-contract.mjs && node server/tests/postgres-write-lanes.mjs && node server/tests/tenant-checkout-flow.mjs",

@@ -101,14 +101,14 @@ try {
     whatsappNumber: '+57 300 999 0000',
   }, { expectedStatus: 201 });
   const tenantId = createdTenant.tenant.id;
-  assert.equal(createdTenant.subscription.status, 'pending_payment');
+  assert.equal(createdTenant.subscription.status, 'trial');
 
   const blockedRun = await postJson(`${base}/api/agent/run`, {
     tenantId,
     waId: `57300${suffix.slice(-6)}`,
     profileName: 'Cliente PG Bloqueado',
     text: 'tienes chocoramo?',
-  }, { expectedStatus: 402 });
+  }, { expectedStatus: 428 });
   assert.equal(blockedRun.code, 'tenant_not_operational');
 
   await postJson(`${base}/api/saas/tenants/${tenantId}/subscription/mock-activate`, {});

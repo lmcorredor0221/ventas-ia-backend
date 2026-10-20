@@ -33,7 +33,7 @@ export class AgentRuntime {
     this.manualSweepTimer = null;
   }
 
-  async processInbound(normalized) {
+  async processInbound(normalized, { skipIdempotency = false } = {}) {
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
     normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
     await this.closeExpiredManualCases();
@@ -42,12 +42,12 @@ export class AgentRuntime {
       await this.patchConversation(conversation.id, { traceId: normalized.traceId });
     }
 
-    if (await this.isDuplicate(normalized.messageId)) {
+    if (!skipIdempotency && await this.isDuplicate(normalized.messageId)) {
       return { duplicate: true, conversation };
     }
 
     if (conversation.manualMode === 'whatsapp_external' || conversation.status === 'manual_active') {
-      const claimed = await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+      const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
       if (!claimed) return { duplicate: true, conversation };
       await this.addMessage(conversation.id, {
         role: 'user',
@@ -64,7 +64,7 @@ export class AgentRuntime {
     }
 
     await this.usage?.assertCanProcessInteraction(tenantId, { conversationId: conversation.id });
-    const claimed = await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+    const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
     if (!claimed) return { duplicate: true, conversation };
     this.usage?.recordAgentInteraction(tenantId, {
       conversationId: conversation.id,
@@ -118,7 +118,29 @@ export class AgentRuntime {
     }
   }
 
+  async processQueuedInbound(messageId) {
+    const inbound = await this.store.getInboundMessage?.(messageId);
+    if (!inbound) throw new Error(`Inbound message ${messageId} not found`);
+    if (inbound.status === 'completed') return { duplicate: true, inbound };
+    await this.store.markInboundMessageProcessing?.(messageId);
+    try {
+      const result = await this.processInbound(inbound.payload, { skipIdempotency: true });
+      await this.store.completeInboundMessage?.(messageId, {
+        duplicate: Boolean(result.duplicate),
+        conversationId: result.conversation?.id ?? null,
+        summary: result.result?.summary ?? null,
+      });
+      return result;
+    } catch (error) {
+      await this.store.failInboundMessage?.(messageId, error);
+      throw error;
+    }
+  }
+
   async routeConversation(tenantId, conversationId, normalized) {
+    if (normalized.interactive?.optionId) {
+      return this.handleInteractiveReply({ tenantId, conversationId, normalized });
+    }
     const customerLookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
       wa_id: normalized.waId,
       profile_name: normalized.profileName,
@@ -485,6 +507,20 @@ export class AgentRuntime {
         paymentMethod: selectedPaymentMethod?.id ?? null,
       });
     const canQuote = missingFields.length === 0;
+    const paymentOffer = !requiresHumanResolution && !selectedPaymentMethod && missingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+      : null;
+    const customerReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: reply,
+      facts: {
+        kind: canQuote ? 'order_quote' : 'order_clarification',
+        products: effectiveOrderItems.map((item) => item.product ?? item),
+        subtotal,
+        requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
+      },
+    });
 
     await this.patchConversation(conversationId, {
       stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
@@ -545,7 +581,8 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: reply,
+      text: customerReply,
+      interactive: paymentOffer?.interactive,
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
@@ -654,10 +691,22 @@ export class AgentRuntime {
       orderId: order.order.id,
     });
 
+    const confirmationFallback = `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Subtotal de productos: ${formatCurrency(orderDraft.subtotal ?? 0)}.${paymentLabel ? ` Pago: ${paymentLabel}.` : ''} Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`;
+    const confirmationReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: confirmationFallback,
+      facts: {
+        kind: 'order_confirmed',
+        products: confirmedItems,
+        subtotal: orderDraft.subtotal ?? 0,
+        requiredTerms: [paymentLabel, deliveryAddress, order.order.id].filter(Boolean),
+      },
+    });
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Subtotal de productos: ${formatCurrency(orderDraft.subtotal ?? 0)}.${paymentLabel ? ` Pago: ${paymentLabel}.` : ''} Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
+      text: confirmationReply,
     });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
@@ -724,6 +773,20 @@ export class AgentRuntime {
       paymentMethods,
       paymentMethod: draft.paymentMethod,
     });
+    const paymentOffer = !draft.paymentMethod && draft.missingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+      : null;
+    const customerReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: reply,
+      facts: {
+        kind: canQuote ? 'order_quote' : 'order_clarification',
+        products: draft.items ?? [],
+        subtotal: draft.subtotal,
+        requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
+      },
+    });
 
     await this.patchConversation(conversationId, {
       stage: canQuote ? 'quote' : 'clarification',
@@ -744,7 +807,8 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: reply,
+      text: customerReply,
+      interactive: paymentOffer?.interactive,
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
@@ -1200,6 +1264,101 @@ export class AgentRuntime {
   async getConversation(conversationId) {
     if (this.store.getConversation) return this.store.getConversation(conversationId);
     return this.store.getState().conversations.find((item) => item.id === conversationId);
+  }
+
+  async createPaymentOffer({ tenantId, conversationId, paymentMethods }) {
+    if (!this.store.createInteractionOffer || !paymentMethods.length) return null;
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const options = paymentMethods.map((method, index) => ({
+      id: `vi:${offerId}:${index + 1}`,
+      title: method.label,
+      action: 'set_payment_method',
+      value: method.id,
+    }));
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      purpose: 'payment_method',
+      options,
+      expiresAt,
+    });
+    return {
+      offer,
+      interactive: options.length <= 3
+        ? { kind: 'button', body: '¿Cómo prefieres pagar?', buttons: options.map(({ id, title }) => ({ id, title })) }
+        : {
+          kind: 'list',
+          body: '¿Cómo prefieres pagar?',
+          buttonLabel: 'Elegir pago',
+          sectionTitle: 'Formas de pago',
+          rows: options.map(({ id, title }) => ({ id, title })),
+        },
+    };
+  }
+
+  async handleInteractiveReply({ tenantId, conversationId, normalized }) {
+    const optionId = normalized.interactive?.optionId;
+    const offerId = String(optionId ?? '').match(/^vi:(io-[a-z0-9]+):\d+$/i)?.[1];
+    if (!offerId || !this.store.consumeInteractionOffer) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'No reconocí esa opción. Escríbeme cómo quieres continuar.' });
+    }
+    const result = await this.store.consumeInteractionOffer({ offerId, optionId, tenantId, conversationId });
+    if (result.status !== 'consumed') {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: result.status === 'expired'
+          ? 'Esa opción ya venció. Escríbeme la forma de pago que prefieres y seguimos.'
+          : 'Esa opción ya fue usada o no corresponde a este pedido. Escríbeme cómo quieres continuar.',
+      });
+    }
+    if (result.option?.action !== 'set_payment_method') {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
+    }
+    const conversation = await this.getConversation(conversationId);
+    const tenant = await this.getTenant(tenantId);
+    const paymentMethods = paymentMethodsForTenant(tenant);
+    const draft = structuredClone(conversation?.orderDraft ?? {});
+    draft.paymentMethod = result.option.value;
+    draft.paymentMethodLabel = paymentMethodLabel(result.option.value, paymentMethods);
+    draft.missingFields = (draft.missingFields ?? []).filter((field) => field !== 'payment_method');
+    const fallbackText = `Listo, queda ${draft.paymentMethodLabel} como forma de pago. ${draft.missingFields.length ? 'Aún necesito completar los datos pendientes para continuar.' : `El subtotal es ${formatCurrency(draft.subtotal ?? 0)}. ¿Confirmas el pedido?`}`;
+    await this.patchConversation(conversationId, {
+      orderDraft: draft,
+      stage: draft.missingFields.length ? 'clarification' : 'quote',
+      zone: draft.missingFields.length ? 'agent' : 'quote',
+      nextStep: draft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
+    });
+    const text = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText,
+      facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [draft.paymentMethodLabel] },
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+    });
+    return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: reason,
+    });
+    return { summary: 'Interactive selection rejected safely' };
+  }
+
+  async composeCustomerReply({ tenantId, conversationId, fallbackText, facts }) {
+    if (!this.planner?.composeReply) return fallbackText;
+    const composed = await this.planner.composeReply({ tenantId, conversationId, facts, fallbackText });
+    return composed.text ?? fallbackText;
   }
 
   async getTenant(tenantId) {

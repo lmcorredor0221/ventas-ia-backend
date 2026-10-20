@@ -39,6 +39,12 @@ export const RUNTIME_CONFIG = {
   integrationOutboxEnabled: process.env.INTEGRATION_OUTBOX_ENABLED === 'true',
   integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 5000),
   integrationOutboxBatchSize: Number(process.env.INTEGRATION_OUTBOX_BATCH_SIZE ?? 10),
+  asyncInboundEnabled: (process.env.WHATSAPP_ASYNC_INBOUND_ENABLED ?? process.env.ASYNC_INBOUND_ENABLED) === 'true',
+  backgroundWorkersEnabled: process.env.BACKGROUND_WORKERS_ENABLED
+    ? process.env.BACKGROUND_WORKERS_ENABLED === 'true'
+    : true,
+  integrationOutboxMaxAttempts: Number(process.env.INTEGRATION_OUTBOX_MAX_ATTEMPTS ?? 8),
+  llmResponseComposerEnabled: process.env.LLM_RESPONSE_COMPOSER_ENABLED !== 'false',
 };
 
 export const REQUIRED_EVENTS = [

@@ -73,18 +73,15 @@ try {
     error.statusCode = 503;
     throw error;
   };
-  const originalConsoleError = console.error;
-  console.error = (...args) => {
-    if (args[0]?.message !== 'Hoja no disponible') originalConsoleError(...args);
-  };
+  let lifecycleDispatched;
   try {
-    await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' }, { expectedStatus: 503 });
+    // The order transition is committed locally and the Sheets projection is
+    // deferred. A temporary Sheets outage must not block dispatch.
+    lifecycleDispatched = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' });
   } finally {
-    console.error = originalConsoleError;
+    runtime.tools.syncLiveOrderStatus = originalSyncOrder;
   }
-  assert.equal(store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
-  runtime.tools.syncLiveOrderStatus = originalSyncOrder;
-  const lifecycleDispatched = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' });
+  assert.equal(store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-smoke').status, 'dispatched');
   assert.equal(lifecycleDispatched.status, 'dispatched');
   assert.equal(lifecycleDispatched.sheetSyncStatus, 'pending');
   const lifecycleDelivered = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' });

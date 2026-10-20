@@ -303,6 +303,27 @@ export class PostgresStore {
     }, 'order write');
   }
 
+  // PostgreSQL is the operational source of truth. Persist the order and the
+  // deferred external projection together so a Sheets outage cannot lose it.
+  persistOrderWithOutbox(tenantId, orderId, entries = []) {
+    return this.queueWrite(async () => {
+      const order = (this.getState().ordersByTenant?.[tenantId] ?? []).find((item) => item.id === orderId);
+      if (!order) return;
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await persistOrderOnClient(client, tenantId, orderId, order);
+        for (const entry of entries) await insertOutboxEntry(client, entry);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'order and outbox write');
+  }
+
   persistCustomerProfile(tenantId, waId) {
     return this.queueWrite(async () => {
       const profile = this.getState().customerProfilesByTenant?.[tenantId]?.[waId];
@@ -394,16 +415,163 @@ export class PostgresStore {
 
   enqueueOutbox(entry) {
     return this.queueWrite(async () => {
-      const result = await this.pool.query(
-        `INSERT INTO integration_outbox
-          (id, tenant_id, kind, aggregate_type, aggregate_id, idempotency_key, payload, status, attempts, next_attempt_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', 0, $8, $9)
-         ON CONFLICT (idempotency_key) DO NOTHING
-         RETURNING *`,
-        [entry.id, entry.tenantId, entry.kind, entry.aggregateType, entry.aggregateId, entry.idempotencyKey, JSON.stringify(entry.payload ?? {}), entry.nextAttemptAt, entry.createdAt],
-      );
+      const result = await insertOutboxEntry(this.pool, entry);
       return result.rows[0] ? outboxRow(result.rows[0]) : { ...entry, created: false };
     }, 'outbox enqueue');
+  }
+
+  enqueueInboundMessage(normalized) {
+    if (!normalized?.messageId || !normalized?.tenantId) {
+      throw new Error('Inbound messages require messageId and tenantId');
+    }
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      const now = new Date().toISOString();
+      const entry = createInboundOutboxEntry(normalized, now);
+      try {
+        await client.query('BEGIN');
+        const inserted = await client.query(
+          `INSERT INTO inbound_messages
+            (message_id, tenant_id, provider, phone_number_id, wa_id, message_type, payload, status, received_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'queued', $8)
+           ON CONFLICT (message_id) DO NOTHING
+           RETURNING *`,
+          [
+            normalized.messageId,
+            normalized.tenantId,
+            normalized.provider ?? 'meta_whatsapp_cloud_api',
+            normalized.phoneNumberId ?? null,
+            normalized.waId ?? null,
+            normalized.messageType ?? 'text',
+            JSON.stringify(normalized),
+            now,
+          ],
+        );
+        if (!inserted.rowCount) {
+          const existing = await client.query('SELECT * FROM inbound_messages WHERE message_id = $1', [normalized.messageId]);
+          await client.query('COMMIT');
+          return { created: false, inbound: inboundMessageRow(existing.rows[0]), outbox: null };
+        }
+        await insertOutboxEntry(client, entry);
+        await client.query('COMMIT');
+        return { created: true, inbound: inboundMessageRow(inserted.rows[0]), outbox: entry };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'inbound message enqueue');
+  }
+
+  async getInboundMessage(messageId) {
+    const result = await this.pool.query('SELECT * FROM inbound_messages WHERE message_id = $1', [messageId]);
+    return inboundMessageRow(result.rows[0]);
+  }
+
+  markInboundMessageProcessing(messageId) {
+    return this.updateInboundMessage(messageId, `
+      status = 'processing',
+      attempts = attempts + 1,
+      processing_at = now(),
+      last_error = NULL
+    `, [], 'inbound message processing');
+  }
+
+  completeInboundMessage(messageId, result = null) {
+    return this.updateInboundMessage(messageId, `
+      status = 'completed',
+      completed_at = now(),
+      result = $2::jsonb,
+      last_error = NULL
+    `, [JSON.stringify(result ?? null)], 'inbound message completion');
+  }
+
+  failInboundMessage(messageId, error, { terminal = false } = {}) {
+    return this.updateInboundMessage(messageId, `
+      status = $2,
+      last_error = $3
+    `, [terminal ? 'dead_letter' : 'retrying', error?.message ?? String(error)], 'inbound message failure');
+  }
+
+  updateInboundMessage(messageId, assignments, values, label) {
+    return this.queueWrite(async () => {
+      const result = await this.pool.query(
+        `UPDATE inbound_messages SET ${assignments} WHERE message_id = $1 RETURNING *`,
+        [messageId, ...values],
+      );
+      return inboundMessageRow(result.rows[0]);
+    }, label);
+  }
+
+  createInteractionOffer(offer) {
+    return this.queueWrite(async () => {
+      const result = await this.pool.query(
+        `INSERT INTO interaction_offers (id, tenant_id, conversation_id, order_id, version, status, payload, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $9)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING *`,
+        [
+          offer.id,
+          offer.tenantId,
+          offer.conversationId,
+          offer.orderId ?? null,
+          Number(offer.version ?? 1),
+          offer.status ?? 'active',
+          JSON.stringify({ ...offer, options: offer.options ?? [] }),
+          offer.expiresAt,
+          offer.createdAt ?? new Date().toISOString(),
+        ],
+      );
+      if (result.rows[0]) return interactionOfferRow(result.rows[0]);
+      const existing = await this.pool.query('SELECT * FROM interaction_offers WHERE id = $1', [offer.id]);
+      return interactionOfferRow(existing.rows[0]);
+    }, 'interaction offer create');
+  }
+
+  consumeInteractionOffer({ offerId, optionId, tenantId, conversationId }) {
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const found = await client.query('SELECT * FROM interaction_offers WHERE id = $1 FOR UPDATE', [offerId]);
+        const row = found.rows[0];
+        if (!row) {
+          await client.query('COMMIT');
+          return { status: 'not_found', offer: null };
+        }
+        const offer = interactionOfferRow(row);
+        if (offer.tenantId !== tenantId || offer.conversationId !== conversationId) {
+          await client.query('COMMIT');
+          return { status: 'mismatch', offer };
+        }
+        if (offer.status !== 'active' || new Date(offer.expiresAt).getTime() <= Date.now()) {
+          await client.query('COMMIT');
+          return { status: 'expired', offer };
+        }
+        const option = (offer.options ?? []).find((item) => item.id === optionId);
+        if (!option) {
+          await client.query('COMMIT');
+          return { status: 'invalid_option', offer };
+        }
+        const updated = await client.query(
+          `UPDATE interaction_offers
+           SET status = 'consumed', consumed_at = now(), consumed_option_id = $2, updated_at = now()
+           WHERE id = $1 AND status = 'active'
+           RETURNING *`,
+          [offerId, optionId],
+        );
+        await client.query('COMMIT');
+        return updated.rows[0]
+          ? { status: 'consumed', offer: interactionOfferRow(updated.rows[0]), option }
+          : { status: 'already_consumed', offer };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'interaction offer consume');
   }
 
   async claimOutbox({ limit = 10 } = {}) {
@@ -413,7 +581,8 @@ export class PostgresStore {
         await client.query('BEGIN');
         const result = await client.query(
           `SELECT * FROM integration_outbox
-           WHERE status IN ('pending', 'retrying') AND next_attempt_at <= now()
+           WHERE (status IN ('pending', 'retrying') AND next_attempt_at <= now())
+              OR (status = 'processing' AND locked_at < now() - interval '5 minutes')
            ORDER BY created_at ASC LIMIT $1 FOR UPDATE SKIP LOCKED`,
           [Number(limit) || 10],
         );
@@ -447,17 +616,18 @@ export class PostgresStore {
     ), 'outbox complete');
   }
 
-  failOutbox(id, error) {
+  failOutbox(id, error, { maxAttempts = 8 } = {}) {
     return this.queueWrite(async () => {
       const current = await this.pool.query('SELECT attempts FROM integration_outbox WHERE id = $1', [id]);
       const attempts = Number(current.rows[0]?.attempts ?? 1);
-      const status = attempts >= 8 ? 'failed' : 'retrying';
-      return this.pool.query(
+      const status = attempts >= maxAttempts ? 'failed' : 'retrying';
+      const result = await this.pool.query(
         `UPDATE integration_outbox
          SET status = $2, next_attempt_at = now() + ($3 * interval '1 millisecond'), last_error = $4, locked_at = NULL
-         WHERE id = $1`,
+         WHERE id = $1 RETURNING *`,
         [id, status, exponentialBackoff(attempts), error?.message ?? String(error)],
       );
+      return outboxRow(result.rows[0]);
     }, 'outbox failure');
   }
 
@@ -468,6 +638,8 @@ export class PostgresStore {
         await client.query('BEGIN');
         for (const table of [
           'integration_outbox',
+          'interaction_offers',
+          'inbound_messages',
           'webhook_events',
           'processed_messages',
           'pending_requests',
@@ -657,6 +829,42 @@ function mergeByKey(current, seeded, key) {
   return [...byKey.values()];
 }
 
+async function persistOrderOnClient(client, tenantId, orderId, order) {
+  const result = await upsertOrder(client, tenantId, order, { strictVersion: true, throwOnConflict: false });
+  if (result.rowCount !== 0) return;
+  const current = await client.query('SELECT version, payload FROM orders WHERE id = $1 AND tenant_id = $2', [orderId, tenantId]);
+  const currentPayload = current.rows[0]?.payload ?? {};
+  const sameWrite = Number(current.rows[0]?.version ?? -1) === Number(order.version ?? 0)
+    && currentPayload.status === order.status
+    && currentPayload.updatedAt === order.updatedAt;
+  if (sameWrite) return;
+  const error = new Error('El pedido fue actualizado por otro operador. Recarga la cola e inténtalo de nuevo.');
+  error.code = 'order_version_conflict';
+  error.statusCode = 409;
+  throw error;
+}
+
+function insertOutboxEntry(executor, entry) {
+  return executor.query(
+    `INSERT INTO integration_outbox
+      (id, tenant_id, kind, aggregate_type, aggregate_id, idempotency_key, payload, status, attempts, next_attempt_at, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', 0, $8, $9)
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING *`,
+    [
+      entry.id,
+      entry.tenantId,
+      entry.kind,
+      entry.aggregateType,
+      entry.aggregateId,
+      entry.idempotencyKey,
+      JSON.stringify(entry.payload ?? {}),
+      entry.nextAttemptAt,
+      entry.createdAt,
+    ],
+  );
+}
+
 function outboxRow(row) {
   return {
     id: row.id,
@@ -673,6 +881,64 @@ function outboxRow(row) {
     createdAt: row.created_at,
     lockedAt: row.locked_at,
     processedAt: row.processed_at,
+  };
+}
+
+function inboundMessageRow(row) {
+  if (!row) return null;
+  return {
+    messageId: row.message_id,
+    tenantId: row.tenant_id,
+    provider: row.provider,
+    phoneNumberId: row.phone_number_id,
+    waId: row.wa_id,
+    messageType: row.message_type,
+    payload: row.payload ?? {},
+    status: row.status,
+    attempts: Number(row.attempts ?? 0),
+    receivedAt: row.received_at,
+    processingAt: row.processing_at,
+    completedAt: row.completed_at,
+    lastError: row.last_error,
+    result: row.result ?? null,
+  };
+}
+
+function interactionOfferRow(row) {
+  if (!row) return null;
+  const payload = row.payload ?? {};
+  return {
+    ...payload,
+    id: row.id,
+    tenantId: row.tenant_id,
+    conversationId: row.conversation_id,
+    orderId: row.order_id,
+    version: Number(row.version ?? 1),
+    status: row.status,
+    expiresAt: row.expires_at,
+    consumedAt: row.consumed_at,
+    consumedOptionId: row.consumed_option_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function createInboundOutboxEntry(normalized, now) {
+  return {
+    id: `outbox-inbound-${normalized.messageId}`,
+    tenantId: normalized.tenantId,
+    kind: 'whatsapp.inbound_processing',
+    aggregateType: 'inbound_message',
+    aggregateId: normalized.messageId,
+    idempotencyKey: `inbound:${normalized.messageId}`,
+    payload: { messageId: normalized.messageId },
+    status: 'pending',
+    attempts: 0,
+    nextAttemptAt: now,
+    lastError: null,
+    createdAt: now,
+    lockedAt: null,
+    processedAt: null,
   };
 }
 

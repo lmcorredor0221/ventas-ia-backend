@@ -1,5 +1,6 @@
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_BATCH_SIZE = 10;
+const DEFAULT_MAX_ATTEMPTS = 8;
 
 export class IntegrationOutbox {
   constructor({ store, config = {}, handlers = {} }) {
@@ -8,6 +9,7 @@ export class IntegrationOutbox {
     this.enabled = Boolean(config.integrationOutboxEnabled);
     this.intervalMs = Number(config.integrationOutboxIntervalMs ?? DEFAULT_INTERVAL_MS);
     this.batchSize = Number(config.integrationOutboxBatchSize ?? DEFAULT_BATCH_SIZE);
+    this.maxAttempts = Number(config.integrationOutboxMaxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     this.timer = null;
     this.running = false;
   }
@@ -18,10 +20,10 @@ export class IntegrationOutbox {
     return this;
   }
 
-  async enqueue({ tenantId = null, kind, aggregateType = null, aggregateId = null, idempotencyKey, payload = {} }) {
+  createEntry({ tenantId = null, kind, aggregateType = null, aggregateId = null, idempotencyKey, payload = {} }) {
     if (!kind || !idempotencyKey) throw new Error('Outbox entries require kind and idempotencyKey');
     const now = new Date().toISOString();
-    const entry = {
+    return {
       id: `outbox-${crypto.randomUUID()}`,
       tenantId,
       kind,
@@ -37,7 +39,10 @@ export class IntegrationOutbox {
       lockedAt: null,
       processedAt: null,
     };
-    return this.store.enqueueOutbox(entry);
+  }
+
+  async enqueue(args) {
+    return this.store.enqueueOutbox(this.createEntry(args));
   }
 
   start() {
@@ -63,7 +68,10 @@ export class IntegrationOutbox {
           await this.store.completeOutbox(entry.id, result);
           processed += 1;
         } catch (error) {
-          await this.store.failOutbox(entry.id, error);
+          const failed = await this.store.failOutbox(entry.id, error, { maxAttempts: this.maxAttempts });
+          if (entry.kind === 'whatsapp.inbound_processing' && failed?.status === 'failed') {
+            await this.store.failInboundMessage?.(entry.payload.messageId, error, { terminal: true });
+          }
         }
       }
       return { processed, skipped: false };

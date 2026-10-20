@@ -63,6 +63,7 @@ function createExpressRuntime({ config, store }) {
   const secretVault = new SecretVault({ store });
   const googleWorkspace = new GoogleWorkspaceService({ config });
   const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault });
+  let runtime;
   const integrationOutbox = new IntegrationOutbox({
     store,
     config,
@@ -89,13 +90,36 @@ function createExpressRuntime({ config, store }) {
         }
         return result;
       },
+      'order.sheet_create': async (entry) => {
+        const order = Object.values(store.getState().ordersByTenant ?? {})
+          .flat()
+          .find((item) => item.id === entry.payload.orderId && item.tenantId === entry.payload.tenantId);
+        if (!order) throw new Error(`Order ${entry.payload.orderId} not found for outbox creation`);
+        const result = await tools.appendOrderProjection({ tenantId: entry.payload.tenantId, order });
+        store.mutate((state) => {
+          const current = (state.ordersByTenant?.[entry.payload.tenantId] ?? []).find((item) => item.id === entry.payload.orderId);
+          if (!current) return;
+          current.sheetSyncStatus = result.status === 'synced' ? 'synced' : current.sheetSyncStatus;
+          if (result.status === 'synced') current.sheetSyncedAt = new Date().toISOString();
+          if (result.sourceRef) current.sheetSourceRef = result.sourceRef;
+        });
+        await store.persistOrder?.(entry.payload.tenantId, entry.payload.orderId);
+        return result;
+      },
+      'whatsapp.inbound_processing': async (entry) => {
+        if (!runtime) throw new Error('Inbound worker started before agent runtime initialization');
+        return runtime.processQueuedInbound(entry.payload.messageId);
+      },
     },
   });
+  tools.setOutbox?.(integrationOutbox);
   const orders = new OrderService({ store, events, tools, outbox: integrationOutbox });
   const planner = new LLMPlanner({ store, events, usage, config });
-  const runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders });
-  runtime.start();
-  integrationOutbox.start();
+  runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders });
+  if (config.backgroundWorkersEnabled) {
+    runtime.start();
+    integrationOutbox.start();
+  }
   const controlPlane = new SaasControlPlane({ store, events, config, googleWorkspace, secretVault });
   const auth = new AuthService({ store, events, config });
 
@@ -148,7 +172,7 @@ function createExpressRuntime({ config, store }) {
   app.use('/api/saas', createSaasRouter({ controlPlane, auth }));
   app.use('/api/admin', createAdminRouter({ store, usage, auth, controlPlane }));
   app.use('/api', createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }));
-  app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane }));
+  app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane, config }));
   app.use('/webhooks', createMercadoPagoRouter({ controlPlane, store }));
 
   const distPath = path.join(rootDir, 'dist');

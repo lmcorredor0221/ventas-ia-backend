@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { recordWebhookEvent } from '../services/platformService.js';
 
-export function createWhatsAppRouter({ store, runtime, controlPlane }) {
+export function createWhatsAppRouter({ store, runtime, controlPlane, config = {} }) {
   const router = express.Router();
 
   router.get('/whatsapp', (req, res) => {
@@ -72,6 +72,7 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         }));
         return res.status(200).json({ ok: true, ignored: true, reason: 'whatsapp_tenant_not_found' });
       }
+      controlPlane?.requireTenantOperational(normalized.tenantId);
       if (normalized.messageType === 'delivery_status') {
         recordWebhookEvent(store, webhookRecordFromRequest(req, {
           tenantId: normalized.tenantId,
@@ -90,7 +91,26 @@ export function createWhatsAppRouter({ store, runtime, controlPlane }) {
         }));
         return res.status(200).json({ ok: true, ignored: true, reason: 'delivery_status' });
       }
-      controlPlane?.requireTenantOperational(normalized.tenantId);
+      if (config.asyncInboundEnabled) {
+        const queued = await store.enqueueInboundMessage(normalized);
+        recordWebhookEvent(store, webhookRecordFromRequest(req, {
+          tenantId: normalized.tenantId,
+          eventType: normalized.messageType,
+          externalId: normalized.messageId,
+          status: queued.created ? 'queued' : 'duplicate',
+          httpStatus: 200,
+          durationMs: Date.now() - startedAt,
+          metadata: {
+            duplicate: !queued.created,
+            queue: 'whatsapp.inbound_processing',
+            phoneNumberId: normalized.phoneNumberId,
+            waId: normalized.waId,
+            traceId: normalized.traceId,
+            requestId: req.requestId,
+          },
+        }));
+        return res.status(200).json({ ok: true, queued: queued.created, duplicate: !queued.created });
+      }
       const result = await runtime.processInbound(normalized);
       recordWebhookEvent(store, webhookRecordFromRequest(req, {
         tenantId: normalized.tenantId,
@@ -188,6 +208,8 @@ function normalizeWhatsAppPayload(payload, state) {
 
   if (!message) return null;
   const type = message.type;
+  const interactive = type === 'interactive' ? message.interactive : null;
+  const interactionReply = interactive?.button_reply ?? interactive?.list_reply ?? null;
   return {
     provider: 'meta_whatsapp_cloud_api',
     tenantId: tenant?.id ?? null,
@@ -199,8 +221,16 @@ function normalizeWhatsAppPayload(payload, state) {
     traceId: `wa:${message.id}`,
     timestamp: Number(message.timestamp ?? Date.now() / 1000) * 1000,
     messageType: type,
-    text: type === 'text' ? message.text?.body : message[type]?.caption ?? '',
+    text: type === 'text'
+      ? message.text?.body
+      : interactionReply?.title ?? message[type]?.caption ?? '',
     mediaRef: type === 'image' ? message.image?.id : null,
+    interactive: interactionReply ? {
+      type: interactive.type,
+      optionId: interactionReply.id,
+      title: interactionReply.title ?? '',
+      description: interactionReply.description ?? '',
+    } : null,
     rawPayloadRef: `raw:${message.id}`,
   };
 }
