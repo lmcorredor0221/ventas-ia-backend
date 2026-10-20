@@ -48,6 +48,24 @@ try {
   await postJson(`${base}/api/pending-requests/request-lifecycle-smoke/resolve`, { outcome: 'approved', responseMode: 'none' });
   const lifecyclePreparing = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.equal(lifecyclePreparing.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
+
+  // A customer may place another order in the same conversation. A resolved
+  // task for the old order must not put the new pending task into "preparing".
+  store.mutate((state) => {
+    state.ordersByTenant.andina.unshift({
+      id: 'order-lifecycle-follow-up-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      waId: '573001111111', customerName: 'Ana', deliveryAddress: 'Calle 10',
+      items: [{ name: 'Leche', quantity: 1 }], subtotal: 6000,
+      status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    state.pendingRequests.unshift({
+      id: 'request-lifecycle-follow-up-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      action: 'prepare_delivery_order', status: 'pending', title: 'Alistar domicilio confirmado',
+      contextSnapshot: { orderId: 'order-lifecycle-follow-up-smoke', action: 'prepare_delivery_order' },
+    });
+  });
+  const lifecycleFollowUp = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(lifecycleFollowUp.orders.find((order) => order.id === 'order-lifecycle-follow-up-smoke').status, 'pending_human_preparation');
   await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' }, { expectedStatus: 409 });
   const originalSyncOrder = runtime.tools.syncLiveOrderStatus.bind(runtime.tools);
   runtime.tools.syncLiveOrderStatus = async () => {
@@ -410,6 +428,63 @@ try {
   assert.deepEqual(namedOrder.items.map((item) => item.name), ['Coca-Cola original', 'Ponque Chocoramo']);
   const namedOrderRequest = store.getState().pendingRequests.find((item) => item.conversationId === 'wa-confirmed-name-smoke');
   assert.deepEqual(namedOrderRequest.contextSnapshot.items.map((item) => item.name), ['Coca-Cola original', 'Ponque Chocoramo']);
+
+  // Planner tool steps can be malformed or repeated. Each line must honor its
+  // own SKU hint, otherwise a price from one product can leak into another.
+  store.mutate((state) => {
+    state.productsByTenant.andina.push(
+      { sku: 'PRICE-COC-1500', name: 'Coca-Cola original 1.5 L', aliases: ['coca cola 1.5', 'coca litro y medio'], price: 7200, stock: 24, category: 'Gaseosas', presentation: '1.5 L' },
+      { sku: 'PRICE-CHO-065', name: 'Chocoramo', aliases: ['chocorramo', 'chocoramo'], price: 2800, stock: 55, category: 'Ponques y paquetes', presentation: '65 g' },
+    );
+    state.conversations.unshift({
+      id: 'wa-line-price-smoke', tenantId: 'andina', waId: '573001112259', customer: 'Precio correcto',
+      status: 'live', stage: 'agent', zone: 'agent', messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId: 'andina',
+    conversationId: 'wa-line-price-smoke',
+    normalized: { waId: '573001112259', profileName: 'Precio correcto', text: 'Una Coca-Cola litro y medio y un chocorramo para domicilio' },
+    customerProfile: { name: 'Precio correcto', defaultAddress: 'Calle 12' },
+    plan: {
+      intent: 'delivery_order',
+      missingFields: [],
+      order: {
+        delivery: true,
+        paymentMethod: 'breb',
+        items: [
+          { rawName: 'Coca-Cola litro y medio', catalogQuery: 'Coca-Cola 1.5', skuHint: 'PRICE-COC-1500', quantity: 1, requestedPresentation: '1.5 litros' },
+          { rawName: 'chocorramo', catalogQuery: 'Chocoramo', skuHint: 'PRICE-CHO-065', quantity: 1 },
+        ],
+      },
+      toolPlan: [
+        { tool: 'google_sheets_read_table', filters: { sku: 'PRICE-COC-1500' } },
+        { tool: 'google_sheets_read_table', filters: { sku: 'PRICE-COC-1500' } },
+      ],
+    },
+  });
+  const priceDraft = store.getState().conversations.find((item) => item.id === 'wa-line-price-smoke').orderDraft;
+  assert.deepEqual(priceDraft.items.map((item) => item.product.sku), ['PRICE-COC-1500', 'PRICE-CHO-065']);
+  assert.equal(priceDraft.subtotal, 10000);
+
+  // Historical orders with missing line amounts are displayed using their own
+  // catalog SKU, so an old bad subtotal cannot mislead the shopkeeper.
+  store.mutate((state) => {
+    state.ordersByTenant.andina.unshift({
+      id: 'legacy-price-display-smoke', tenantId: 'andina', conversationId: 'wa-legacy-price-display-smoke',
+      waId: '573001112259', customerName: 'Precio legado', deliveryAddress: 'Calle 12',
+      items: [
+        { sku: 'PRICE-COC-1500', name: 'PRICE-COC-1500', quantity: 1, unitPrice: null, lineTotal: null },
+        { sku: 'PRICE-CHO-065', name: 'PRICE-CHO-065', quantity: 1, unitPrice: null, lineTotal: null },
+      ],
+      subtotal: 14400, status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+  });
+  const repairedPriceOverview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  const repairedPriceOrder = repairedPriceOverview.orders.find((item) => item.id === 'legacy-price-display-smoke');
+  assert.deepEqual(repairedPriceOrder.items.map((item) => item.name), ['Coca-Cola original 1.5 L', 'Chocoramo']);
+  assert.deepEqual(repairedPriceOrder.items.map((item) => item.lineTotal), [7200, 2800]);
+  assert.equal(repairedPriceOrder.subtotal, 10000);
 
   // Older confirmed orders may have stored their SKU as the item name. The
   // operations API repairs that display-only representation from the catalog.

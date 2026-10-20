@@ -778,9 +778,7 @@ export class AgentRuntime {
       || currentRequest.assignedTeam === 'operaciones'
       || /pedido|domicilio/i.test(currentRequest.title ?? '');
     const currentOrder = isDeliveryOrder
-      ? (currentState.ordersByTenant?.[currentRequest.tenantId] ?? []).find((item) => (
-        item.id === currentRequest.contextSnapshot?.orderId || item.conversationId === currentRequest.conversationId
-      ))
+      ? findOrderForDeliveryRequest(currentState, currentRequest)
       : null;
     const orderStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
     const sheetSync = currentOrder && !this.orders
@@ -1261,12 +1259,15 @@ function catalogSearchesFromPlan(plan, catalogItems, text) {
 }
 
 function deliveryItemFiltersFromPlan(plan, item, index) {
+  // The order item is already bound to this catalog SKU. It is more reliable
+  // than a planner tool step that may accidentally be reused for another line.
+  if (item.skuHint) return { sku: item.skuHint };
   const planned = (plan.toolPlan ?? []).find((step) =>
     step.tool === 'google_sheets_read_table' &&
     (step.candidateIndex === index || step.candidate === item.catalogQuery || step.candidate === item.rawName)
   );
   if (planned?.filters && Object.keys(planned.filters).length) return planned.filters;
-  return item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(item.catalogQuery ?? item.rawName);
+  return inferCatalogFilter(item.catalogQuery ?? item.rawName);
 }
 
 function isAdditiveOrderText(text) {
@@ -1322,6 +1323,14 @@ function resolveHumanReplyWaId(state, request, conversation) {
     item.conversationId === request?.conversationId || item.id === request?.contextSnapshot?.orderId || item.id === request?.context_snapshot?.orderId
   ));
   return order?.waId ?? null;
+}
+
+function findOrderForDeliveryRequest(state, request) {
+  const snapshot = request?.contextSnapshot ?? request?.context_snapshot ?? {};
+  const orderId = snapshot.orderId ?? snapshot.order_id;
+  return (state.ordersByTenant?.[request?.tenantId] ?? []).find((order) => (
+    orderId ? order.id === orderId : order.conversationId === request?.conversationId
+  )) ?? null;
 }
 
 function orderItemKey(item) {

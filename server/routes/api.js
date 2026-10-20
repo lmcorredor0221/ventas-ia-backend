@@ -167,7 +167,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
       const state = store.getState();
       const tenantOrders = (state.ordersByTenant?.[tenantId] ?? []).map((order) => ({
         ...enrichOrderForDisplay(order, state),
-        status: orders.effectiveStatus(order, state.pendingRequests),
+        status: orders.effectiveStatus(order, pendingRequests),
       }));
       const usageSummary = tenantId ? await usage.summary(tenantId) : null;
       res.json({
@@ -378,8 +378,9 @@ function enrichPendingRequests(requests, state) {
       || title.includes('pedido')
       || title.includes('domicilio');
     if (!looksLikeDelivery) return request;
+    const requestOrderId = snapshot.orderId ?? snapshot.order_id;
     const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => (
-      item.id === snapshot.orderId || item.conversationId === request.conversationId
+      requestOrderId ? item.id === requestOrderId : item.conversationId === request.conversationId
     ));
     if (!order) return request;
     const displayOrder = enrichOrderForDisplay(order, state);
@@ -406,19 +407,35 @@ function enrichOrderForDisplay(order, state) {
   const productsBySku = new Map(
     (state.productsByTenant?.[order.tenantId] ?? []).map((product) => [product.sku, product]),
   );
+  const items = (order.items ?? []).map((item) => {
+    const product = productsBySku.get(item.sku ?? item.skuHint);
+    const currentName = String(item.name ?? item.catalogQuery ?? '').trim();
+    const technicalName = !currentName
+      || currentName === item.sku
+      || currentName === item.skuHint
+      || /^producto(?:\s+por\s+validar)?$/i.test(currentName);
+    const quantity = Number(item.quantity ?? 1) || 1;
+    const unitPrice = Number.isFinite(Number(item.unitPrice)) && Number(item.unitPrice) > 0
+      ? Number(item.unitPrice)
+      : Number(product?.price ?? 0) || null;
+    const lineTotal = Number.isFinite(Number(item.lineTotal)) && Number(item.lineTotal) > 0
+      ? Number(item.lineTotal)
+      : unitPrice ? unitPrice * quantity : null;
+    return {
+      ...item,
+      name: technicalName ? ((product?.name ?? currentName) || 'Producto por validar') : currentName,
+      unitPrice,
+      lineTotal,
+    };
+  });
+  const needsPriceRepair = (order.items ?? []).some((item) => (
+    !Number.isFinite(Number(item.unitPrice)) || Number(item.unitPrice) <= 0
+    || !Number.isFinite(Number(item.lineTotal)) || Number(item.lineTotal) <= 0
+  ));
+  const reconstructedSubtotal = items.reduce((sum, item) => sum + Number(item.lineTotal ?? 0), 0);
   return {
     ...order,
-    items: (order.items ?? []).map((item) => {
-      const product = productsBySku.get(item.sku ?? item.skuHint);
-      const currentName = String(item.name ?? item.catalogQuery ?? '').trim();
-      const technicalName = !currentName
-        || currentName === item.sku
-        || currentName === item.skuHint
-        || /^producto(?:\s+por\s+validar)?$/i.test(currentName);
-      return {
-        ...item,
-        name: technicalName ? ((product?.name ?? currentName) || 'Producto por validar') : currentName,
-      };
-    }),
+    items,
+    subtotal: needsPriceRepair && reconstructedSubtotal > 0 ? reconstructedSubtotal : order.subtotal,
   };
 }

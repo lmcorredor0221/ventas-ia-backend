@@ -22,11 +22,8 @@ export class OrderService {
     if (status !== ORDER_STATUSES.PENDING_HUMAN_PREPARATION) return status;
     const decision = requests.find((request) => (
       request.tenantId === order.tenantId
-      && (request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId)
-      && (request.action === 'prepare_delivery_order'
-        || request.contextSnapshot?.action === 'prepare_delivery_order'
-        || request.assignedTeam === 'operaciones'
-        || /pedido|domicilio/i.test(request.title ?? ''))
+      && deliveryRequestMatchesOrder(request, order)
+      && isDeliveryPreparationRequest(request)
       && ['resolved', 'denied'].includes(request.status)
     ));
     return decision?.status === 'resolved'
@@ -40,11 +37,8 @@ export class OrderService {
     return requests.find((request) => (
       request.tenantId === order.tenantId
       && request.status === 'pending'
-      && (request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId)
-      && (request.action === 'prepare_delivery_order'
-        || request.contextSnapshot?.action === 'prepare_delivery_order'
-        || request.assignedTeam === 'operaciones'
-        || /pedido|domicilio/i.test(request.title ?? ''))
+      && deliveryRequestMatchesOrder(request, order)
+      && isDeliveryPreparationRequest(request)
     )) ?? null;
   }
 
@@ -211,4 +205,23 @@ export class OrderService {
     });
     return { provider: 'google_sheets', status: 'queued' };
   }
+}
+
+function requestSnapshot(request) {
+  return request?.contextSnapshot ?? request?.context_snapshot ?? {};
+}
+
+function deliveryRequestMatchesOrder(request, order) {
+  const requestOrderId = requestSnapshot(request).orderId ?? requestSnapshot(request).order_id;
+  // A conversation can contain several historical orders. Once a handoff has
+  // an order id, it must never be allowed to advance another order in that chat.
+  return requestOrderId ? requestOrderId === order.id : request?.conversationId === order.conversationId;
+}
+
+function isDeliveryPreparationRequest(request) {
+  const snapshot = requestSnapshot(request);
+  return request.action === 'prepare_delivery_order'
+    || snapshot.action === 'prepare_delivery_order'
+    || request.assignedTeam === 'operaciones'
+    || /pedido|domicilio/i.test(request.title ?? '');
 }
