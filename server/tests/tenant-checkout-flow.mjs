@@ -77,6 +77,62 @@ try {
   assert.equal(conversation.status, 'closed_dispatched');
   assert.equal(conversation.caseStatus, 'completed');
 
+  // Persisting the order is the acknowledgement boundary for an operator action.
+  // Event snapshots may be slow, so they must never keep "Marcar tomado" waiting.
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: 'conv-fast-take',
+      tenantId: 'andina',
+      waId: '573219450893',
+      customer: 'Cliente de prueba',
+      status: 'approval_required',
+      caseStatus: 'active',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    state.ordersByTenant.andina.unshift({
+      id: 'ord-fast-take',
+      tenantId: 'andina',
+      conversationId: 'conv-fast-take',
+      waId: '573219450893',
+      customerName: 'Cliente de prueba',
+      status: 'pending_human_preparation',
+      statusHistory: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  let emitted = 0;
+  const fastTakeService = new OrderService({
+    store,
+    events: {
+      emit: () => {
+        emitted += 1;
+        return { id: 'evt-fast-take' };
+      },
+      emitAndWait: () => new Promise(() => {}),
+    },
+    tools: {
+      async syncLiveOrderStatus() {
+        return { provider: 'google_sheets', status: 'synced' };
+      },
+    },
+  });
+  const fastTake = await Promise.race([
+    fastTakeService.transition({
+      orderId: 'ord-fast-take',
+      tenantId: 'andina',
+      nextStatus: 'preparing',
+      actorId: 'owner-test',
+      allowPendingRequest: true,
+    }).then(() => 'completed'),
+    new Promise((resolve) => setTimeout(() => resolve('timed_out'), 100)),
+  ]);
+  assert.equal(fastTake, 'completed');
+  assert.equal(emitted, 1);
+
   console.log('Tenant checkout flow contract tests passed');
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });

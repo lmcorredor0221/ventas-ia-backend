@@ -141,21 +141,17 @@ export class OrderService {
     const notification = nextStatus === ORDER_STATUSES.DISPATCHED
       ? await this.notifyDispatch({ order: updatedOrder, recipient: dispatchRecipient })
       : { status: 'not_applicable' };
-    const event = this.events?.emitAndWait
-      ? await this.events.emitAndWait({
+    // The order and its conversation have already been persisted above. Event
+    // snapshots are observability work and must not make the operator wait.
+    const event = this.events?.emit
+      ? this.events.emit({
       type: `order.${nextStatus}`,
       tenantId: order.tenantId,
       conversationId: order.conversationId,
       detail: `Pedido ${order.id}: ${nextStatus}`,
       metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status, notificationStatus: notification.status },
       })
-      : this.events?.emit({
-        type: `order.${nextStatus}`,
-        tenantId: order.tenantId,
-        conversationId: order.conversationId,
-        detail: `Pedido ${order.id}: ${nextStatus}`,
-        metadata: { orderId: order.id, actorId, source, traceId, previousStatus, projectionStatus: sheetSync.status, notificationStatus: notification.status },
-      });
+      : null;
     return {
       order: updatedOrder,
       previousStatus,
