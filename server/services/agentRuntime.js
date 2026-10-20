@@ -521,6 +521,9 @@ export class AgentRuntime {
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
+    const paymentInteractive = paymentOffer?.interactive
+      ? { ...paymentOffer.interactive, body: customerReply }
+      : undefined;
 
     await this.patchConversation(conversationId, {
       stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
@@ -582,7 +585,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentOffer?.interactive,
+      interactive: paymentInteractive,
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
@@ -787,6 +790,9 @@ export class AgentRuntime {
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
+    const paymentInteractive = paymentOffer?.interactive
+      ? { ...paymentOffer.interactive, body: customerReply }
+      : undefined;
 
     await this.patchConversation(conversationId, {
       stage: canQuote ? 'quote' : 'clarification',
@@ -808,7 +814,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentOffer?.interactive,
+      interactive: paymentInteractive,
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
