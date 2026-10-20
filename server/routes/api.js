@@ -225,6 +225,25 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     }
   });
 
+  router.post('/tenants/:tenantId/operational-data/purge', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      if (req.body?.confirmation !== 'PURGE') {
+        return res.status(400).json({ error: 'Confirmación requerida: usa confirmation="PURGE".' });
+      }
+      const result = await runtime.purgeTenantOperationalData(req.params.tenantId);
+      auth.recordTenantAction(req, {
+        tenantId: req.params.tenantId,
+        action: 'tenant.operational_data.purged',
+        resource: 'operational_data',
+        metadata: result.deleted,
+      });
+      return res.json({ status: 'purged', ...result });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/agent/run', async (req, res, next) => {
     try {
       const tenantId = req.body?.tenantId ?? store.getState().tenants[0]?.id;

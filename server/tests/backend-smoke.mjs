@@ -1089,6 +1089,15 @@ try {
   });
   assert.equal(activatedRun.duplicate, false);
 
+  await postJson(`${base}/api/tenants/${createdTenant.tenant.id}/operational-data/purge`, {}, { expectedStatus: 400 });
+  const purge = await postJson(`${base}/api/tenants/${createdTenant.tenant.id}/operational-data/purge`, { confirmation: 'PURGE' });
+  assert.equal(purge.status, 'purged');
+  assert.ok(purge.deleted.conversations >= 1);
+  assert.equal((await getJson(`${base}/api/ops/overview?tenantId=${createdTenant.tenant.id}`)).conversations.length, 0);
+  assert.equal(store.getState().ordersByTenant[createdTenant.tenant.id].length, 0);
+  assert.equal(store.getState().pendingRequests.some((request) => request.tenantId === createdTenant.tenant.id), false);
+  assert.deepEqual(store.getState().customerProfilesByTenant[createdTenant.tenant.id], {});
+
   const auditActions = new Set(store.getState().auditEvents.map((event) => event.action));
   for (const action of [
     'subscription.checkout.created',

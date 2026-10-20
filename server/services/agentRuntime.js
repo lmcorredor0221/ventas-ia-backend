@@ -970,6 +970,48 @@ export class AgentRuntime {
     return { id: conversationId, tenantId: conversation.tenantId, removedPendingRequestIds: removedRequestIds };
   }
 
+  async purgeTenantOperationalData(tenantId) {
+    const state = this.store.getState();
+    const profileCount = Object.keys(state.customerProfilesByTenant?.[tenantId] ?? {}).length;
+    const removedMessageIds = new Set(
+      Object.entries(state.processedMessagePayloads ?? {})
+        .filter(([, payload]) => payload?.tenantId === tenantId)
+        .map(([messageId]) => messageId),
+    );
+    const deleted = {
+      conversations: (state.conversations ?? []).filter((item) => item.tenantId === tenantId).length,
+      orders: (state.ordersByTenant?.[tenantId] ?? []).length,
+      pendingRequests: (state.pendingRequests ?? []).filter((item) => item.tenantId === tenantId).length,
+      customerProfiles: profileCount,
+      transactions: (state.transactions ?? []).filter((item) => item.tenantId === tenantId).length,
+      events: (state.events ?? []).filter((item) => item.tenantId === tenantId).length,
+      webhookEvents: (state.webhookEvents ?? []).filter((item) => item.tenantId === tenantId).length,
+      outbox: (state.integrationOutbox ?? []).filter((item) => item.tenantId === tenantId).length,
+      processedMessages: removedMessageIds.size,
+    };
+
+    this.store.mutate((next) => {
+      next.conversations = (next.conversations ?? []).filter((item) => item.tenantId !== tenantId);
+      next.ordersByTenant ??= {};
+      next.ordersByTenant[tenantId] = [];
+      next.pendingRequests = (next.pendingRequests ?? []).filter((item) => item.tenantId !== tenantId);
+      next.customerProfilesByTenant ??= {};
+      next.customerProfilesByTenant[tenantId] = {};
+      next.transactions = (next.transactions ?? []).filter((item) => item.tenantId !== tenantId);
+      next.events = (next.events ?? []).filter((item) => item.tenantId !== tenantId);
+      next.webhookEvents = (next.webhookEvents ?? []).filter((item) => item.tenantId !== tenantId);
+      next.integrationOutbox = (next.integrationOutbox ?? []).filter((item) => item.tenantId !== tenantId);
+      next.usageCountersByTenant ??= {};
+      delete next.usageCountersByTenant[tenantId];
+      next.processedMessages = (next.processedMessages ?? []).filter((messageId) => !removedMessageIds.has(messageId));
+      for (const messageId of removedMessageIds) delete next.processedMessagePayloads?.[messageId];
+    });
+    if (this.store.purgeTenantOperationalData) {
+      await this.store.purgeTenantOperationalData(tenantId);
+    }
+    return { tenantId, deleted };
+  }
+
   async ensureConversation(tenantId, normalized) {
     const key = `${tenantId}:${normalized.waId}`;
     const inFlight = this.conversationEnsureLocks.get(key);

@@ -457,6 +457,42 @@ export class PostgresStore {
     }, 'outbox failure');
   }
 
+  purgeTenantOperationalData(tenantId) {
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const table of [
+          'integration_outbox',
+          'webhook_events',
+          'processed_messages',
+          'pending_requests',
+          'transactions',
+          'orders',
+          'customer_profiles',
+          'conversations',
+          'events',
+          'usage_counters',
+        ]) {
+          await client.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]);
+        }
+        const state = this.getState();
+        await client.query(
+          `UPDATE app_state
+           SET document = $2::jsonb, schema_version = $3, updated_at = now()
+           WHERE id = $1`,
+          ['runtime', JSON.stringify(state), state.schemaVersion ?? 'unknown'],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'tenant operational purge');
+  }
+
   listOutbox({ status, limit = 100 } = {}) {
     const values = [];
     const clauses = [];
