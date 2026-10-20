@@ -1,7 +1,7 @@
 import express from 'express';
 import { mergeTenantConfig, sanitizeOwnerConfigPatch } from '../services/tenantConfigPolicy.js';
 
-export function createApiRouter({ store, events, runtime, tools, controlPlane, usage, auth }) {
+export function createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }) {
   const router = express.Router();
 
   router.get('/tenants', async (req, res, next) => {
@@ -19,7 +19,10 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
   router.get('/conversations', async (req, res, next) => {
     try {
       const scope = authorizeTenantQuery(auth, req, req.query.tenantId);
-      const conversations = await readConversations(store, { tenantId: req.query.tenantId });
+      const conversations = await readConversations(store, {
+        tenantId: req.query.tenantId,
+        includeClosed: req.query.includeClosed === 'true',
+      });
       res.json(filterTenantScoped(conversations, scope));
     } catch (error) {
       next(error);
@@ -32,6 +35,36 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
       if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
       auth.authorizeTenant(req, conversation.tenantId);
       return res.json(conversation);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/conversations/:id/manual-whatsapp', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
+      const updated = await runtime.activateManualWhatsApp(req.params.id, { actorId: req.auth?.user?.id ?? 'local-admin' });
+      return res.json(updated);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.delete('/conversations/:id', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner'] });
+      const deleted = await runtime.deleteConversation(req.params.id, { actorId: req.auth?.user?.id ?? 'local-owner' });
+      auth.recordTenantAction(req, {
+        tenantId: deleted.tenantId,
+        action: 'conversation.deleted',
+        resource: deleted.id,
+        metadata: { removedPendingRequestIds: deleted.removedPendingRequestIds },
+      });
+      return res.json({ status: 'deleted', ...deleted });
     } catch (error) {
       next(error);
     }
@@ -89,37 +122,67 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
     }
   });
 
+  router.patch('/orders/:id/status', async (req, res, next) => {
+    try {
+      const state = store.getState();
+      const order = orders?.findOrder(req.params.id) ?? Object.values(state.ordersByTenant ?? {}).flat().find((item) => item.id === req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const nextStatus = req.body?.status;
+      const actorId = req.auth?.user?.id ?? 'local-owner';
+      if (!orders) return res.status(500).json({ error: 'Order service is not configured.' });
+      const traceId = req.requestId ?? req.get('x-request-id') ?? `order:${order.id}:${Date.now()}`;
+      const transition = await orders.transition({ orderId: order.id, tenantId: order.tenantId, nextStatus, actorId, source: 'api', traceId });
+      auth.recordTenantAction(req, { tenantId: order.tenantId, action: `order.${nextStatus}`, resource: order.id, metadata: { eventId: transition.eventId, projectionStatus: transition.projection.status } });
+      return res.json({ ...transition.order, transition: { previousStatus: transition.previousStatus, status: transition.status, projection: transition.projection, eventId: transition.eventId } });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.get('/ops/overview', async (req, res, next) => {
     try {
       const tenants = await readTenants(store);
       const visibleTenants = auth.filterTenantsForRequest(req, tenants);
       const tenantId = req.query.tenantId ?? visibleTenants[0]?.id;
       if (tenantId) auth.authorizeTenant(req, tenantId);
-      const conversations = await readConversations(store, { tenantId });
+      const allConversations = await readConversations(store, { tenantId, includeClosed: true });
+      const conversations = req.query.includeClosed === 'true'
+        ? allConversations
+        : allConversations.filter(isInboxConversation);
       const pendingRequests = enrichPendingRequests(
         (await readPendingRequests(store, { tenantId })).filter((item) => item.status === 'pending'),
         store.getState(),
       );
       const filteredEvents = await events.list({ tenantId, limit: 50 });
       const state = store.getState();
+      const tenantOrders = (state.ordersByTenant?.[tenantId] ?? []).map((order) => ({
+        ...order,
+        status: orders.effectiveStatus(order, state.pendingRequests),
+      }));
       const usageSummary = tenantId ? await usage.summary(tenantId) : null;
       res.json({
-      tenants: visibleTenants,
-      tenant: visibleTenants.find((item) => item.id === tenantId),
-      conversations,
-      pendingRequests,
-      events: filteredEvents,
-      usage: usageSummary,
-      tools: deriveTenantToolStatuses(state, tenantId),
-      metrics: {
-        active: conversations.filter((item) => ['live', 'degraded'].includes(item.status)).length,
-        completed: conversations.filter((item) => item.status === 'completed').length,
-        pending: pendingRequests.length,
-        failed: conversations.filter((item) => ['blocked', 'degraded'].includes(item.status)).length,
-        response: 'contract',
-        conversion: `${Math.round((conversations.filter((item) => item.value !== 'Pendiente').length / Math.max(conversations.length, 1)) * 100)}%`,
-      },
-    });
+        tenants: visibleTenants,
+        tenant: visibleTenants.find((item) => item.id === tenantId),
+        conversations,
+        conversationHistory: allConversations.filter(isClosedCase),
+        orders: [
+          ...tenantOrders.filter((order) => !['delivered', 'cancelled'].includes(order.status)),
+          ...tenantOrders.filter((order) => ['delivered', 'cancelled'].includes(order.status)).slice(0, 200),
+        ],
+        pendingRequests,
+        events: filteredEvents,
+        usage: usageSummary,
+        tools: deriveTenantToolStatuses(state, tenantId),
+        metrics: {
+          active: allConversations.filter((item) => ['live', 'degraded', 'manual_active'].includes(item.status)).length,
+          completed: allConversations.filter((item) => isClosedCase(item)).length,
+          pending: pendingRequests.length,
+          failed: allConversations.filter((item) => ['blocked', 'degraded'].includes(item.status)).length,
+          response: 'contract',
+          conversion: `${Math.round((allConversations.filter((item) => item.value !== 'Pendiente').length / Math.max(allConversations.length, 1)) * 100)}%`,
+        },
+      });
     } catch (error) {
       next(error);
     }
@@ -169,6 +232,7 @@ export function createApiRouter({ store, events, runtime, tools, controlPlane, u
         messageType: req.body?.messageType ?? 'text',
         text: req.body?.text ?? '',
         mediaRef: req.body?.mediaRef ?? null,
+        interactive: req.body?.interactive ?? null,
         rawPayloadRef: 'local_api',
       });
       res.json(result);
@@ -252,9 +316,21 @@ async function readTenants(store) {
   return store.listTenants ? store.listTenants() : store.getState().tenants;
 }
 
-async function readConversations(store, { tenantId } = {}) {
-  if (store.listConversations) return store.listConversations({ tenantId });
-  return store.getState().conversations.filter((item) => !tenantId || item.tenantId === tenantId);
+async function readConversations(store, { tenantId, includeClosed = true } = {}) {
+  if (store.listConversations) {
+    const conversations = await store.listConversations({ tenantId });
+    return includeClosed ? conversations : conversations.filter(isInboxConversation);
+  }
+  const conversations = store.getState().conversations.filter((item) => !tenantId || item.tenantId === tenantId);
+  return includeClosed ? conversations : conversations.filter(isInboxConversation);
+}
+
+function isClosedCase(conversation) {
+  return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+}
+
+function isInboxConversation(conversation) {
+  return !isClosedCase(conversation);
 }
 
 async function readConversation(store, conversationId) {
@@ -310,4 +386,3 @@ function enrichPendingRequests(requests, state) {
     };
   });
 }
-

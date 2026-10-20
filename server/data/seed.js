@@ -52,6 +52,17 @@ export function createSeedState() {
           customerProfileStore: 'google_sheets',
           confirmedOrderStore: 'google_sheets',
           confirmedOrderHandoff: 'preparation_and_delivery',
+          paymentMethods: [
+            { id: 'cash', label: 'Efectivo', enabled: true },
+            { id: 'card_terminal', label: 'Tarjeta', enabled: true },
+            { id: 'bre_b', label: 'Bre-B', enabled: true },
+          ],
+        },
+        agentPolicy: {
+          tone: 'tendero_colombiano',
+          responseLanguage: 'es-CO',
+          missingQuantity: 'ask',
+          humanEscalation: true,
         },
         secretsPolicy: 'references_only_no_plaintext_values',
       },
@@ -128,6 +139,8 @@ export function createSeedState() {
       metadata: { source: 'initial_seed' },
     })),
     processedMessages: [],
+    processedMessagePayloads: {},
+    integrationOutbox: [],
     transactions: [],
   };
 }

@@ -1,6 +1,8 @@
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
+  ['agentPolicy', new Set(['tone'])],
+  ['orderPolicy', new Set(['paymentMethods'])],
 ]);
 
 const ADMIN_EDITABLE_SECTIONS = new Map([
@@ -12,7 +14,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['googleDrive', new Set(['rootFolderRef', 'customerProfileFolderRef', 'filePolicyRef', 'refreshMode', 'allowedMimeTypes'])],
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
   ['agentPolicy', new Set(['tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
-  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff'])],
+  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
   ['secretsPolicy', null],
 ]);
 
@@ -81,6 +83,27 @@ export function mergeTenantConfig(base, patch) {
 }
 
 function normalizeOwnerField(section, field, value) {
+  if (section === 'agentPolicy' && field === 'tone') {
+    const normalizedTone = String(value ?? '').trim();
+    if (!['tendero_colombiano', 'formal_neutral'].includes(normalizedTone)) {
+      throw configError('agentPolicy.tone debe ser tendero_colombiano o formal_neutral.');
+    }
+    return normalizedTone;
+  }
+  if (section === 'orderPolicy' && field === 'paymentMethods') {
+    if (!Array.isArray(value) || value.length === 0) {
+      throw configError('orderPolicy.paymentMethods debe incluir al menos una forma de pago.');
+    }
+    const seen = new Set();
+    return value.map((method) => {
+      if (!isPlainObject(method)) throw configError('Cada forma de pago debe incluir id, nombre y estado.');
+      const id = String(method.id ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      const label = String(method.label ?? '').trim().slice(0, 24);
+      if (!id || !label || seen.has(id)) throw configError('Las formas de pago necesitan identificadores y nombres únicos.');
+      seen.add(id);
+      return { id, label, enabled: method.enabled !== false };
+    });
+  }
   if (section === 'businessHours' && field === 'weekdays') {
     if (!Array.isArray(value) || value.some((item) => !Number.isInteger(Number(item)) || Number(item) < 1 || Number(item) > 7)) {
       throw configError('businessHours.weekdays debe contener dias del 1 al 7.');

@@ -85,7 +85,13 @@ function assertStep({ scenario, step, run, waId }) {
     const resolvedMissing = plan.intent === 'order_clarification'
       ? conversation.orderDraft?.missingFields ?? []
       : plan.missingFields ?? [];
-    assert.deepEqual(new Set(resolvedMissing), new Set(expectation.missingFields), `${scenario.id}: faltantes incorrectos`);
+    const expectedMissing = new Set(expectation.missingFields);
+    const actualMissing = new Set(resolvedMissing);
+    for (const field of expectedMissing) {
+      assert.ok(actualMissing.has(field), `${scenario.id}: falta el dato esperado ${field}`);
+    }
+    const unexpected = [...actualMissing].filter((field) => field !== 'payment_method' && !expectedMissing.has(field));
+    assert.deepEqual(unexpected, [], `${scenario.id}: faltantes inesperados`);
   }
   if (expectation.replyIncludes) {
     for (const fragment of expectation.replyIncludes) {

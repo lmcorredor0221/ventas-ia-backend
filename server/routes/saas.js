@@ -61,6 +61,12 @@ export function createSaasRouter({ controlPlane, auth }) {
   router.post('/tenants/:tenantId/subscription/mock-activate', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      if (!controlPlane.config.allowMockBillingActivation) {
+        const error = new Error('Mock subscription activation is disabled in production');
+        error.statusCode = 404;
+        error.code = 'mock_subscription_activation_disabled';
+        throw error;
+      }
       const result = controlPlane.mockActivateSubscription(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'subscription.mock_activate.requested', resource: 'subscription' });
       res.json(result);
@@ -69,36 +75,97 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
-  router.get('/tenants/:tenantId/google/oauth/start', (req, res, next) => {
+  router.post('/tenants/:tenantId/subscription/start-trial', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.beginGoogleOAuth(req.params.tenantId, { loginHint: req.query.loginHint });
-      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.oauth.start.requested', resource: 'google_connection' });
-      if (req.query.redirect === '1' && result.ready) return res.redirect(result.authorizationUrl);
-      return res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.get('/google/oauth/callback', async (req, res, next) => {
-    try {
-      const result = await controlPlane.completeGoogleOAuth({
-        state: req.query.state,
-        code: req.query.code,
-        mockAccountEmail: req.query.mockAccountEmail,
-      });
+      const result = controlPlane.startSubscriptionTrial(req.params.tenantId, { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'subscription.trial.requested', resource: 'subscription' });
       res.json(result);
     } catch (error) {
       next(error);
     }
   });
 
+  const startGoogleOAuth = (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.beginGoogleOAuth(req.params.tenantId, {
+        loginHint: req.query.loginHint,
+        returnMode: req.query.redirect === '1' ? 'browser' : 'api',
+      });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.oauth.start.requested', resource: 'google_connection' });
+      if (req.query.redirect === '1' && result.ready) return res.redirect(result.authorizationUrl);
+      return res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+  // Keep the former path for existing callbacks and bookmarks. The browser
+  // starts from a neutral URL because some privacy extensions block /oauth/.
+  router.get('/tenants/:tenantId/google/oauth/start', startGoogleOAuth);
+  router.get('/connect/google/:tenantId/start', startGoogleOAuth);
+
+  const completeGoogleOAuth = async (req, res, next) => {
+    try {
+      if (req.query.error) {
+        const failed = controlPlane.failGoogleOAuth({
+          state: req.query.state,
+          reason: req.query.error,
+        });
+        if (failed.returnMode === 'browser') {
+          return res.redirect(303, controlPlane.googleOAuthReturnUrl({
+            tenantId: failed.tenantId,
+            outcome: 'cancelled',
+            reason: failed.reason,
+          }));
+        }
+        return res.status(400).json({ error: 'Google OAuth authorization was not completed', code: 'google_oauth_cancelled' });
+      }
+      const result = await controlPlane.completeGoogleOAuth({
+        state: req.query.state,
+        code: req.query.code,
+        mockAccountEmail: req.query.mockAccountEmail,
+      });
+      if (result.returnMode === 'browser') {
+        return res.redirect(303, controlPlane.googleOAuthReturnUrl({
+          tenantId: result.connection.tenantId,
+          outcome: 'connected',
+        }));
+      }
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+  router.get('/google/oauth/callback', completeGoogleOAuth);
+  router.get('/connect/google/return', completeGoogleOAuth);
+
   router.post('/tenants/:tenantId/google/provision', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
       const result = await controlPlane.provisionGoogleWorkspace(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.workspace.provision.requested', resource: 'google_workspace' });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/google/catalog/validate', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = controlPlane.validateCatalogImport(req.params.tenantId, req.body?.csvText ?? '');
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/google/catalog/import', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.importCatalogCsv(req.params.tenantId, req.body?.csvText ?? '', { actor: req.auth?.user });
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.catalog.imported', resource: 'google_catalog' });
       res.json(result);
     } catch (error) {
       next(error);

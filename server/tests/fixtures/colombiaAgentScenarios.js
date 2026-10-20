@@ -7,7 +7,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['3 x Chocoramo', '2 x Cifrut granadilla', 'Confirmas el pedido'],
+      replyIncludes: ['3 x Chocoramo', '2 x Cifrut granadilla', 'cómo prefieres pagar'],
       orderItems: ['Chocoramo', 'Cifrut granadilla'],
     },
   },
@@ -53,7 +53,7 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'order_clarification',
           missingFields: [],
-          replyIncludes: ['2 x Arepa boyacense', 'Subtotal', 'Confirmas el pedido'],
+          replyIncludes: ['2 x Arepa boyacense', 'Subtotal', 'cómo prefieres pagar'],
           savedProfile: { name: 'Laura Gomez', defaultAddress: 'Carrera 7 # 20-10' },
         },
       },
@@ -249,7 +249,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['1 x Papel higienico Familia x4', '2 x Jabon Rey barra', 'Confirmas el pedido'],
+      replyIncludes: ['1 x Papel higienico Familia x4', '2 x Jabon Rey barra', 'cómo prefieres pagar'],
       orderItems: ['Papel higienico Familia x4', 'Jabon Rey barra'],
     },
   },
@@ -325,7 +325,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: ['customer_name', 'delivery_address', 'presentation:coca cola'],
-      replyIncludes: ['tu nombre', 'direccion del domicilio', 'escoger la presentacion de coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
+      replyIncludes: ['tu nombre', 'direccion del domicilio', 'Para coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
       orderItems: ['Coca-Cola 400ml'],
     },
   },
@@ -339,7 +339,16 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Agua Cristal sin gas 600ml', 'Confirmas el pedido'],
+          replyIncludes: ['1 x Agua Cristal sin gas 600ml', 'cómo prefieres pagar'],
+        },
+      },
+      {
+        text: 'Pago con efectivo',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'cash',
+          replyIncludes: ['Confirmas el pedido'],
         },
       },
       {
@@ -371,7 +380,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['1 x Arroz Diana 500g', '1 x Aceite Premier 500ml', '1 x Huevos AA x12', 'Confirmas el pedido'],
+      replyIncludes: ['1 x Arroz Diana 500g', '1 x Aceite Premier 500ml', '1 x Huevos AA x12', 'cómo prefieres pagar'],
       orderItems: ['Arroz Diana 500g', 'Aceite Premier 500ml', 'Huevos AA x12'],
     },
   },
@@ -463,7 +472,16 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Pan tajado Bimbo', 'Confirmas el pedido'],
+          replyIncludes: ['1 x Pan tajado Bimbo', 'cómo prefieres pagar'],
+        },
+      },
+      {
+        text: 'Pago con Bre-B',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'bre_b',
+          replyIncludes: ['Confirmas el pedido'],
         },
       },
       {
@@ -498,7 +516,7 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['3 x Chocoramo', 'Confirmas el pedido'],
+          replyIncludes: ['3 x Chocoramo', 'cómo prefieres pagar'],
         },
       },
       {
@@ -592,7 +610,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['Salchichon Zenú porcionado', '1 x Coca-Cola 350ml', 'Confirmas el pedido'],
+      replyIncludes: ['Salchichon Zenú porcionado', '1 x Coca-Cola 350ml', 'cómo prefieres pagar'],
       orderItems: ['Salchichon Zenú porcionado', 'Coca-Cola 350ml'],
     },
   },
@@ -651,7 +669,16 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Yogurt Alpina fresa', 'Confirmas el pedido'],
+          replyIncludes: ['1 x Yogurt Alpina fresa', 'cómo prefieres pagar'],
+        },
+      },
+      {
+        text: 'Pago con tarjeta',
+        expect: {
+          intent: 'order_clarification',
+          missingFields: [],
+          paymentMethod: 'card_terminal',
+          replyIncludes: ['Confirmas el pedido'],
         },
       },
       {

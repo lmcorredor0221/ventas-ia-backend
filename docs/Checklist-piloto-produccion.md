@@ -22,7 +22,6 @@ npm run test:backend
 npm run test:colombia
 npm run test:codex-cli
 npm run test:deepseek-real
-POSTGRES_TEST_DATABASE_URL=postgres://usrventas:usrventas@127.0.0.1:5432/ventas_ia_dev DATABASE_SSL=disable npm run test:postgres
 npm run build
 npm run build:google
 UI_BASE_URL=http://127.0.0.1:3001 python tests\verify_google_auth_gate.py
@@ -30,6 +29,12 @@ npm run test:google-live-sheets
 npm run test:agent-google-live
 npm run billing:maintenance
 npm run test:mercadopago-sandbox
+```
+
+- Antes de publicar, ejecutar el smoke PostgreSQL local desde PowerShell. El comando solo acepta `127.0.0.1/ventas_ia_dev`, aplica las migraciones pendientes y nunca debe ejecutarse con la URL de producción:
+
+```powershell
+npm run test:postgres:local
 ```
 
 ## 2. Variables mínimas para ambiente piloto

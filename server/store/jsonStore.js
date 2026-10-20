@@ -47,6 +47,232 @@ export class JsonStore {
     return result;
   }
 
+  claimProcessedMessage(messageId, payload = {}) {
+    if (!messageId) return true;
+    let claimed = false;
+    this.mutate((state) => {
+      state.processedMessages ??= [];
+      if (state.processedMessages.includes(messageId)) return;
+      state.processedMessages.unshift(messageId);
+      state.processedMessages = [...new Set(state.processedMessages)].slice(0, 1000);
+      claimed = true;
+      state.processedMessagePayloads ??= {};
+      state.processedMessagePayloads[messageId] = payload;
+    });
+    return claimed;
+  }
+
+  enqueueOutbox(entry) {
+    let created = false;
+    this.mutate((state) => {
+      state.integrationOutbox ??= [];
+      if (state.integrationOutbox.some((item) => item.idempotencyKey === entry.idempotencyKey)) return;
+      state.integrationOutbox.push(entry);
+      created = true;
+    });
+    return { ...entry, created };
+  }
+
+  // The JSON store is the local fallback. Keep the same visible contract as
+  // PostgreSQL so the order and its projection are persisted together in tests.
+  persistOrderWithOutbox(_tenantId, _orderId, entries = []) {
+    this.mutate((state) => {
+      state.integrationOutbox ??= [];
+      for (const entry of entries) {
+        if (!state.integrationOutbox.some((item) => item.idempotencyKey === entry.idempotencyKey)) {
+          state.integrationOutbox.push(entry);
+        }
+      }
+    });
+  }
+
+  enqueueInboundMessage(normalized) {
+    if (!normalized?.messageId || !normalized?.tenantId) {
+      throw new Error('Inbound messages require messageId and tenantId');
+    }
+    const now = new Date().toISOString();
+    const entry = createInboundOutboxEntry(normalized, now);
+    let created = false;
+    let inbound = null;
+    this.mutate((state) => {
+      state.inboundMessagesById ??= {};
+      const existing = state.inboundMessagesById[normalized.messageId];
+      if (existing) {
+        inbound = { ...existing };
+        return;
+      }
+      inbound = {
+        messageId: normalized.messageId,
+        tenantId: normalized.tenantId,
+        provider: normalized.provider ?? 'meta_whatsapp_cloud_api',
+        phoneNumberId: normalized.phoneNumberId ?? null,
+        waId: normalized.waId ?? null,
+        messageType: normalized.messageType ?? 'text',
+        payload: normalized,
+        status: 'queued',
+        attempts: 0,
+        receivedAt: now,
+        processingAt: null,
+        completedAt: null,
+        lastError: null,
+        result: null,
+      };
+      state.inboundMessagesById[normalized.messageId] = inbound;
+      state.integrationOutbox ??= [];
+      if (!state.integrationOutbox.some((item) => item.idempotencyKey === entry.idempotencyKey)) {
+        state.integrationOutbox.push(entry);
+      }
+      created = true;
+    });
+    return { created, inbound, outbox: entry };
+  }
+
+  getInboundMessage(messageId) {
+    const record = this.getState().inboundMessagesById?.[messageId];
+    return record ? { ...record } : null;
+  }
+
+  markInboundMessageProcessing(messageId) {
+    let inbound = null;
+    this.mutate((state) => {
+      const current = state.inboundMessagesById?.[messageId];
+      if (!current) return;
+      current.status = 'processing';
+      current.attempts = Number(current.attempts ?? 0) + 1;
+      current.processingAt = new Date().toISOString();
+      current.lastError = null;
+      inbound = { ...current };
+    });
+    return inbound;
+  }
+
+  completeInboundMessage(messageId, result = null) {
+    let inbound = null;
+    this.mutate((state) => {
+      const current = state.inboundMessagesById?.[messageId];
+      if (!current) return;
+      current.status = 'completed';
+      current.completedAt = new Date().toISOString();
+      current.result = result ?? null;
+      current.lastError = null;
+      inbound = { ...current };
+    });
+    return inbound;
+  }
+
+  failInboundMessage(messageId, error, { terminal = false } = {}) {
+    let inbound = null;
+    this.mutate((state) => {
+      const current = state.inboundMessagesById?.[messageId];
+      if (!current) return;
+      current.status = terminal ? 'dead_letter' : 'retrying';
+      current.lastError = error?.message ?? String(error);
+      inbound = { ...current };
+    });
+    return inbound;
+  }
+
+  createInteractionOffer(offer) {
+    if (!offer?.id || !offer?.tenantId || !offer?.conversationId) {
+      throw new Error('Interaction offers require id, tenantId and conversationId');
+    }
+    let saved;
+    this.mutate((state) => {
+      state.interactionOffersById ??= {};
+      saved = state.interactionOffersById[offer.id] ?? {
+        ...offer,
+        status: offer.status ?? 'active',
+        version: Number(offer.version ?? 1),
+        createdAt: offer.createdAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      state.interactionOffersById[offer.id] = saved;
+    });
+    return { ...saved };
+  }
+
+  consumeInteractionOffer({ offerId, optionId, tenantId, conversationId }) {
+    let outcome = { status: 'not_found', offer: null };
+    this.mutate((state) => {
+      const offer = state.interactionOffersById?.[offerId];
+      if (!offer) return;
+      if (offer.tenantId !== tenantId || offer.conversationId !== conversationId) {
+        outcome = { status: 'mismatch', offer: { ...offer } };
+        return;
+      }
+      if (offer.status !== 'active' || new Date(offer.expiresAt).getTime() <= Date.now()) {
+        outcome = { status: 'expired', offer: { ...offer } };
+        return;
+      }
+      const option = (offer.options ?? []).find((item) => item.id === optionId);
+      if (!option) {
+        outcome = { status: 'invalid_option', offer: { ...offer } };
+        return;
+      }
+      offer.status = 'consumed';
+      offer.consumedAt = new Date().toISOString();
+      offer.consumedOptionId = optionId;
+      offer.updatedAt = offer.consumedAt;
+      outcome = { status: 'consumed', offer: { ...offer }, option: { ...option } };
+    });
+    return outcome;
+  }
+
+  claimOutbox({ limit = 10 } = {}) {
+    const now = Date.now();
+    const claimed = [];
+    this.mutate((state) => {
+      state.integrationOutbox ??= [];
+      for (const item of state.integrationOutbox) {
+        if (claimed.length >= limit) break;
+        const available = (
+          ['pending', 'retrying'].includes(item.status)
+          && new Date(item.nextAttemptAt ?? 0).getTime() <= now
+        ) || (
+          item.status === 'processing'
+          && new Date(item.lockedAt ?? 0).getTime() < now - (5 * 60_000)
+        );
+        if (!available) continue;
+        item.status = 'processing';
+        item.attempts = Number(item.attempts ?? 0) + 1;
+        item.lockedAt = new Date().toISOString();
+        claimed.push({ ...item });
+      }
+    });
+    return claimed;
+  }
+
+  completeOutbox(id, result = null) {
+    this.mutate((state) => {
+      const item = state.integrationOutbox?.find((entry) => entry.id === id);
+      if (!item) return;
+      item.status = 'processed';
+      item.processedAt = new Date().toISOString();
+      item.lockedAt = null;
+      item.result = result ?? null;
+    });
+  }
+
+  failOutbox(id, error, { maxAttempts = 8 } = {}) {
+    let failed = null;
+    this.mutate((state) => {
+      const item = state.integrationOutbox?.find((entry) => entry.id === id);
+      if (!item) return;
+      item.status = Number(item.attempts ?? 0) >= maxAttempts ? 'failed' : 'retrying';
+      item.nextAttemptAt = new Date(Date.now() + Math.min(15 * 60_000, 1_000 * (2 ** Math.max(0, Number(item.attempts ?? 1) - 1)))).toISOString();
+      item.lastError = error?.message ?? String(error);
+      item.lockedAt = null;
+      failed = { ...item };
+    });
+    return failed;
+  }
+
+  listOutbox({ status, limit = 100 } = {}) {
+    return (this.getState().integrationOutbox ?? [])
+      .filter((item) => !status || item.status === status)
+      .slice(-Number(limit));
+  }
+
   migrate() {
     const seed = createSeedState();
     this.state.schemaVersion = seed.schemaVersion;
@@ -69,6 +295,10 @@ export class JsonStore {
     this.state.pendingRequests ??= [];
     this.state.events ??= [];
     this.state.processedMessages ??= [];
+    this.state.processedMessagePayloads ??= {};
+    this.state.integrationOutbox ??= [];
+    this.state.inboundMessagesById ??= {};
+    this.state.interactionOffersById ??= {};
     this.state.transactions ??= [];
     ensureSaasState(this.state);
     ensureIdentityState(this.state);
@@ -77,6 +307,25 @@ export class JsonStore {
     ensurePlatformState(this.state);
     this.save();
   }
+}
+
+function createInboundOutboxEntry(normalized, now) {
+  return {
+    id: `outbox-inbound-${normalized.messageId}`,
+    tenantId: normalized.tenantId,
+    kind: 'whatsapp.inbound_processing',
+    aggregateType: 'inbound_message',
+    aggregateId: normalized.messageId,
+    idempotencyKey: `inbound:${normalized.messageId}`,
+    payload: { messageId: normalized.messageId },
+    status: 'pending',
+    attempts: 0,
+    nextAttemptAt: now,
+    lastError: null,
+    createdAt: now,
+    lockedAt: null,
+    processedAt: null,
+  };
 }
 
 function mergeById(current, seeded, merger = (item) => item) {

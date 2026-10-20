@@ -5,6 +5,9 @@ import {
   createUsageCycle,
   addDays,
   defaultPlan,
+  DEFAULT_BILLING_PLAN_ID,
+  DEFAULT_INCLUDED_DELIVERIES,
+  DEFAULT_INCLUDED_INTERACTIONS,
   ensureBillingState,
   isCheckoutRecoverable,
   addMonths,
@@ -16,6 +19,7 @@ import {
   recordFunnelEvent,
 } from './billingService.js';
 import { sandboxWorkspaceForTenant } from './googleWorkspaceService.js';
+import { catalogHeaders, catalogRowToProduct, catalogRowsToSheetValues, validateCatalogCsv } from './catalogImportService.js';
 import { platformLlmConfig } from './platformService.js';
 
 const GOOGLE_SCOPES = [
@@ -49,19 +53,21 @@ export class SaasControlPlane {
     const tenantId = uniqueTenantId(this.store.getState(), storeName);
     const now = new Date().toISOString();
     const plan = defaultPlan(this.store.getState());
+    const trialEnabled = Boolean(plan.trialEnabled && plan.trialDays > 0);
+    const trialEndsAt = trialEnabled ? addDays(now, plan.trialDays) : null;
     const tenant = {
       id: tenantId,
       name: storeName,
       industry: 'Tienda de barrio',
       plan: 'Ventas IA SaaS',
-      status: 'subscription_pending',
+      status: trialEnabled ? 'trial' : 'subscription_pending',
       accent: '#d49a41',
       whatsappNumber,
       responseTarget: '45 s',
-      quota: 1000,
+      quota: DEFAULT_INCLUDED_DELIVERIES,
       lifecycle: {
-        access: 'blocked',
-        activationStatus: 'draft',
+        access: trialEnabled ? 'active' : 'blocked',
+        activationStatus: trialEnabled ? 'active' : 'draft',
         createdAt: now,
         updatedAt: now,
         ownerEmail,
@@ -79,13 +85,18 @@ export class SaasControlPlane {
         id: `sub-${tenantId}`,
         tenantId,
         planId: plan.id,
-        status: 'pending_payment',
+        status: trialEnabled ? 'trial' : 'pending_payment',
         provider: 'mercado_pago',
         payerEmail: ownerEmail,
         billingCycle: 'anniversary',
         includedDeliveries: plan.includedDeliveries,
         includedInteractions: plan.includedInteractions,
         graceDays: plan.graceDays,
+        trialStartedAt: trialEnabled ? now : null,
+        trialEndsAt,
+        currentPeriodStart: trialEnabled ? now : null,
+        currentPeriodEnd: trialEnabled ? trialEndsAt : null,
+        nextBillingDate: trialEnabled ? trialEndsAt : null,
         createdAt: now,
         updatedAt: now,
       };
@@ -93,11 +104,22 @@ export class SaasControlPlane {
         createUsageCycle({ tenantId, subscription: state.subscriptionsByTenant[tenantId], plan, now }),
       ];
       state.onboardingByTenant[tenantId] = createOnboardingState(tenantId, now);
-      recordFunnelEvent(state, { tenantId, stage: 'account_created', actorId: actor?.id ?? null, payload: { ownerEmail } });
+      recordFunnelEvent(state, {
+        tenantId,
+        stage: trialEnabled ? 'trial_started' : 'account_created',
+        actorId: actor?.id ?? null,
+        payload: { ownerEmail, planId: plan.id, trialDays: trialEnabled ? plan.trialDays : 0 },
+      });
     });
     this.persistTenantCritical(tenantId);
     this.events.emit({ type: 'tenant.created', tenantId, detail: `Cliente creado para ${storeName}`, metadata: { ownerEmail } });
     this.audit(tenantId, 'tenant.create', 'tenant', { ownerEmail, actorId: actor?.id, source: actor ? 'authenticated_user' : 'system' });
+    if (trialEnabled) {
+      this.completeOnboardingStep(tenantId, 'subscription');
+      this.recordBillingFunnel(tenantId, 'trial_started', { trialEndsAt, trialDays: plan.trialDays });
+      this.events.emit({ type: 'subscription.trial.started', tenantId, detail: `Prueba de ${plan.trialDays} dias iniciada` });
+      this.audit(tenantId, 'subscription.trial.started', 'subscription', { trialEndsAt, trialDays: plan.trialDays });
+    }
     return this.getTenantBundle(tenantId);
   }
 
@@ -112,6 +134,12 @@ export class SaasControlPlane {
     const checkoutExpiresAt = createCheckoutExpiration(now);
 
     if (!accessToken) {
+      if (!this.config.allowMockBillingActivation) {
+        const error = new Error('El pago todavía no está configurado para esta plataforma. Contacta a soporte antes de continuar.');
+        error.statusCode = 503;
+        error.code = 'billing_provider_not_configured';
+        throw error;
+      }
       const checkoutUrl = `/api/saas/tenants/${tenantId}/subscription/mock-activate`;
       const mock = {
         mode: 'sandbox_contract',
@@ -198,6 +226,55 @@ export class SaasControlPlane {
       };
     }
     return this.createSubscriptionCheckout({ tenantId, payerEmail });
+  }
+
+  startSubscriptionTrial(tenantId, { actor } = {}) {
+    const tenant = this.requireTenant(tenantId);
+    const previous = this.ensureSubscription(tenantId, tenant.lifecycle?.ownerEmail);
+    const plan = planById(this.store.getState(), previous.planId) ?? defaultPlan(this.store.getState());
+    if (!plan.trialEnabled || Number(plan.trialDays) <= 0) {
+      const error = new Error('La prueba gratuita no está disponible para este plan.');
+      error.statusCode = 409;
+      error.code = 'trial_unavailable';
+      throw error;
+    }
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(previous.status)) {
+      return { subscription: previous, status: this.getOnboardingStatus(tenantId), reused: true };
+    }
+    if (previous.trialStartedAt || previous.trialEndedAt) {
+      const error = new Error('Esta tienda ya usó su prueba gratuita.');
+      error.statusCode = 409;
+      error.code = 'trial_already_used';
+      throw error;
+    }
+
+    const now = new Date().toISOString();
+    const trialEndsAt = addDays(now, plan.trialDays);
+    const subscription = this.updateSubscription(tenantId, {
+      status: 'trial',
+      providerMode: previous.providerMode ?? 'mercado_pago',
+      trialStartedAt: now,
+      trialEndsAt,
+      currentPeriodStart: now,
+      currentPeriodEnd: trialEndsAt,
+      nextBillingDate: trialEndsAt,
+      checkoutUrl: null,
+      checkoutCreatedAt: null,
+      checkoutExpiresAt: null,
+    });
+    this.patchTenant(tenantId, { status: 'trial' });
+    this.patchTenantLifecycle(tenantId, { access: 'active', activationStatus: 'draft', subscriptionStatus: 'trial' });
+    this.ensureCurrentUsageCycle(tenantId);
+    this.completeOnboardingStep(tenantId, 'subscription');
+    this.recordBillingFunnel(tenantId, 'trial_started', { trialEndsAt, trialDays: plan.trialDays, source: 'owner_requested' });
+    this.events.emit({ type: 'subscription.trial.started', tenantId, detail: `Prueba de ${plan.trialDays} dias iniciada` });
+    this.audit(tenantId, 'subscription.trial.started', 'subscription', {
+      trialEndsAt,
+      trialDays: plan.trialDays,
+      actorId: actor?.id,
+      source: 'owner_requested',
+    });
+    return { subscription, status: this.getOnboardingStatus(tenantId), reused: false };
   }
 
   mockActivateSubscription(tenantId) {
@@ -315,7 +392,7 @@ export class SaasControlPlane {
     return { accepted: true, topic, dataId, subscription, status: this.getOnboardingStatus(tenantId) };
   }
 
-  beginGoogleOAuth(tenantId, { loginHint } = {}) {
+  beginGoogleOAuth(tenantId, { loginHint, returnMode = 'api' } = {}) {
     const tenant = this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'google_oauth');
     const state = crypto.randomBytes(24).toString('hex');
@@ -330,6 +407,7 @@ export class SaasControlPlane {
         tenantId,
         loginHint: loginHint ?? tenant.lifecycle?.ownerEmail,
         scopes: GOOGLE_SCOPES,
+        returnMode: returnMode === 'browser' ? 'browser' : 'api',
         createdAt: now,
         expiresAt,
       };
@@ -358,6 +436,7 @@ export class SaasControlPlane {
       expiresAt,
       redirectUri,
       scopes: GOOGLE_SCOPES,
+      returnMode: returnMode === 'browser' ? 'browser' : 'api',
       authorizationUrl: url.toString(),
     };
   }
@@ -433,7 +512,29 @@ export class SaasControlPlane {
       accountEmail: connection.accountEmail,
       scopes: connection.scopes,
     });
-    return { connection, status: this.getOnboardingStatus(tenantId) };
+    return {
+      connection,
+      status: this.getOnboardingStatus(tenantId),
+      returnMode: oauthState.returnMode ?? 'api',
+    };
+  }
+
+  failGoogleOAuth({ state, reason }) {
+    const oauthState = this.consumeOAuthState(state);
+    const tenantId = oauthState.tenantId;
+    const normalizedReason = normalizeGoogleOAuthFailure(reason);
+    this.events.emit({
+      type: 'google.oauth.cancelled',
+      tenantId,
+      detail: 'Autorizacion Google no completada',
+      metadata: { reason: normalizedReason },
+    });
+    this.audit(tenantId, 'google.oauth.cancelled', 'google_connection', { reason: normalizedReason });
+    return {
+      tenantId,
+      reason: normalizedReason,
+      returnMode: oauthState.returnMode ?? 'api',
+    };
   }
 
   async provisionGoogleWorkspace(tenantId) {
@@ -507,6 +608,122 @@ export class SaasControlPlane {
     }
     const accessToken = await this.googleWorkspace.refreshAccessToken(refreshToken);
     return this.googleWorkspace.provisionWorkspace({ tenant, accessToken });
+  }
+
+  validateCatalogImport(tenantId, csvText) {
+    this.requireTenant(tenantId);
+    const validation = validateCatalogCsv(csvText);
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId] ?? null;
+    const workspace = state.googleWorkspacesByTenant?.[tenantId] ?? null;
+    const hasGoogleWorkspace = connection?.status === 'connected' && workspace?.status === 'provisioned';
+    const canWriteCatalog = hasGoogleWorkspace && (connection.mode !== 'live' ? this.config.allowLocalCatalogFallback : true);
+    return {
+      ...validation,
+      canImport: validation.valid && canWriteCatalog,
+      googleReady: hasGoogleWorkspace,
+      message: validation.valid
+        ? canWriteCatalog
+          ? 'El archivo esta listo para copiarlo al Catalogo de esta tienda.'
+          : hasGoogleWorkspace
+            ? 'El archivo es valido. En este entorno se requiere una conexion Google live para escribirlo.'
+            : 'El archivo es valido. Primero conecta Google y crea la estructura de la tienda.'
+        : 'Corrige los datos marcados antes de importarlos.',
+    };
+  }
+
+  async importCatalogCsv(tenantId, csvText, { actor } = {}) {
+    this.requireTenant(tenantId);
+    this.requireActiveSubscriptionForSetup(tenantId, 'catalog_import');
+    const validation = validateCatalogCsv(csvText);
+    if (!validation.valid) {
+      const error = new Error('El CSV del catalogo tiene errores');
+      error.statusCode = 422;
+      error.code = 'catalog_csv_invalid';
+      error.validation = validation;
+      throw error;
+    }
+
+    const state = this.store.getState();
+    const tenant = state.tenants.find((item) => item.id === tenantId);
+    const connection = state.googleConnectionsByTenant?.[tenantId] ?? null;
+    const workspace = state.googleWorkspacesByTenant?.[tenantId] ?? null;
+    const hasWorkspace = connection?.status === 'connected' && workspace?.status === 'provisioned';
+    if (!hasWorkspace) {
+      const error = new Error('Conecta Google y crea la estructura antes de importar el catalogo.');
+      error.statusCode = 428;
+      error.code = 'google_connection_required';
+      throw error;
+    }
+
+    const live = connection.mode === 'live' ? await this.liveGoogleContext(tenantId) : null;
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      const error = new Error('No se pudo guardar el catalogo en Google Sheets de esta tienda.');
+      error.statusCode = 428;
+      error.code = 'google_connection_required';
+      throw error;
+    }
+
+    const products = validation.rows.filter((row) => row.activo).map(catalogRowToProduct);
+    const source = live ? 'google_sheets_live' : 'local_test_fixture';
+    const sheetValues = catalogRowsToSheetValues(validation.rows);
+    const catalogRange = tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:J1000';
+    if (live) {
+      await this.googleWorkspace.clearValues({ accessToken: live.accessToken, spreadsheetId: live.spreadsheetId, range: catalogRange });
+      await this.googleWorkspace.updateValues({
+        accessToken: live.accessToken,
+        spreadsheetId: live.spreadsheetId,
+        range: `Catalogo!A1:J${validation.rows.length + 1}`,
+        values: sheetValues,
+      });
+    }
+
+    this.store.mutate((next) => {
+      next.productsByTenant ??= {};
+      next.productsByTenant[tenantId] = products;
+      next.catalogImportsByTenant ??= {};
+      next.catalogImportsByTenant[tenantId] = {
+        tenantId,
+        source,
+        importedRows: validation.rows.length,
+        activeRows: products.length,
+        importedAt: new Date().toISOString(),
+        fileName: null,
+      };
+    });
+    this.events.emit({
+      type: 'google.catalog.imported',
+      tenantId,
+      detail: `Catalogo importado: ${products.length} productos activos`,
+      metadata: { source, importedRows: validation.rows.length, activeRows: products.length, actorId: actor?.id ?? null },
+    });
+    this.audit(tenantId, 'google.catalog.imported', 'google_catalog', {
+      source,
+      importedRows: validation.rows.length,
+      activeRows: products.length,
+      actorId: actor?.id ?? null,
+    });
+    return {
+      status: 'imported',
+      source,
+      importedRows: validation.rows.length,
+      activeRows: products.length,
+      headers: catalogHeaders,
+      spreadsheetUrl: workspace.spreadsheet?.url ?? null,
+      validation,
+      onboarding: this.getTenantBundle(tenantId),
+    };
+  }
+
+  async liveGoogleContext(tenantId) {
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId];
+    const workspace = state.googleWorkspacesByTenant?.[tenantId];
+    if (connection?.status !== 'connected' || connection.mode !== 'live' || !workspace?.spreadsheet?.id) return null;
+    const refreshToken = this.secretVault.readSecret(connection.refreshTokenRef);
+    if (!refreshToken) return null;
+    const accessToken = await this.googleWorkspace.refreshAccessToken(refreshToken);
+    return { accessToken, spreadsheetId: workspace.spreadsheet.id, connection, workspace };
   }
 
   validateTenantSetup(tenantId) {
@@ -831,6 +1048,21 @@ export class SaasControlPlane {
         continue;
       }
 
+      if (status === 'trial' && subscription.trialEndsAt && isOnOrBefore(subscription.trialEndsAt, now)) {
+        this.updateSubscription(tenantId, {
+          status: 'pending_payment',
+          trialEndedAt: subscription.trialEndedAt ?? now,
+          nextBillingDate: null,
+        });
+        this.patchTenant(tenantId, { status: 'subscription_pending' });
+        this.patchTenantLifecycle(tenantId, { subscriptionStatus: 'pending_payment', access: 'blocked', activationStatus: 'draft' });
+        this.recordBillingFunnel(tenantId, 'trial_ended', { reasonCode: 'trial_expired' });
+        this.events.emit({ type: 'subscription.trial.ended', tenantId, detail: 'Prueba finalizada; se requiere suscripcion' });
+        this.audit(tenantId, 'subscription.trial.ended', 'subscription', { trialEndedAt: subscription.trialEndedAt ?? now, actorId: actor?.id });
+        result.actions.push({ tenantId, action: 'trial_ended', from: status, to: 'pending_payment' });
+        continue;
+      }
+
       if (ACTIVE_SUBSCRIPTION_STATUSES.has(status) && subscription.cancelAtPeriodEnd && subscription.currentPeriodEnd && isOnOrBefore(subscription.currentPeriodEnd, now)) {
         this.updateSubscription(tenantId, {
           status: 'cancelled',
@@ -845,7 +1077,7 @@ export class SaasControlPlane {
         continue;
       }
 
-      if (['active', 'trial'].includes(status) && dueAt && isOnOrBefore(dueAt, now)) {
+      if (status === 'active' && dueAt && isOnOrBefore(dueAt, now)) {
         const graceDays = Number(subscription.graceDays ?? planById(this.store.getState(), subscription.planId)?.graceDays ?? defaultPlan(this.store.getState()).graceDays ?? 5);
         this.updateSubscription(tenantId, {
           status: 'grace_period',
@@ -1118,8 +1350,16 @@ export class SaasControlPlane {
       return {
         ready: false,
         mode: 'guided_manual',
-        reason: 'meta_app_not_configured',
-        message: 'Faltan credenciales Meta para abrir Embedded Signup desde la microapp.',
+        reason: status.reason,
+        message: status.reason === 'meta_app_review_pending'
+          ? status.platformReadiness.appReviewStatus === 'in_review'
+            ? 'Meta está revisando la solicitud de acceso avanzado de WhatsApp de Ventas IA.'
+            : status.platformReadiness.appReviewStatus === 'changes_requested'
+              ? 'Meta solicitó ajustes a la solicitud de WhatsApp de Ventas IA.'
+              : 'Ventas IA aún debe enviar a Meta la solicitud de acceso avanzado de WhatsApp.'
+          : status.reason === 'meta_webhook_not_configured'
+            ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
+            : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
         manualSteps: status.steps,
         status: this.getWhatsAppOnboarding(tenantId),
       };
@@ -1141,9 +1381,17 @@ export class SaasControlPlane {
   async completeWhatsAppEmbeddedSignup(tenantId, payload = {}) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_embedded_signup');
+    const readiness = this.getWhatsAppOnboarding(tenantId);
+    if (!readiness.canAutomate) {
+      const error = new Error('La conexión con Meta aún no está habilitada por Ventas IA.');
+      error.statusCode = 428;
+      error.code = readiness.reason;
+      throw error;
+    }
     const code = String(payload.code ?? '').trim();
     const wabaId = String(payload.wabaId ?? '').trim();
     const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
+    const registrationPin = String(payload.registrationPin ?? '').trim();
     const appId = String(process.env.META_APP_ID ?? '').trim();
     const appSecret = String(process.env.META_APP_SECRET ?? process.env.WHATSAPP_APP_SECRET ?? '').trim();
     const configId = String(process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID ?? '').trim();
@@ -1198,6 +1446,34 @@ export class SaasControlPlane {
       throw error;
     }
 
+    // Meta keeps the business assets as its source of truth. After the owner
+    // approves Embedded Signup, finish the tenant-specific operational binding.
+    await fetchGraphJson(
+      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`,
+      { method: 'POST', headers: { authorization: `Bearer ${accessToken}` } },
+      'whatsapp_waba_webhook_subscription',
+    );
+
+    const setupPath = this.getWhatsAppOnboarding(tenantId).setupPath;
+    const requiresPhoneRegistration = setupPath !== 'cloud_api_existing';
+    if (requiresPhoneRegistration) {
+      if (!/^\d{6}$/.test(registrationPin)) {
+        const error = new Error('Crea un PIN de seguridad de seis dígitos para proteger el número en Meta.');
+        error.statusCode = 422;
+        error.code = 'whatsapp_registration_pin_required';
+        throw error;
+      }
+      await fetchGraphJson(
+        `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(phoneNumberId)}/register`,
+        {
+          method: 'POST',
+          headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ messaging_product: 'whatsapp', pin: registrationPin }),
+        },
+        'whatsapp_phone_registration',
+      );
+    }
+
     const accessTokenRef = this.secretVault.saveSecret({
       tenantId,
       name: 'WHATSAPP_ACCESS_TOKEN',
@@ -1217,6 +1493,8 @@ export class SaasControlPlane {
       phoneNumberId,
       accessTokenRef,
       configId,
+      webhookSubscribed: true,
+      phoneRegistered: requiresPhoneRegistration,
     });
     return result;
   }
@@ -1283,10 +1561,18 @@ export class SaasControlPlane {
       throw error;
     }
     const subscription = state.subscriptionsByTenant[tenantId] ?? null;
+    const setupAccess = this.getSetupAccess(tenantId, subscription);
     const googleConnection = state.googleConnectionsByTenant[tenantId] ?? null;
     const googleWorkspace = state.googleWorkspacesByTenant[tenantId] ?? null;
     const checks = [
-      { key: 'subscription', label: 'Suscripcion activa en Mercado Pago', ok: ACTIVE_SUBSCRIPTION_STATUSES.has(subscription?.status), detail: subscription?.status ?? 'missing' },
+      {
+        key: 'subscription',
+        label: 'Prueba o suscripción activa',
+        ok: setupAccess.allowed,
+        detail: setupAccess.source === 'billing_access_exception'
+          ? `Acceso temporal hasta ${setupAccess.expiresAt}`
+          : subscription?.status ?? 'missing',
+      },
       { key: 'google_oauth', label: 'Google conectado', ok: googleConnection?.status === 'connected', detail: googleConnection?.accountEmail ?? 'missing' },
       { key: 'google_provisioning', label: 'Drive y Sheets aprovisionados', ok: googleWorkspace?.status === 'provisioned', detail: googleWorkspace?.spreadsheet?.id ?? 'missing' },
       { key: 'llm', label: 'DeepSeek global de plataforma', ok: platformLlmConfig(state).provider === 'deepseek' && Boolean(platformLlmConfig(state).apiKeyRef), detail: platformLlmConfig(state).model ?? 'missing' },
@@ -1302,6 +1588,7 @@ export class SaasControlPlane {
       readyForActivation,
       readyForOperation,
       nextStep: nextStepFromChecks(checks, tenant.lifecycle),
+      setupAccess,
     };
   }
 
@@ -1393,12 +1680,38 @@ export class SaasControlPlane {
 
   requireActiveSubscriptionForSetup(tenantId, step) {
     const subscription = this.ensureSubscription(tenantId);
-    if (ACTIVE_SUBSCRIPTION_STATUSES.has(subscription.status)) return subscription;
+    const setupAccess = this.getSetupAccess(tenantId, subscription);
+    if (setupAccess.allowed) {
+      if (setupAccess.source === 'billing_access_exception') {
+        this.audit(tenantId, 'billing.access_exception.used_for_setup', 'billing_access_exception', {
+          exceptionId: setupAccess.exceptionId,
+          expiresAt: setupAccess.expiresAt,
+          step,
+        });
+      }
+      return subscription;
+    }
     const error = new Error('Active subscription is required before operational setup');
     error.statusCode = 402;
     error.code = 'subscription_required_for_setup';
-    error.status = { tenantId, step, subscriptionStatus: subscription.status };
+    error.status = { tenantId, step, subscriptionStatus: subscription.status, setupAccess };
     throw error;
+  }
+
+  getSetupAccess(tenantId, subscription = this.ensureSubscription(tenantId)) {
+    if (ACTIVE_SUBSCRIPTION_STATUSES.has(subscription?.status)) {
+      return { allowed: true, source: 'subscription', exceptionId: null, expiresAt: null };
+    }
+    const exception = activeItemsForTenant(this.store.getState().billingAccessExceptions, tenantId, 'expiresAt')[0];
+    if (exception) {
+      return {
+        allowed: true,
+        source: 'billing_access_exception',
+        exceptionId: exception.id,
+        expiresAt: exception.expiresAt,
+      };
+    }
+    return { allowed: false, source: null, exceptionId: null, expiresAt: null };
   }
 
   recordPayment(tenantId, payment) {
@@ -1512,6 +1825,20 @@ export class SaasControlPlane {
     return process.env.GOOGLE_REDIRECT_URI ?? `${this.publicBaseUrl()}/api/saas/google/oauth/callback`;
   }
 
+  googleOAuthReturnUrl({ tenantId, outcome, reason } = {}) {
+    const url = new URL(this.frontendBaseUrl());
+    url.searchParams.set('app', '1');
+    url.searchParams.set('view', 'onboarding');
+    url.searchParams.set('googleOAuth', outcome ?? 'failed');
+    if (tenantId) url.searchParams.set('tenant', tenantId);
+    if (reason) url.searchParams.set('reason', reason);
+    return url.toString();
+  }
+
+  frontendBaseUrl() {
+    return this.config.frontendAppUrl ?? this.publicBaseUrl();
+  }
+
   publicBaseUrl() {
     return process.env.PUBLIC_APP_URL ?? `http://${this.config.host}:${this.config.port}`;
   }
@@ -1560,9 +1887,22 @@ export function ensureSaasState(state) {
   state.validationRuns ??= [];
   ensureBillingState(state);
   for (const tenant of state.tenants ?? []) {
-    tenant.config ??= tenantConfigFor(tenant.id);
+    const defaults = tenantConfigFor(tenant.id);
+    tenant.config ??= defaults;
+    tenant.config.agentPolicy = {
+      ...defaults.agentPolicy,
+      ...(tenant.config.agentPolicy ?? {}),
+      tone: tenant.config.agentPolicy?.tone === 'tendero_bogotano'
+        ? 'tendero_colombiano'
+        : tenant.config.agentPolicy?.tone ?? defaults.agentPolicy.tone,
+    };
+    tenant.config.orderPolicy = {
+      ...defaults.orderPolicy,
+      ...(tenant.config.orderPolicy ?? {}),
+      paymentMethods: tenant.config.orderPolicy?.paymentMethods ?? defaults.orderPolicy.paymentMethods,
+    };
     tenant.config.saas = {
-      ...tenantConfigFor(tenant.id).saas,
+      ...defaults.saas,
       ...(tenant.config.saas ?? {}),
       enforceEntitlement: tenant.config.saas?.enforceEntitlement ?? tenant.status === 'active',
     };
@@ -1611,9 +1951,9 @@ function tenantConfigFor(tenantId) {
     timezone: 'America/Bogota',
     businessHours: { start: '08:00', end: '18:00', weekdays: [1, 2, 3, 4, 5, 6] },
     saas: {
-      planCode: 'ventas_ia_1000_domicilios',
-      includedDeliveries: 1000,
-      includedInteractions: 5000,
+      planCode: DEFAULT_BILLING_PLAN_ID,
+      includedDeliveries: DEFAULT_INCLUDED_DELIVERIES,
+      includedInteractions: DEFAULT_INCLUDED_INTERACTIONS,
       enforceEntitlement: true,
     },
     whatsapp: {
@@ -1643,7 +1983,9 @@ function tenantConfigFor(tenantId) {
       deprecated: true,
     },
     agentPolicy: {
-      tone: 'tendero_bogotano',
+      // Legacy tenants may still store tendero_bogotano. The product-facing
+      // profile is Colombian rather than city-specific.
+      tone: 'tendero_colombiano',
       responseLanguage: 'es-CO',
       missingQuantity: 'ask',
       humanEscalation: true,
@@ -1656,6 +1998,11 @@ function tenantConfigFor(tenantId) {
       customerProfileStore: 'google_sheets',
       confirmedOrderStore: 'google_sheets',
       confirmedOrderHandoff: 'preparation_and_delivery',
+      paymentMethods: [
+        { id: 'cash', label: 'Efectivo', enabled: true },
+        { id: 'card_terminal', label: 'Tarjeta', enabled: true },
+        { id: 'bre_b', label: 'Bre-B', enabled: true },
+      ],
     },
     secretsPolicy: 'references_only_no_plaintext_values',
   };
@@ -1687,7 +2034,23 @@ function normalizeWhatsAppSetupPath(value) {
 function whatsappOnboardingForTenant({ tenant, saved }) {
   const whatsapp = tenant.config?.whatsapp ?? {};
   const setupPath = saved.setupPath ?? (whatsapp.phoneNumberId ? 'cloud_api_existing' : null);
-  const canAutomate = Boolean(process.env.META_APP_ID && (process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID || process.env.META_CONFIG_ID));
+  const metaConfigured = Boolean(
+    process.env.META_APP_ID
+    && (process.env.META_APP_SECRET || process.env.WHATSAPP_APP_SECRET)
+    && (process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID || process.env.META_CONFIG_ID),
+  );
+  const webhookConfigured = Boolean(
+    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN
+    && isHttpsUrl(whatsappWebhookPublicUrl()),
+  );
+  const appReviewApproved = process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED === 'true';
+  const reportedReviewStatus = process.env.META_WHATSAPP_APP_REVIEW_STATUS;
+  const appReviewStatus = appReviewApproved
+    ? 'approved'
+    : ['in_review', 'changes_requested'].includes(reportedReviewStatus)
+      ? reportedReviewStatus
+      : 'not_submitted';
+  const canAutomate = appReviewApproved && metaConfigured && webhookConfigured;
   const connected = Boolean(whatsapp.phoneNumberId);
   const status = connected ? 'connected' : saved.status ?? (setupPath ? 'in_progress' : 'needs_path');
   const nextAction = connected
@@ -1703,7 +2066,14 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     status,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
     canAutomate,
-    reason: canAutomate ? null : 'meta_app_not_configured',
+    platformReadiness: { appReviewApproved, appReviewStatus, metaConfigured, webhookConfigured },
+    reason: canAutomate
+      ? null
+      : !appReviewApproved
+        ? 'meta_app_review_pending'
+        : !metaConfigured
+          ? 'meta_app_not_configured'
+          : 'meta_webhook_not_configured',
     nextAction,
     hasWhatsAppBusiness: saved.hasWhatsAppBusiness ?? null,
     businessName: saved.businessName ?? tenant.name,
@@ -1728,6 +2098,21 @@ function whatsappOnboardingForTenant({ tenant, saved }) {
     lastAttemptAt: saved.lastAttemptAt ?? null,
     updatedAt: saved.updatedAt ?? null,
   };
+}
+
+function whatsappWebhookPublicUrl() {
+  const configured = String(process.env.WHATSAPP_WEBHOOK_PUBLIC_URL ?? '').trim();
+  if (configured) return configured;
+  const baseUrl = String(process.env.PUBLIC_APP_URL ?? '').trim().replace(/\/$/, '');
+  return baseUrl ? `${baseUrl}/webhooks/whatsapp` : '';
+}
+
+function isHttpsUrl(value) {
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function whatsappRequirementsForPath(setupPath) {
@@ -1833,6 +2218,13 @@ async function fetchMercadoPagoPreapproval(preapprovalId, accessToken) {
 
 function normalizeSubscriptionStatus(status) {
   return normalizeBillingSubscriptionStatus(status);
+}
+
+function normalizeGoogleOAuthFailure(reason) {
+  const value = String(reason ?? '').toLowerCase();
+  if (value === 'access_denied') return 'cancelled';
+  if (value === 'temporarily_unavailable') return 'temporarily_unavailable';
+  return 'failed';
 }
 
 function isOnOrBefore(value, now) {

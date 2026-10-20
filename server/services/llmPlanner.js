@@ -162,10 +162,56 @@ export class LLMPlanner {
     if ((config.provider ?? 'deepseek') === 'mock') throw new Error('mock provider selected');
     const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(config.provider));
     if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(config.provider).join('/')}`);
-    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products });
+    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, config });
 
     if (config.provider === 'google') return callGemini({ config, apiKey, prompt });
     return callChatCompletions({ config, apiKey, prompt });
+  }
+
+  async composeReply({ tenantId, conversationId, facts, fallbackText }) {
+    const tenant = await this.getTenant(tenantId);
+    const platformConfig = platformLlmConfig(this.store.getState());
+    const config = {
+      timeoutMs: this.config?.llmRequestTimeoutMs,
+      maxTokens: Math.min(Number(this.config?.llmMaxTokens ?? 350), 500),
+      ...platformConfig,
+      responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
+      tone: tenant?.config?.agentPolicy?.tone ?? 'tendero_colombiano',
+    };
+    if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
+    const provider = config.provider ?? 'deepseek';
+    const canCompose = this.config?.llmResponseComposerEnabled
+      && !config.simulator
+      && provider !== 'mock';
+    if (!canCompose) {
+      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    }
+    try {
+      const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(provider));
+      if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(provider).join('/')}`);
+      const prompt = buildReplyPrompt({ facts, fallbackText, config });
+      const result = provider === 'google'
+        ? await callGeminiReply({ config, apiKey, prompt })
+        : await callChatReply({ config, apiKey, prompt });
+      const text = validateComposedReply(result.text, { facts, fallbackText });
+      this.events.emit({
+        type: 'llm.reply.composed',
+        tenantId,
+        conversationId,
+        detail: `Customer reply composed via ${result.providerMetadata.provider}/${result.providerMetadata.model}`,
+        metadata: { providerMetadata: result.providerMetadata, voice: normalizeVoiceProfile(config.tone) },
+      });
+      return { text, executionMode: 'provider_api', providerMetadata: result.providerMetadata };
+    } catch (error) {
+      this.events.emit({
+        type: 'llm.reply.fallback',
+        tenantId,
+        conversationId,
+        detail: `${provider} reply composer unavailable: ${error.message}`,
+        metadata: { provider, model: config.model, voice: normalizeVoiceProfile(config.tone) },
+      });
+      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    }
   }
 
   codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products }) {
@@ -262,7 +308,11 @@ export class LLMPlanner {
 
     const delivery = containsAny(normalized, ['domicilio', 'domicilios', 'envio', 'envío', 'llevar', 'traer', 'manda', 'mandar', 'lleve']);
     const availabilityQuestion = containsAny(normalized, ['tienes', 'tiene', 'hay', 'disponible', 'manejan', 'maneja', 'manejas', 'venden', 'consigo', 'colabora', 'colabore', 'recomienda', 'ofrece']);
-    const products = providedProducts ?? this.store.getState().productsByTenant[tenantId] ?? [];
+    const products = providedProducts ?? (
+      this.config?.allowLocalCatalogFallback === false
+        ? []
+        : this.store.getState().productsByTenant[tenantId] ?? []
+    );
     const matchedItems = extractItems(normalized, products);
     const inferredItems = extractUnknownOrderItems(normalized, matchedItems);
     const items = mergePlannerItems(matchedItems, inferredItems);
@@ -323,6 +373,9 @@ export class LLMPlanner {
   }
 
   async listProducts(tenantId) {
+    // En produccion Google Sheets/Drive es la fuente de verdad; no filtramos
+    // el prompt con una copia persistida del catalogo.
+    if (this.config?.allowLocalCatalogFallback === false) return [];
     if (this.store.listProducts) return this.store.listProducts(tenantId);
     return this.store.getState().productsByTenant[tenantId] ?? [];
   }
@@ -406,6 +459,7 @@ function cleanOrderRequest(text) {
 
 function splitOrderFragments(text) {
   return String(text ?? '')
+    .replace(/\blitro\s+y\s+medio\b/g, '1 5 l')
     .split(/\s+(?:y|tambien|también|ademas|además)\s+|,/)
     .map((fragment) => fragment.trim())
     .filter(Boolean);
@@ -452,11 +506,11 @@ function inferFragmentQuantity(fragment) {
 }
 
 function isCoveredByMatchedItem(candidate, matchedItems) {
-  const query = normalize(candidate.catalogQuery ?? candidate.rawName);
+  const query = normalizePresentationText(candidate.catalogQuery ?? candidate.rawName);
   const queryTokens = splitCatalogWords(query);
   return matchedItems.some((item) => {
-    const raw = normalize(item.rawName);
-    const catalog = normalize(item.catalogQuery);
+    const raw = normalizePresentationText(item.rawName);
+    const catalog = normalizePresentationText(item.catalogQuery);
     if (!raw && !catalog) return false;
     if (query === raw || query === catalog) return true;
     if (query.includes(raw) && item.requestedPresentation) return true;
@@ -464,6 +518,12 @@ function isCoveredByMatchedItem(candidate, matchedItems) {
     if (rawTokens.length > 1 && rawTokens.every((token) => queryTokens.some((queryToken) => sameSimpleWord(queryToken, token)))) return true;
     return raw.length >= 4 && queryTokens.some((token) => sameSimpleWord(token, raw));
   });
+}
+
+function normalizePresentationText(value) {
+  return normalize(value)
+    .replace(/\b(?:(?:un|una)\s+)?litro\s+y\s+medio\b/g, '1 5 l')
+    .replace(/\bmedio\s+litro\b/g, '500 ml');
 }
 
 function splitCatalogWords(value) {
@@ -479,7 +539,7 @@ function sameSimpleWord(a, b) {
 
 function presentationFromNearbyText(text, matchIndex, alias, product) {
   const window = normalize(text.slice(matchIndex, matchIndex + alias.length + 18));
-  const requestedPresentation = window.match(/\b(\d{2,4})\s*(ml|mililitros?|cc)?\b/)?.[0] ?? null;
+  const requestedPresentation = nearbyPresentation(window);
   if (!requestedPresentation) return {};
   const fields = [product.name, product.presentation, ...(product.aliases ?? [])].map(normalize).join(' ');
   const requestedNumber = requestedPresentation.match(/\d{2,4}/)?.[0];
@@ -492,6 +552,12 @@ function presentationFromNearbyText(text, matchIndex, alias, product) {
     confidence: 0.7,
     ambiguityReason: 'presentacion_solicitada_no_coincide_con_sku_alias',
   };
+}
+
+function nearbyPresentation(value) {
+  if (/\b(?:(?:un|una)\s+)?litro\s+y\s+medio\b/.test(value)) return '1.5 L';
+  if (/\bmedio\s+litro\b/.test(value)) return '500 ml';
+  return value.match(/\b(\d{2,4})\s*(ml|mililitros?|cc)?\b/)?.[0] ?? null;
 }
 
 function findAliasIndex(text, alias) {
@@ -569,7 +635,7 @@ function findPresentationVariants(item, products) {
 function mentionsPresentation(text) {
   return /\b\d+\s*(ml|litro|litros|l|g|gr|kg)\b/.test(text) ||
     /\bx\s*\d+\b/.test(text) ||
-    containsAny(text, ['personal', 'familiar', 'grande', 'pequena', 'pequeno', 'pequenita', 'pequenito', 'sin gas', 'entera', 'sachet', 'barra']);
+    containsAny(text, ['litro y medio', 'medio litro', 'personal', 'familiar', 'grande', 'pequena', 'pequeno', 'pequenita', 'pequenito', 'sin gas', 'entera', 'sachet', 'barra']);
 }
 
 function extractCatalogQuery(text) {
@@ -594,7 +660,7 @@ function isRemovalRequest(text) {
 }
 
 function isPaymentMethodPreference(text) {
-  return containsAny(text, ['pago con tarjeta', 'tarjeta debito', 'tarjeta débito', 'datafono', 'datáfono', 'efectivo', 'nequi', 'daviplata']);
+  return containsAny(text, ['pago con tarjeta', 'tarjeta debito', 'tarjeta débito', 'datafono', 'datáfono', 'efectivo', 'bre-b', 'breb', 'bre b', 'nequi', 'daviplata']);
 }
 
 function isComplaintOrDeliveryIssue(text) {
@@ -616,6 +682,7 @@ function isComplaintOrDeliveryIssue(text) {
 
 function inferPaymentMethod(text) {
   if (containsAny(text, ['datafono', 'datáfono', 'tarjeta debito', 'tarjeta débito', 'tarjeta'])) return 'card_terminal';
+  if (containsAny(text, ['bre-b', 'breb', 'bre b'])) return 'bre_b';
   if (containsAny(text, ['nequi'])) return 'nequi';
   if (containsAny(text, ['daviplata'])) return 'daviplata';
   if (containsAny(text, ['efectivo'])) return 'cash';
@@ -623,6 +690,9 @@ function inferPaymentMethod(text) {
 }
 
 function looksLikeNewOrder(text) {
+  // A fresh availability question is not an answer to a pending checkout.
+  // Let the shopper explore the catalog without being trapped in the old draft.
+  if (isAvailabilityOrOptionsQuestion(text) || /\b(?:tiene|tienes|hay|maneja|manejan)\b/.test(normalize(text))) return true;
   return containsAny(text, [
     'regalas',
     'regala',
@@ -647,7 +717,7 @@ function looksLikeNewOrder(text) {
   ]);
 }
 
-function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
+function buildPlannerPrompt({ text, customerProfile, conversation, products, config = {} }) {
   const catalog = (products ?? []).map(({ sku, name, aliases, category, stock }) => ({
     sku,
     name,
@@ -662,7 +732,7 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
     'Intents permitidos: delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     'reasoningMode debe ser shopkeeper_guided_sale para ventas de tienda de barrio.',
     'customerUnderstanding debe incluir rawNeed, certainty, occasion y delivery.',
-    'Debes actuar como tendero colombiano razonando la canasta antes de validar disponibilidad: interpreta modismos, errores de escritura, marcas incompletas, presentaciones, sabores, cantidades y pedidos por valor.',
+    `Perfil de voz de la tienda: ${normalizeVoiceProfile(config.tone)}. Debes actuar como tendero colombiano razonando la canasta antes de validar disponibilidad: interpreta modismos, errores de escritura, marcas incompletas, presentaciones, sabores, cantidades y pedidos por valor.`,
     'No hagas parsing deterministico por alias exacto. Primero extrae hipotesis de producto desde el lenguaje del cliente; luego decide como validarlas con herramientas.',
     'candidateItems conserva cada producto, ingrediente o categoria candidata con rawName, catalogQuery, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
     'toolPlan debe declarar las herramientas que quieres usar y sus filtros. Para catalogo usa google_sheets_read_table con filters {sku}, {query} o {category}.',
@@ -686,6 +756,61 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products }) {
       products: catalog,
     }),
   ].join('\n');
+}
+
+function buildReplyPrompt({ facts, fallbackText, config }) {
+  const requiredTerms = replyRequiredTerms(facts, fallbackText);
+  return [
+    'Redacta la respuesta final para un comprador de una tienda colombiana por WhatsApp.',
+    'Devuelve solo JSON valido con la propiedad reply.',
+    `Perfil de voz: ${normalizeVoiceProfile(config.tone)}. Usa cercania colombiana solo si encaja; nunca caricaturices ni repitas muletillas.`,
+    'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
+    'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
+    'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
+    JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
+  ].join('\n');
+}
+
+function validateComposedReply(text, { facts, fallbackText }) {
+  const reply = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (reply.length < 3 || reply.length > 1_200) return fallbackText;
+  const normalizedReply = normalize(reply);
+  const requiredTerms = replyRequiredTerms(facts, fallbackText);
+  if (requiredTerms.some((term) => !normalizedReply.includes(normalize(term)))) return fallbackText;
+  const allowedMoney = extractMoneyTokens(JSON.stringify(facts ?? {}).concat(` ${fallbackText}`));
+  const replyMoney = extractMoneyTokens(reply);
+  if (replyMoney.some((value) => !allowedMoney.has(value))) return fallbackText;
+  return reply;
+}
+
+function replyRequiredTerms(facts, fallbackText) {
+  const products = facts?.products ?? facts?.items ?? [];
+  const names = products
+    .map((item) => item?.name ?? item?.product?.name)
+    .filter(Boolean)
+    .slice(0, 6);
+  const required = [...names, ...(facts?.requiredTerms ?? [])]
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  if (facts?.subtotal !== undefined && facts?.subtotal !== null) required.push(formatMoneyForReply(facts.subtotal));
+  return [...new Set(required)];
+}
+
+function extractMoneyTokens(value) {
+  return new Set((String(value ?? '').match(/\$\s?[\d.]+/g) ?? [])
+    .map((item) => item.replace(/\s+/g, '')));
+}
+
+function formatMoneyForReply(value) {
+  return `$ ${Number(value ?? 0).toLocaleString('es-CO')}`;
+}
+
+function normalizeVoiceProfile(value) {
+  const tone = String(value ?? 'tendero_colombiano').trim().toLowerCase();
+  if (tone === 'tendero_bogotano' || tone === 'tendero_colombiano') {
+    return 'tendero_colombiano: cercano, respetuoso, claro, breve y natural; puede usar modismos locales con moderación';
+  }
+  return tone || 'tendero_colombiano: cercano, respetuoso, claro y breve';
 }
 
 function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) {
@@ -847,6 +972,41 @@ async function callChatCompletions({ config, apiKey, prompt }) {
   };
 }
 
+async function callChatReply({ config, apiKey, prompt }) {
+  const provider = config.provider ?? 'deepseek';
+  const url = resolveBaseUrl(config, provider) ?? (provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions');
+  const startedAt = Date.now();
+  const model = config.model ?? defaultModel(provider);
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      temperature: Number(config.temperature ?? 0.2),
+      max_tokens: Number(config.maxTokens ?? 350),
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  }, Number(config.timeoutMs ?? 15000));
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
+  const payload = JSON.parse(text || '{}');
+  const parsed = JSON.parse(stripJson(payload.choices?.[0]?.message?.content ?? '{}'));
+  return {
+    text: String(parsed.reply ?? '').trim(),
+    providerMetadata: {
+      provider,
+      model,
+      endpoint: redactedEndpoint(url),
+      durationMs: Date.now() - startedAt,
+      usage: payload.usage ?? null,
+    },
+  };
+}
+
 async function callGemini({ config, apiKey, prompt }) {
   const model = config.model ?? defaultModel('google');
   const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
@@ -870,6 +1030,40 @@ async function callGemini({ config, apiKey, prompt }) {
   const payload = JSON.parse(text || '{}');
   return {
     plan: normalizeProviderPlan(JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'))),
+    providerMetadata: {
+      provider: 'google',
+      model,
+      endpoint: redactedEndpoint(endpoint),
+      durationMs: Date.now() - startedAt,
+      usage: payload.usageMetadata ?? null,
+    },
+  };
+}
+
+async function callGeminiReply({ config, apiKey, prompt }) {
+  const model = config.model ?? defaultModel('google');
+  const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const joiner = baseUrl.includes('?') ? '&' : '?';
+  const endpoint = `${baseUrl}${joiner}key=${encodeURIComponent(apiKey)}`;
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      generationConfig: {
+        temperature: Number(config.temperature ?? 0.2),
+        maxOutputTokens: Number(config.maxTokens ?? 350),
+        responseMimeType: 'application/json',
+      },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    }),
+  }, Number(config.timeoutMs ?? 15000));
+  const text = await response.text();
+  if (!response.ok) throw new Error(`google API ${response.status}: ${shorten(text)}`);
+  const payload = JSON.parse(text || '{}');
+  const parsed = JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'));
+  return {
+    text: String(parsed.reply ?? '').trim(),
     providerMetadata: {
       provider: 'google',
       model,

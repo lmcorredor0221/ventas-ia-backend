@@ -1,6 +1,27 @@
 import { appendAuditEvent } from './authService.js';
+import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
+const LIVE_CATALOG_CACHE_TTL_MS = 30 * 1000;
+
+function googleConnectionRequiredError(message) {
+  const error = new Error(message);
+  error.statusCode = 428;
+  error.code = 'google_connection_required';
+  return error;
+}
+
+function googleConnectionRequiredResult(message) {
+  return {
+    status: 'connection_required',
+    code: 'google_connection_required',
+    rows: [],
+    files: [],
+    source_refs: [],
+    message,
+  };
+}
 
 export class ToolRegistry {
   constructor({ store, events, usage, config, googleWorkspace, secretVault }) {
@@ -10,15 +31,25 @@ export class ToolRegistry {
     this.config = config;
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
+    this.outbox = null;
+    this.googleAccessTokenCache = new Map();
+    this.liveCatalogCache = new Map();
+  }
+
+  setOutbox(outbox) {
+    this.outbox = outbox;
   }
 
   async call(toolName, tenantId, conversationId, payload = {}) {
+    const traceId = payload.traceId
+      ?? this.store.getState().conversations?.find((conversation) => conversation.id === conversationId)?.traceId
+      ?? null;
     this.events.emit({
       type: 'tool.call.started',
       tenantId,
       conversationId,
       detail: `${toolName} started`,
-      metadata: { toolName, payloadSummary: summarize(payload) },
+      metadata: { toolName, traceId, payloadSummary: summarize(payload) },
     });
     try {
       const result = await this.invoke(toolName, tenantId, conversationId, payload);
@@ -27,7 +58,7 @@ export class ToolRegistry {
         tenantId,
         conversationId,
         detail: `${toolName} completed`,
-        metadata: { toolName, resultSummary: summarize(result) },
+        metadata: { toolName, traceId, resultSummary: summarize(result) },
       });
       this.usage?.recordToolCall(tenantId, toolName, { conversationId });
       return result;
@@ -37,7 +68,7 @@ export class ToolRegistry {
         tenantId,
         conversationId,
         detail: `${toolName} failed: ${error.message}`,
-        metadata: { toolName },
+        metadata: { toolName, traceId },
       });
       throw error;
     }
@@ -63,14 +94,22 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudo consultar el catalogo de Google de esta tienda.');
+    }
     const rows = live
-      ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: payload.range ?? tenant?.config?.googleSheets?.catalogRange })
+      ? await this.readLiveCatalogRows({
+        tenantId,
+        tenant,
+        live,
+        range: payload.range ?? tenant?.config?.googleSheets?.catalogRange,
+      })
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
     return {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'driveFileId'],
       rows: filterRows(rows, payload.filters),
-      source: live ? 'google_sheets_live' : 'local_mirror',
+      source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
       fetched_at: new Date().toISOString(),
     };
@@ -78,6 +117,10 @@ export class ToolRegistry {
 
   async googleDriveFilePicker(tenantId, payload) {
     await sleep(25);
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudieron consultar los documentos de Google de esta tienda.');
+    }
     const files = this.store.listDriveFiles ? await this.store.listDriveFiles(tenantId) : (this.store.getState().driveFilesByTenant[tenantId] ?? []);
     const requested = payload.file_ids?.length ? files.filter((file) => payload.file_ids.includes(file.fileId)) : files;
     return {
@@ -92,6 +135,9 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      return googleConnectionRequiredResult('No se pudo consultar el cliente en Google Sheets de esta tienda.');
+    }
     const profile = live
       ? await this.lookupLiveCustomerProfile({ tenantId, tenant, live, waId: payload.wa_id })
       : this.store.getCustomerProfile
@@ -101,7 +147,7 @@ export class ToolRegistry {
       status: profile ? 'found' : 'not_found',
       profile: profile ?? null,
       source_ref: profile?.sheetRowId ?? profile?.driveFileId ?? null,
-      source: live ? 'google_sheets_live' : 'local_mirror',
+      source: live ? 'google_sheets_live' : 'local_test_fixture',
       sheet_ref: tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     };
   }
@@ -110,6 +156,9 @@ export class ToolRegistry {
     await sleep(25);
     const now = new Date().toISOString();
     const live = await this.liveGoogleContext(tenantId);
+    if (!live && !this.config.allowLocalCatalogFallback) {
+      throw googleConnectionRequiredError('No se pudo guardar el cliente en Google Sheets de esta tienda.');
+    }
     const liveSourceRef = live ? await this.upsertLiveCustomerProfile({ tenantId, live, payload, now }) : null;
     let profile;
     this.store.mutate((state) => {
@@ -130,17 +179,26 @@ export class ToolRegistry {
       };
       state.customerProfilesByTenant[tenantId][payload.wa_id] = profile;
     });
-    this.store.persistCustomerProfile?.(tenantId, payload.wa_id);
+    await this.store.persistCustomerProfile?.(tenantId, payload.wa_id);
     this.audit(tenantId, 'tool.google_sheets_customer_profile_upsert', 'customer_profile', {
       waId: payload.wa_id,
       sourceRef: profile.sheetRowId,
     });
-    return { status: 'saved', profile, source_ref: liveSourceRef ?? profile.sheetRowId, source: live ? 'google_sheets_live' : 'local_mirror' };
+    return { status: 'saved', profile, source_ref: liveSourceRef ?? profile.sheetRowId, source: live ? 'google_sheets_live' : 'local_test_fixture' };
   }
 
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
     await sleep(25);
     const now = new Date().toISOString();
+    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const workspace = this.store.getState().googleWorkspacesByTenant?.[tenantId];
+    const hasLiveConnection = connection?.status === 'connected'
+      && connection.mode === 'live'
+      && Boolean(workspace?.spreadsheet?.id);
+    if (!hasLiveConnection && !this.config.allowLocalCatalogFallback) {
+      throw googleConnectionRequiredError('No se pudo registrar el pedido en Google Sheets de esta tienda.');
+    }
+    const status = assertOrderStatus(payload.status ?? 'pending_human_preparation');
     const order = {
       id: `ord-${crypto.randomUUID().slice(0, 10)}`,
       tenantId,
@@ -150,19 +208,27 @@ export class ToolRegistry {
       deliveryAddress: payload.delivery_address,
       items: payload.items ?? [],
       subtotal: payload.subtotal ?? 0,
-      status: payload.status ?? 'pending_human_preparation',
+      status,
       createdAt: now,
       updatedAt: now,
+      statusHistory: [{ status, at: now, actorId: 'assistant' }],
+      sheetSyncStatus: hasLiveConnection ? 'queued' : 'not_connected',
     };
+    const sheetProjectionEntry = this.createOrderSheetCreateEntry(order);
     this.store.mutate((state) => {
       state.ordersByTenant ??= {};
       state.ordersByTenant[tenantId] ??= [];
       state.ordersByTenant[tenantId].unshift(order);
     });
-    const live = await this.liveGoogleContext(tenantId);
-    let liveSourceRef = null;
-    if (live) liveSourceRef = await this.appendLiveOrder({ tenantId, live, order });
-    this.store.persistOrder?.(tenantId, order.id);
+    // PostgreSQL is the source of truth. A Google token refresh or Sheets
+    // outage must never sit between a confirmed order and its local write.
+    if (this.store.persistOrderWithOutbox) {
+      await this.store.persistOrderWithOutbox(tenantId, order.id, sheetProjectionEntry ? [sheetProjectionEntry] : []);
+    } else {
+      await this.store.persistOrder?.(tenantId, order.id);
+      if (sheetProjectionEntry) await this.store.enqueueOutbox?.(sheetProjectionEntry);
+    }
+    const projection = { provider: 'google_sheets', status: sheetProjectionEntry ? 'queued' : 'not_queued' };
     this.audit(tenantId, 'tool.google_sheets_order_write', 'order', {
       orderId: order.id,
       conversationId,
@@ -170,7 +236,30 @@ export class ToolRegistry {
       subtotal: order.subtotal,
       itemCount: order.items.length,
     });
-    return { status: 'saved', order, source_ref: liveSourceRef ?? order.id, source: live ? 'google_sheets_live' : 'local_mirror' };
+    return {
+      status: 'saved',
+      order,
+      source_ref: order.id,
+      source: hasLiveConnection ? 'google_sheets_outbox' : 'local_test_fixture',
+      projection,
+    };
+  }
+
+  createOrderSheetCreateEntry(order) {
+    if (!this.outbox) return null;
+    return this.outbox.createEntry({
+      tenantId: order.tenantId,
+      kind: 'order.sheet_create',
+      aggregateType: 'order',
+      aggregateId: order.id,
+      idempotencyKey: `order-sheet-create:${order.id}`,
+      payload: {
+        tenantId: order.tenantId,
+        orderId: order.id,
+        conversationId: order.conversationId,
+        traceId: this.store.getState().conversations?.find((item) => item.id === order.conversationId)?.traceId ?? null,
+      },
+    });
   }
 
   async liveGoogleContext(tenantId) {
@@ -183,36 +272,78 @@ export class ToolRegistry {
     if (!spreadsheetId) return null;
     const refreshToken = this.secretVault.readSecret(connection.refreshTokenRef);
     if (!refreshToken) return null;
-    const accessToken = await this.googleWorkspace.refreshAccessToken(refreshToken);
+    const accessToken = await this.googleAccessToken({
+      tenantId,
+      refreshTokenRef: connection.refreshTokenRef,
+      refreshToken,
+    });
     return { accessToken, spreadsheetId, connection, workspace };
+  }
+
+  async googleAccessToken({ tenantId, refreshTokenRef, refreshToken }) {
+    const key = `${tenantId}:${refreshTokenRef}`;
+    const now = Date.now();
+    const cached = this.googleAccessTokenCache.get(key);
+    if (cached?.accessToken && cached.expiresAt > now) return cached.accessToken;
+    if (cached?.pending) return cached.pending;
+
+    const pending = this.googleWorkspace.refreshAccessToken(refreshToken)
+      .then((accessToken) => {
+        this.googleAccessTokenCache.set(key, {
+          accessToken,
+          expiresAt: Date.now() + GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS,
+        });
+        return accessToken;
+      })
+      .catch((error) => {
+        this.googleAccessTokenCache.delete(key);
+        throw error;
+      });
+    this.googleAccessTokenCache.set(key, { pending });
+    return pending;
   }
 
   async readLiveCatalogRows({ tenantId, tenant, live, range }) {
     const sheetRange = range ?? 'Catalogo!A1:J1000';
-    const values = await this.googleWorkspace.readValues({
+    const cacheKey = `${tenantId}:${live.spreadsheetId}:${sheetRange}`;
+    const cached = this.liveCatalogCache.get(cacheKey);
+    if (cached?.rows && cached.expiresAt > Date.now()) return cached.rows;
+    if (cached?.pending) return cached.pending;
+
+    const pending = this.googleWorkspace.readValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
       range: sheetRange,
+    }).then((values) => {
+      const rows = parseCatalogRows(values);
+      this.store.mutate((state) => {
+        state.productsByTenant ??= {};
+        state.driveFilesByTenant ??= {};
+        state.productsByTenant[tenantId] = mergeByKey(state.productsByTenant[tenantId] ?? [], rows, 'sku');
+        state.driveFilesByTenant[tenantId] = mergeByKey(
+          state.driveFilesByTenant[tenantId] ?? [],
+          rows
+            .filter((row) => row.driveFileId)
+            .map((row) => ({
+              fileId: row.driveFileId,
+              name: `${row.name} - ficha comercial`,
+              mimeType: 'application/vnd.google-apps.document',
+              summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
+            })),
+          'fileId',
+        );
+      });
+      this.liveCatalogCache.set(cacheKey, {
+        rows,
+        expiresAt: Date.now() + LIVE_CATALOG_CACHE_TTL_MS,
+      });
+      return rows;
+    }).catch((error) => {
+      this.liveCatalogCache.delete(cacheKey);
+      throw error;
     });
-    const rows = parseCatalogRows(values);
-    this.store.mutate((state) => {
-      state.productsByTenant ??= {};
-      state.driveFilesByTenant ??= {};
-      state.productsByTenant[tenantId] = mergeByKey(state.productsByTenant[tenantId] ?? [], rows, 'sku');
-      state.driveFilesByTenant[tenantId] = mergeByKey(
-        state.driveFilesByTenant[tenantId] ?? [],
-        rows
-          .filter((row) => row.driveFileId)
-          .map((row) => ({
-            fileId: row.driveFileId,
-            name: `${row.name} - ficha comercial`,
-            mimeType: 'application/vnd.google-apps.document',
-            summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
-          })),
-        'fileId',
-      );
-    });
-    return rows.length ? rows : this.store.listProducts ? await this.store.listProducts(tenantId) : (tenant ? this.store.getState().productsByTenant[tenantId] ?? [] : []);
+    this.liveCatalogCache.set(cacheKey, { pending });
+    return pending;
   }
 
   async lookupLiveCustomerProfile({ tenantId, tenant, live, waId }) {
@@ -229,7 +360,7 @@ export class ToolRegistry {
         state.customerProfilesByTenant[tenantId] ??= {};
         state.customerProfilesByTenant[tenantId][waId] = profile;
       });
-      this.store.persistCustomerProfile?.(tenantId, waId);
+      await this.store.persistCustomerProfile?.(tenantId, waId);
     }
     return profile;
   }
@@ -281,6 +412,50 @@ export class ToolRegistry {
     return 'Pedidos!A:M';
   }
 
+  async appendOrderProjection({ tenantId, order }) {
+    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live) {
+      if (connection?.status === 'connected' && connection.mode === 'live') {
+        throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión y reintentaremos automáticamente.');
+      }
+      return { provider: 'google_sheets', status: 'not_connected', sourceRef: null };
+    }
+    const sourceRef = await this.appendLiveOrder({ live, order });
+    return { provider: 'google_sheets', status: 'synced', sourceRef };
+  }
+
+  async syncLiveOrderStatus({ tenantId, order, status, updatedAt }) {
+    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const live = await this.liveGoogleContext(tenantId);
+    if (!live) {
+      if (connection?.status === 'connected' && connection.mode === 'live') {
+        throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión antes de continuar.');
+      }
+      return { status: 'not_connected' };
+    }
+    const rows = await this.googleWorkspace.readValues({
+      accessToken: live.accessToken,
+      spreadsheetId: live.spreadsheetId,
+      range: 'Pedidos!A:A',
+    });
+    const rowIndex = rows.findIndex((row) => row[0] === order.id);
+    if (rowIndex < 0) {
+      const error = new Error('No encontramos el pedido en la hoja. Revisa la conexión antes de continuar.');
+      error.statusCode = 409;
+      throw error;
+    }
+    const nextOrder = { ...order, status: assertOrderStatus(status), updatedAt };
+    const rowNumber = rowIndex + 1;
+    await this.googleWorkspace.updateValues({
+      accessToken: live.accessToken,
+      spreadsheetId: live.spreadsheetId,
+      range: `Pedidos!G${rowNumber}:J${rowNumber}`,
+      values: [orderToSheetRow(nextOrder).slice(6, 10)],
+    });
+    return { status: 'synced' };
+  }
+
   async googleDriveCustomerProfileLookup(tenantId, payload) {
     return this.googleSheetsCustomerProfileLookup(tenantId, payload);
   }
@@ -314,8 +489,8 @@ export class ToolRegistry {
         nextStep: request.consequence,
       });
     });
-    this.store.persistPendingRequest?.(request.id);
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistPendingRequest?.(request.id);
+    await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'approval.requested', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
     this.audit(tenantId, 'tool.approval_gate.requested', 'pending_request', {
       requestId: request.id,
@@ -354,8 +529,8 @@ export class ToolRegistry {
         nextStep: request.consequence,
       });
     });
-    this.store.persistPendingRequest?.(request.id);
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistPendingRequest?.(request.id);
+    await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'fallback.activated', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
     this.audit(tenantId, 'tool.human_handoff.created', 'pending_request', {
       requestId: request.id,
@@ -382,7 +557,7 @@ export class ToolRegistry {
     this.store.mutate((state) => {
       state.transactions.unshift(transaction);
     });
-    this.store.persistTransaction?.(transaction.id);
+    await this.store.persistTransaction?.(transaction.id);
     this.audit(tenantId, 'tool.transactional_write.committed', 'transaction', {
       transactionId: transaction.id,
       conversationId,
@@ -406,7 +581,7 @@ export class ToolRegistry {
         conversation.messages.push({
           id: providerMessageId,
           role: payload.senderRole ?? 'agent',
-          text: payload.text ?? payload.template_name ?? 'Mensaje enviado',
+          text: payload.text ?? payload.interactive?.body ?? payload.template_name ?? 'Mensaje enviado',
           channel: liveConfig ? 'whatsapp_live' : 'whatsapp_mock',
           action: payload.action ?? payload.template_name ?? 'session_message',
           createdAt: new Date().toISOString(),
@@ -414,7 +589,7 @@ export class ToolRegistry {
         conversation.updatedAt = new Date().toISOString();
       }
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
     this.audit(tenantId, 'tool.whatsapp_business_messaging.sent', 'whatsapp_message', {
       conversationId,
       providerMessageId,
@@ -574,7 +749,7 @@ function orderToSheetRow(order) {
     order.deliveryAddress ?? '',
     JSON.stringify(order.items ?? []),
     order.subtotal ?? 0,
-    order.status,
+    toGoogleSheetStatus(order.status ?? fromGoogleSheetStatus(order.sheetStatus) ?? 'pending_human_preparation'),
     order.handoffId ?? '',
     order.createdAt,
     order.updatedAt,
@@ -594,6 +769,46 @@ function buildWhatsAppMessagePayload(payload) {
         name: payload.template_name,
         language: { code: payload.languageCode ?? payload.language_code ?? 'es_CO' },
         components: payload.components ?? [],
+      },
+    };
+  }
+  if (payload.interactive?.kind === 'button') {
+    const buttons = (payload.interactive.buttons ?? []).slice(0, 3).map((button) => ({
+      type: 'reply',
+      reply: { id: button.id, title: String(button.title).slice(0, 20) },
+    }));
+    if (!buttons.length) throw new Error('Interactive button messages require at least one button');
+    return {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: payload.wa_id,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: payload.interactive.body ?? payload.text ?? 'Elige una opción' },
+        action: { buttons },
+      },
+    };
+  }
+  if (payload.interactive?.kind === 'list') {
+    const rows = (payload.interactive.rows ?? []).slice(0, 10).map((row) => ({
+      id: row.id,
+      title: String(row.title).slice(0, 24),
+      ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
+    }));
+    if (!rows.length) throw new Error('Interactive list messages require at least one row');
+    return {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: payload.wa_id,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: payload.interactive.body ?? payload.text ?? 'Elige una opción' },
+        action: {
+          button: String(payload.interactive.buttonLabel ?? 'Ver opciones').slice(0, 20),
+          sections: [{ title: String(payload.interactive.sectionTitle ?? 'Opciones').slice(0, 24), rows }],
+        },
       },
     };
   }

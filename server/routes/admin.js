@@ -24,12 +24,14 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
       const tenants = await readTenants(store);
       const tenantSummaries = await Promise.all(tenants.map(async (tenant) => tenantAdminSummary({ tenant, store, usage, controlPlane })));
       const webhooks = await readWebhookEvents(store, { limit: 200 });
+      const outboxEntries = await readOutbox(store, { limit: 100 });
       const summary = summarizeWebhookEvents(webhooks);
       res.json({
         generatedAt: new Date().toISOString(),
         platform: {
           llm: publicLlmSettings(platformLlmConfig(store.getState())),
           webhookSummary: summary,
+          outboxSummary: summarizeOutbox(outboxEntries),
         },
         totals: {
           tenants: tenants.length,
@@ -40,6 +42,7 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
         },
         tenants: tenantSummaries,
         recentWebhooks: webhooks.slice(0, 20),
+        recentOutbox: outboxEntries.slice(0, 20).map(publicOutboxEntry),
       });
     } catch (error) {
       next(error);
@@ -96,6 +99,22 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
       const event = events.find((item) => item.id === req.params.id);
       if (!event) return res.status(404).json({ error: 'Webhook event not found' });
       return res.json(event);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/outbox', async (req, res, next) => {
+    try {
+      const entries = await readOutbox(store, {
+        tenantId: req.query.tenantId,
+        status: req.query.status,
+        limit: Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500),
+      });
+      res.json({
+        summary: summarizeOutbox(entries),
+        entries: entries.map(publicOutboxEntry),
+      });
     } catch (error) {
       next(error);
     }
@@ -328,6 +347,45 @@ async function readWebhookEvents(store, filters = {}) {
   if (store.listWebhookEvents) return store.listWebhookEvents(filters);
   const events = store.getState().webhookEvents ?? [];
   return filterWebhookEvents(events, filters).slice(0, Number(filters.limit ?? 200));
+}
+
+async function readOutbox(store, { tenantId, status, limit = 100 } = {}) {
+  const entries = store.listOutbox
+    ? await store.listOutbox({ status, limit })
+    : (store.getState().integrationOutbox ?? []).filter((entry) => !status || entry.status === status).slice(-limit);
+  return entries.filter((entry) => !tenantId || entry.tenantId === tenantId);
+}
+
+function summarizeOutbox(entries) {
+  const summary = {
+    total: entries.length,
+    pending: 0,
+    processing: 0,
+    retrying: 0,
+    failed: 0,
+    processed: 0,
+  };
+  for (const entry of entries) {
+    if (Object.hasOwn(summary, entry.status)) summary[entry.status] += 1;
+  }
+  return summary;
+}
+
+function publicOutboxEntry(entry) {
+  return {
+    id: entry.id,
+    tenantId: entry.tenantId,
+    kind: entry.kind,
+    aggregateType: entry.aggregateType,
+    aggregateId: entry.aggregateId,
+    status: entry.status,
+    attempts: Number(entry.attempts ?? 0),
+    nextAttemptAt: entry.nextAttemptAt,
+    createdAt: entry.createdAt,
+    lockedAt: entry.lockedAt,
+    processedAt: entry.processedAt,
+    lastError: entry.lastError,
+  };
 }
 
 function sanitizeSettingsPatch(body) {

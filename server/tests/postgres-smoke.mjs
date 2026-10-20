@@ -59,9 +59,12 @@ try {
     'billing_access_exceptions',
     'billing_usage_cycles',
     'billing_funnel_events',
+    'integration_outbox',
+    'inbound_messages',
+    'interaction_offers',
     'schema_migrations',
   ]]);
-  assert.equal(tables.rows.length, 29);
+  assert.equal(tables.rows.length, 32);
 
   const seeded = await store.pool.query(`
     SELECT
@@ -86,6 +89,31 @@ try {
   assert.ok(seeded.rows[0].users >= 1);
   assert.ok(seeded.rows[0].tenant_members >= 1);
   assert.ok(seeded.rows[0].billing_plans >= 1);
+
+  const inbound = await store.enqueueInboundMessage({
+    tenantId: 'andina',
+    provider: 'meta_whatsapp_cloud_api',
+    phoneNumberId: '100000000001',
+    waId: `57300${suffix.slice(-6)}`,
+    messageId: `wamid-pg-${suffix}`,
+    messageType: 'text',
+    text: 'Prueba de persistencia de webhook',
+  });
+  assert.equal(inbound.created, true);
+  const inboundDuplicate = await store.enqueueInboundMessage({
+    tenantId: 'andina',
+    provider: 'meta_whatsapp_cloud_api',
+    phoneNumberId: '100000000001',
+    waId: `57300${suffix.slice(-6)}`,
+    messageId: `wamid-pg-${suffix}`,
+    messageType: 'text',
+    text: 'Prueba de persistencia de webhook',
+  });
+  assert.equal(inboundDuplicate.created, false);
+  assert.equal((await store.getInboundMessage(`wamid-pg-${suffix}`)).status, 'queued');
+  const inboundOutbox = (await store.listOutbox()).find((entry) => entry.idempotencyKey === `inbound:wamid-pg-${suffix}`);
+  assert.equal(inboundOutbox?.kind, 'whatsapp.inbound_processing');
+  assert.equal(inboundOutbox?.status, 'pending');
 
   const catalogSmoke = await postJson(`${base}/api/tools/google_sheets_read_table/smoke-test`, {
     tenantId: 'andina',
@@ -278,11 +306,11 @@ try {
   assert.ok(overview.usage.metrics.agent_interactions >= 2);
 
   const apiUsage = await getJson(`${base}/api/usage?tenantId=${tenantId}`);
-  assert.equal(apiUsage.limits.includedDeliveries, 1000);
-  assert.equal(apiUsage.limits.includedInteractions, 5000);
+  assert.equal(apiUsage.limits.includedDeliveries, 400);
+  assert.equal(apiUsage.limits.includedInteractions, 2700);
 
   const billingStatus = await getJson(`${base}/api/billing/status?tenantId=${tenantId}`);
-  assert.equal(billingStatus.plan.id, 'ventas_ia_1000_domicilios');
+  assert.equal(billingStatus.plan.id, 'ventas_ia_400_domicilios');
   assert.ok(billingStatus.payments.some((payment) => payment.status === 'approved'));
 
   const billingRows = await store.pool.query(`

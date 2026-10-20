@@ -72,6 +72,51 @@ try {
   }, { cookie, csrfToken });
   assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:J1000');
 
+  const ownerConversationConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    agentPolicy: { tone: 'formal_neutral' },
+    orderPolicy: {
+      paymentMethods: [
+        { id: 'cash', label: 'Efectivo', enabled: true },
+        { id: 'card', label: 'Tarjeta', enabled: true },
+        { id: 'bre_b', label: 'Bre-B', enabled: false },
+      ],
+    },
+  }, { cookie, csrfToken });
+  const configuredTenant = ownerConversationConfig.body.tenant ?? ownerConversationConfig.body;
+  assert.equal(configuredTenant.config.agentPolicy.tone, 'formal_neutral');
+  assert.equal(configuredTenant.config.orderPolicy.paymentMethods[2].enabled, false);
+
+  await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    orderPolicy: { paymentMethods: [] },
+  }, { cookie, csrfToken, expectedStatus: 403 });
+
+  const disposableConversationId = 'auth-smoke-disposable-conversation';
+  store.mutate((next) => {
+    next.conversations.unshift({
+      id: disposableConversationId,
+      tenantId: 'andina',
+      waId: '573001112233',
+      customer: 'Cliente de prueba',
+      status: 'blocked',
+      caseStatus: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    next.pendingRequests.unshift({
+      id: 'auth-smoke-disposable-request',
+      tenantId: 'andina',
+      conversationId: disposableConversationId,
+      type: 'human_handoff',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+  });
+  const deleted = await deleteJson(`${base}/api/conversations/${disposableConversationId}`, { cookie, csrfToken });
+  assert.equal(deleted.body.status, 'deleted');
+  assert.equal(store.getState().conversations.some((conversation) => conversation.id === disposableConversationId), false);
+  assert.equal(store.getState().pendingRequests.some((request) => request.conversationId === disposableConversationId), false);
+  assert.ok(store.getState().auditEvents.some((event) => event.action === 'conversation.deleted' && event.resource === disposableConversationId));
+
   const state = store.getState();
   assert.ok(state.auditEvents.some((event) => event.action === 'auth.login'));
   assert.ok(state.auditEvents.some((event) => event.action === 'tenant.create'));
@@ -151,6 +196,19 @@ async function patchJson(url, body, { cookie, csrfToken, expectedStatus = 200 } 
       ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
     },
     body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  assert.equal(response.status, expectedStatus, `${url} returned ${response.status}: ${text}`);
+  return { body: text ? JSON.parse(text) : {}, headers: response.headers };
+}
+
+async function deleteJson(url, { cookie, csrfToken, expectedStatus = 200 } = {}) {
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      ...(cookie ? { cookie } : {}),
+      ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+    },
   });
   const text = await response.text();
   assert.equal(response.status, expectedStatus, `${url} returned ${response.status}: ${text}`);

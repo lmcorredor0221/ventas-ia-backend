@@ -1,45 +1,110 @@
 import { appendAuditEvent } from './authService.js';
 
 export class AgentRuntime {
-  constructor({ store, events, tools, planner, usage, config }) {
+  constructor({ store, events, tools, planner, usage, config, orders = null }) {
     this.store = store;
     this.events = events;
     this.tools = tools;
     this.planner = planner;
     this.usage = usage;
     this.config = config;
+    this.orders = orders;
+    this.manualSweepTimer = null;
   }
 
-  async processInbound(normalized) {
-    const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
-    const conversation = await this.ensureConversation(tenantId, normalized);
+  start() {
+    if (this.manualSweepTimer) return;
+    const intervalMs = Number(this.config.manualCaseSweepIntervalMs ?? 30_000);
+    this.manualSweepTimer = setInterval(() => {
+      this.closeExpiredManualCases().catch((error) => {
+        console.error('Manual case sweep failed:', error.message);
+      });
+    }, intervalMs);
+    this.manualSweepTimer.unref?.();
+  }
 
-    if (await this.isDuplicate(normalized.messageId)) {
+  stop() {
+    if (!this.manualSweepTimer) return;
+    clearInterval(this.manualSweepTimer);
+    this.manualSweepTimer = null;
+  }
+
+  async processInbound(normalized, { skipIdempotency = false } = {}) {
+    const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
+    normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
+    await this.closeExpiredManualCases();
+    const conversation = await this.ensureConversation(tenantId, normalized);
+    if (conversation.traceId !== normalized.traceId) {
+      await this.patchConversation(conversation.id, { traceId: normalized.traceId });
+    }
+
+    if (!skipIdempotency && await this.isDuplicate(normalized.messageId)) {
       return { duplicate: true, conversation };
     }
+
+    if (conversation.manualMode === 'whatsapp_external' || conversation.status === 'manual_active') {
+      const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+      if (!claimed) return { duplicate: true, conversation };
+      await this.addMessage(conversation.id, {
+        role: 'user',
+        text: normalized.text || `[${normalized.messageType}]`,
+        providerMessageId: normalized.messageId,
+      });
+      await this.patchConversation(conversation.id, { manualLastActivityAt: new Date().toISOString() });
+      return {
+        duplicate: false,
+        manual: true,
+        conversation: await this.getConversation(conversation.id),
+        result: { summary: 'Manual WhatsApp conversation recorded' },
+      };
+    }
+
     await this.usage?.assertCanProcessInteraction(tenantId, { conversationId: conversation.id });
-    await this.markProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+    const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
+    if (!claimed) return { duplicate: true, conversation };
     this.usage?.recordAgentInteraction(tenantId, {
       conversationId: conversation.id,
       provider: normalized.provider,
       messageType: normalized.messageType,
     });
 
-    this.events.emit({ type: 'agent.started', tenantId, conversationId: conversation.id, detail: 'Inbound WhatsApp message received' });
+    this.events.emit({ type: 'agent.started', tenantId, conversationId: conversation.id, detail: 'Inbound WhatsApp message received', metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
     await this.addMessage(conversation.id, { role: 'user', text: normalized.text || `[${normalized.messageType}]`, providerMessageId: normalized.messageId });
 
     try {
       const result = await this.routeConversation(tenantId, conversation.id, normalized);
-      this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary });
+      this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
       return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
     } catch (error) {
-      this.events.emit({ type: 'agent.failed', tenantId, conversationId: conversation.id, detail: error.message });
+      this.events.emit({ type: 'agent.failed', tenantId, conversationId: conversation.id, detail: error.message, metadata: { traceId: normalized.traceId, messageId: normalized.messageId, errorCode: error.code ?? null } });
       await this.patchConversation(conversation.id, { status: 'degraded', zone: 'observability', nextStep: 'Revisar incidente y reintentar.' });
       throw error;
     }
   }
 
+  async processQueuedInbound(messageId) {
+    const inbound = await this.store.getInboundMessage?.(messageId);
+    if (!inbound) throw new Error(`Inbound message ${messageId} not found`);
+    if (inbound.status === 'completed') return { duplicate: true, inbound };
+    await this.store.markInboundMessageProcessing?.(messageId);
+    try {
+      const result = await this.processInbound(inbound.payload, { skipIdempotency: true });
+      await this.store.completeInboundMessage?.(messageId, {
+        duplicate: Boolean(result.duplicate),
+        conversationId: result.conversation?.id ?? null,
+        summary: result.result?.summary ?? null,
+      });
+      return result;
+    } catch (error) {
+      await this.store.failInboundMessage?.(messageId, error);
+      throw error;
+    }
+  }
+
   async routeConversation(tenantId, conversationId, normalized) {
+    if (normalized.interactive?.optionId) {
+      return this.handleInteractiveReply({ tenantId, conversationId, normalized });
+    }
     const customerLookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
       wa_id: normalized.waId,
       profile_name: normalized.profileName,
@@ -58,6 +123,10 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
+
+    if (customerLookup.status === 'connection_required' && ['catalog_query', 'delivery_order', 'order_confirmation', 'order_clarification'].includes(plan.intent)) {
+      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
+    }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -119,6 +188,38 @@ export class AgentRuntime {
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
   }
 
+  async handleGoogleUnavailable({ tenantId, conversationId, normalized, plan }) {
+    const message = 'No puedo confirmar el catalogo en este momento porque la tienda no esta conectada a Google. Dejo tu solicitud en manos del tendero para validarla y continuar contigo.';
+    await this.patchConversation(conversationId, {
+      stage: 'handoff',
+      zone: 'approval',
+      status: 'blocked',
+      value: 'Pendiente de validacion',
+      progress: 34,
+      need: normalized.text,
+      nextStep: 'El tendero debe conectar Google o validar el pedido manualmente.',
+      lastTool: 'google_sheets_customer_profile_lookup',
+    });
+    await this.tools.call('human_handoff', tenantId, conversationId, {
+      reason: 'Google Drive/Sheets no disponible para validar catalogo y pedido',
+      urgency: 'Alta',
+      assigned_team: 'ventas',
+      context_snapshot: {
+        summary: message,
+        customerWaId: normalized.waId,
+        originalText: normalized.text,
+        plan,
+        action: 'connect_google_or_validate_order_manually',
+      },
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: message,
+    });
+    return { summary: 'Google unavailable; human handoff requested', plan };
+  }
+
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
     const text = normalized.text ?? '';
     const catalogItems = plan.order?.items ?? [];
@@ -145,6 +246,12 @@ export class AgentRuntime {
       });
       const quote = buildMultiCatalogReply({ matches, drive, delivery: Boolean(plan.order?.delivery) });
       const hasMatches = selectedRows.length > 0;
+      const customerReply = await this.composeCustomerReply({
+        tenantId,
+        conversationId,
+        fallbackText: quote,
+        facts: { kind: 'catalog_options', products: selectedRows, requiredTerms: selectedRows.map((item) => item.name) },
+      });
 
       await this.patchConversation(conversationId, {
         stage: hasMatches ? 'quote' : 'catalog',
@@ -160,7 +267,7 @@ export class AgentRuntime {
       await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
         action: 'send_session_message',
         wa_id: normalized.waId,
-        text: quote,
+        text: customerReply,
       });
 
       return { summary: hasMatches ? 'Catalog guided options sent' : 'Catalog search needs review', plan };
@@ -183,6 +290,12 @@ export class AgentRuntime {
     const quote = selected
       ? buildCatalogReply({ selected, alternatives, drive, delivery: Boolean(plan.order?.delivery), query })
       : 'No encontre una coincidencia clara en el catalogo. Puedo pedir apoyo humano o buscar con mas detalles.';
+    const customerReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: quote,
+      facts: { kind: 'catalog_quote', products: selected ? [selected] : [], requiredTerms: selected ? [selected.name] : [] },
+    });
 
     await this.patchConversation(conversationId, {
       stage: selected ? 'quote' : 'catalog',
@@ -198,28 +311,30 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: quote,
+      text: customerReply,
     });
 
     return { summary: selected ? 'Catalog quote sent' : 'Catalog search needs review', plan };
   }
 
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
-    const orderItems = [];
-    for (const [index, item] of (plan.order?.items ?? []).entries()) {
+    const tenant = await this.getTenant(tenantId);
+    const paymentMethods = paymentMethodsForTenant(tenant);
+    const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-        range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+        range: tenant?.config?.googleSheets?.range,
         filters: deliveryItemFiltersFromPlan(plan, item, index),
         cache_policy: 'short_ttl',
       });
       const product = selectAcceptableOrderProduct(catalog.rows, item);
-      orderItems.push({
+      return {
         ...item,
         product,
+        presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
         lineTotal: product && item.quantity ? product.price * item.quantity : product && item.budgetAmount ? item.budgetAmount : null,
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
-      });
-    }
+      };
+    }));
 
     const currentConversation = await this.getConversation(conversationId);
     const previousDraft = currentConversation?.orderDraft;
@@ -228,11 +343,14 @@ export class AgentRuntime {
       : orderItems;
 
     const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
-    const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
-      file_ids: selectedRows.map((row) => row.driveFileId).filter(Boolean),
-      refresh_mode: 'on_demand',
-      reason: selectedRows.length ? 'validate_order_product_files' : 'verify_catalog_context_for_missing_order_items',
-    });
+    const driveFileIds = [...new Set(selectedRows.map((row) => row.driveFileId).filter(Boolean))];
+    const drive = driveFileIds.length
+      ? await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
+        file_ids: driveFileIds,
+        refresh_mode: 'on_demand',
+        reason: 'validate_order_product_files',
+      })
+      : { status: 'not_requested', files: [], source_refs: [] };
 
     const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
     if (!effectiveOrderItems.length) missingFields.push('order_items');
@@ -242,15 +360,34 @@ export class AgentRuntime {
       if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
       if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
-        missingFields.push(`product:${item.catalogQuery}`);
+        missingFields.push(`presentation:${item.catalogQuery}`);
       }
     }
+    const paymentMethod = plan.order?.paymentMethod
+      ?? previousDraft?.paymentMethod
+      ?? customerProfile?.preferences?.preferredPaymentMethod
+      ?? null;
+    if (!paymentMethod) missingFields.push('payment_method');
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     const requiresHumanResolution = needsHumanProductResolution(missingFields);
     const reply = requiresHumanResolution
       ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile })
-      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields, customerProfile, subtotal });
+      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields, customerProfile, subtotal, paymentMethods });
+    const customerReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: reply,
+      facts: {
+        kind: requiresHumanResolution ? 'human_resolution' : 'order_quote',
+        products: effectiveOrderItems.map((item) => item.product).filter(Boolean),
+        subtotal,
+        paymentMethod,
+        paymentMethods,
+        missingFields,
+        requiredTerms: missingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+      },
+    });
     const canQuote = missingFields.length === 0;
 
     await this.patchConversation(conversationId, {
@@ -266,6 +403,8 @@ export class AgentRuntime {
         delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
         items: effectiveOrderItems,
         missingFields: [...new Set(missingFields)],
+        paymentMethod,
+        paymentMethods,
         subtotal,
         driveRefs: drive.source_refs ?? [],
         driveStatus: drive.status,
@@ -298,18 +437,41 @@ export class AgentRuntime {
       });
     }
 
+    const paymentOffer = !requiresHumanResolution && missingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+      : null;
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: reply,
+      text: customerReply,
+      ...(paymentOffer ? { interactive: paymentOffer.interactive } : {}),
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
   }
 
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
+    const activeConversation = await this.getConversation(conversationId);
+    const savedDraft = activeConversation?.orderDraft;
+    const orderDraft = savedDraft ?? plan.order;
+    const confirmationMissing = [...new Set([
+      ...(orderDraft?.missingFields ?? []),
+      ...(orderDraft?.paymentMethod ? [] : ['payment_method']),
+    ])];
+    if (confirmationMissing.length) {
+      return this.handleOrderClarification({
+        tenantId,
+        conversationId,
+        normalized,
+        customerProfile,
+        plan: {
+          ...plan,
+          intent: 'order_clarification',
+          order: { ...orderDraft, missingFields: confirmationMissing },
+        },
+      });
+    }
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
-    const orderDraft = plan.order;
     const order = await this.tools.call('google_sheets_order_write', tenantId, conversationId, {
       wa_id: normalized.waId,
       customer_name: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
@@ -408,6 +570,7 @@ export class AgentRuntime {
     const missingFields = (draft.missingFields ?? []).filter((field) => {
       if (field === 'customer_name') return !(nextProfile?.name || collected.name);
       if (field === 'delivery_address') return !(nextProfile?.defaultAddress || collected.defaultAddress);
+      if (field === 'payment_method') return !draft.paymentMethod;
       if (field.startsWith('quantity:')) {
         const query = field.replace('quantity:', '');
         const item = (draft.items ?? []).find((candidate) => candidate.catalogQuery === query);
@@ -422,7 +585,22 @@ export class AgentRuntime {
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
 
     const canQuote = draft.missingFields.length === 0;
-    const reply = buildOrderReply({ orderItems: draft.items ?? [], missingFields: draft.missingFields, customerProfile: nextProfile, subtotal: draft.subtotal });
+    const tenant = await this.getTenant(tenantId);
+    const paymentMethods = draft.paymentMethods ?? paymentMethodsForTenant(tenant);
+    draft.paymentMethods = paymentMethods;
+    const reply = buildOrderReply({ orderItems: draft.items ?? [], missingFields: draft.missingFields, customerProfile: nextProfile, subtotal: draft.subtotal, paymentMethods });
+    const customerReply = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText: reply,
+      facts: {
+        kind: 'order_clarification',
+        products: (draft.items ?? []).map((item) => item.product).filter(Boolean),
+        subtotal: draft.subtotal,
+        missingFields: draft.missingFields,
+        requiredTerms: draft.missingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+      },
+    });
 
     await this.patchConversation(conversationId, {
       stage: canQuote ? 'quote' : 'clarification',
@@ -435,10 +613,14 @@ export class AgentRuntime {
       orderDraft: draft,
     });
 
+    const paymentOffer = draft.missingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+      : null;
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: reply,
+      text: customerReply,
+      ...(paymentOffer ? { interactive: paymentOffer.interactive } : {}),
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
@@ -450,6 +632,11 @@ export class AgentRuntime {
     const shouldReplyToCustomer = Boolean(normalizedNote && normalizedMode !== 'none');
     const currentState = this.store.getState();
     const currentRequest = currentState.pendingRequests.find((item) => item.id === requestId);
+    if (currentRequest?.status !== 'pending') {
+      const error = new Error('Esta tarea ya fue atendida. Actualiza la pantalla para ver el estado actual.');
+      error.statusCode = currentRequest ? 409 : 404;
+      throw error;
+    }
     const currentConversation = currentRequest
       ? currentState.conversations.find((item) => item.id === currentRequest.conversationId)
       : null;
@@ -463,6 +650,29 @@ export class AgentRuntime {
     let request;
     let conversationSnapshot;
     const now = new Date().toISOString();
+    const isDeliveryOrder = currentRequest.action === 'prepare_delivery_order'
+      || currentRequest.contextSnapshot?.action === 'prepare_delivery_order'
+      || currentRequest.assignedTeam === 'operaciones'
+      || /pedido|domicilio/i.test(currentRequest.title ?? '');
+    const currentOrder = isDeliveryOrder
+      ? (currentState.ordersByTenant?.[currentRequest.tenantId] ?? []).find((item) => (
+        item.id === currentRequest.contextSnapshot?.orderId || item.conversationId === currentRequest.conversationId
+      ))
+      : null;
+    const orderStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
+    const sheetSync = currentOrder && !this.orders
+      ? await this.tools.syncLiveOrderStatus({ tenantId: currentRequest.tenantId, order: currentOrder, status: orderStatus, updatedAt: now })
+      : null;
+    const orderTransition = currentOrder && this.orders
+      ? await this.orders.transition({
+        orderId: currentOrder.id,
+        tenantId: currentRequest.tenantId,
+        nextStatus: orderStatus,
+        actorId: approverId,
+        source: 'human_request',
+        allowPendingRequest: true,
+      })
+      : null;
     this.store.mutate((state) => {
       request = state.pendingRequests.find((item) => item.id === requestId);
       if (!request) throw new Error(`Request not found: ${requestId}`);
@@ -472,15 +682,31 @@ export class AgentRuntime {
       request.approverId = approverId;
       request.responseMode = normalizedMode;
       request.approvalToken = outcome === 'approved' ? `APPROVED-${crypto.randomUUID()}` : null;
+      if (currentOrder && !this.orders) {
+        const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.id === currentOrder.id);
+        if (order) {
+          order.status = orderStatus;
+          order.updatedAt = now;
+          order.statusHistory = [...(order.statusHistory ?? []), {
+            status: orderStatus,
+            at: now,
+            actorId: approverId,
+          }];
+          order.sheetSyncStatus = sheetSync.status === 'synced' ? 'synced' : 'pending';
+          if (sheetSync.status === 'synced') order.sheetSyncedAt = now;
+        }
+      }
       const conversation = state.conversations.find((item) => item.id === request.conversationId);
       if (conversation) {
         conversationSnapshot = { id: conversation.id, waId: resolveHumanReplyWaId(state, request, conversation) };
-        conversation.status = outcome === 'approved' ? 'live' : 'blocked';
-        conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
-        conversation.progress = outcome === 'approved' ? Math.max(conversation.progress ?? 0, 78) : conversation.progress;
-        conversation.nextStep = outcome === 'approved'
-          ? 'Flujo reanudado con aprobacion humana.'
-          : 'Operacion rechazada; revisar alternativa.';
+        if (!this.orders || !currentOrder || outcome !== 'approved') {
+          conversation.status = outcome === 'approved' ? 'live' : 'blocked';
+          conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
+          conversation.progress = outcome === 'approved' ? Math.max(conversation.progress ?? 0, 78) : conversation.progress;
+          conversation.nextStep = outcome === 'approved'
+            ? 'Flujo reanudado con aprobacion humana.'
+            : 'Operacion rechazada; revisar alternativa.';
+        }
         if (shouldReplyToCustomer && normalizedMode === 'platform') {
           conversation.messages.push({
             id: `human-${crypto.randomUUID()}`,
@@ -500,8 +726,9 @@ export class AgentRuntime {
         conversation.updatedAt = now;
       }
     });
-    this.store.persistPendingRequest?.(requestId);
-    this.store.persistConversation?.(request.conversationId);
+    await this.store.persistPendingRequest?.(requestId);
+    await this.store.persistConversation?.(request.conversationId);
+    if (currentOrder && !orderTransition) await this.store.persistOrder?.(request.tenantId, currentOrder.id);
     let responseDelivery = null;
     if (shouldReplyToCustomer && normalizedMode === 'whatsapp') {
       responseDelivery = await this.tools.call('whatsapp_business_messaging', request.tenantId, request.conversationId, {
@@ -525,7 +752,7 @@ export class AgentRuntime {
           };
         }
       });
-      this.store.persistPendingRequest?.(requestId);
+      await this.store.persistPendingRequest?.(requestId);
     }
     this.store.mutate((state) => {
       appendAuditEvent(state, {
@@ -574,13 +801,89 @@ export class AgentRuntime {
     return this.store.getState().pendingRequests.find((item) => item.id === requestId) ?? request;
   }
 
+  async deleteConversation(conversationId, { actorId = 'local-owner' } = {}) {
+    const currentState = this.store.getState();
+    const conversation = currentState.conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      const error = new Error('La conversación ya no existe. Actualiza la pantalla.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const relatedOrders = (currentState.ordersByTenant?.[conversation.tenantId] ?? [])
+      .filter((order) => order.conversationId === conversationId);
+    if (relatedOrders.length) {
+      const error = new Error('No se puede eliminar una conversación con pedidos registrados. Ciérrala desde el flujo de pedidos para conservar su trazabilidad.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const removedRequestIds = currentState.pendingRequests
+      .filter((request) => request.conversationId === conversationId)
+      .map((request) => request.id);
+
+    this.store.mutate((state) => {
+      state.conversations = state.conversations.filter((item) => item.id !== conversationId);
+      state.pendingRequests = state.pendingRequests.filter((request) => request.conversationId !== conversationId);
+      appendAuditEvent(state, {
+        tenantId: conversation.tenantId,
+        actorId,
+        action: 'conversation.deleted',
+        resource: conversationId,
+        metadata: {
+          customerWaId: conversation.waId ?? null,
+          removedPendingRequestIds: removedRequestIds,
+          reason: 'owner_requested',
+        },
+      });
+    });
+    await this.store.deleteConversation?.(conversationId);
+    this.events.emit({
+      type: 'conversation.deleted',
+      tenantId: conversation.tenantId,
+      conversationId,
+      detail: 'Conversación eliminada por el propietario.',
+      metadata: { actorId, removedPendingRequestIds: removedRequestIds },
+    });
+    return { id: conversationId, tenantId: conversation.tenantId, removedPendingRequestIds: removedRequestIds };
+  }
+
   async ensureConversation(tenantId, normalized) {
     const existing = this.store.findConversationByWa
       ? await this.store.findConversationByWa(tenantId, normalized.waId)
       : this.store
         .getState()
-        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId);
+        .conversations.find((item) => item.tenantId === tenantId && item.waId === normalized.waId && !isClosedCase(item));
     if (existing) return existing;
+
+    const previous = this.store.findLatestConversationByWa
+      ? await this.store.findLatestConversationByWa(tenantId, normalized.waId)
+      : this.store
+        .getState()
+        .conversations
+        .filter((item) => item.tenantId === tenantId && item.waId === normalized.waId)
+        .sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? 0) - Date.parse(left.updatedAt ?? left.createdAt ?? 0))[0];
+    if (previous && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
+      const now = new Date().toISOString();
+      this.store.mutate((state) => {
+        const conversation = state.conversations.find((item) => item.id === previous.id);
+        if (!conversation) return;
+        Object.assign(conversation, {
+          status: 'live',
+          caseStatus: 'active',
+          inboxState: 'active',
+          manualMode: 'none',
+          aiPaused: false,
+          closedAt: null,
+          closeReason: null,
+          reopenedAt: now,
+          nextStep: 'Caso anterior reanudado por solicitud explicita del cliente.',
+          updatedAt: now,
+        });
+      });
+      await this.store.persistConversation?.(previous.id);
+      return this.getConversation(previous.id);
+    }
     const created = {
       id: `wa-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
@@ -590,6 +893,13 @@ export class AgentRuntime {
       stage: 'inbound',
       zone: 'whatsapp',
       status: 'live',
+      caseStatus: 'active',
+      inboxState: 'active',
+      manualMode: 'none',
+      aiPaused: false,
+      closedAt: null,
+      closeReason: null,
+      orderDraft: null,
       value: 'Pendiente',
       progress: 12,
       need: normalized.text ?? normalized.messageType,
@@ -598,13 +908,14 @@ export class AgentRuntime {
       lastTool: 'whatsapp_business_messaging',
       path: ['whatsapp', 'agent', 'catalog', 'quote', 'approval', 'payment'],
       messages: [],
+      traceId: normalized.traceId ?? null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.store.mutate((state) => {
       state.conversations.unshift(created);
     });
-    this.store.persistConversation?.(created.id);
+      await this.store.persistConversation?.(created.id);
     return created;
   }
 
@@ -616,7 +927,7 @@ export class AgentRuntime {
       conversation.need = message.text ?? conversation.need;
       conversation.updatedAt = new Date().toISOString();
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
   }
 
   async patchConversation(conversationId, patch) {
@@ -624,12 +935,179 @@ export class AgentRuntime {
       const conversation = state.conversations.find((item) => item.id === conversationId);
       if (conversation) Object.assign(conversation, patch, { updatedAt: new Date().toISOString() });
     });
-    this.store.persistConversation?.(conversationId);
+    await this.store.persistConversation?.(conversationId);
+  }
+
+  async activateManualWhatsApp(conversationId, { actorId = 'local-admin' } = {}) {
+    const now = new Date().toISOString();
+    let conversation;
+    this.store.mutate((state) => {
+      conversation = state.conversations.find((item) => item.id === conversationId);
+      if (!conversation) return;
+      conversation.status = 'manual_active';
+      conversation.caseStatus = 'active';
+      conversation.inboxState = 'active';
+      conversation.manualMode = 'whatsapp_external';
+      conversation.aiPaused = true;
+      conversation.manualStartedAt = conversation.manualStartedAt ?? now;
+      conversation.manualLastActivityAt = now;
+      conversation.nextStep = 'Atencion manual activa en WhatsApp Web/Desktop.';
+      conversation.messages ??= [];
+      conversation.messages.push({
+        id: `manual-${crypto.randomUUID()}`,
+        role: 'system',
+        channel: 'platform',
+        text: 'La conversacion continua de manera manual en WhatsApp Web/Desktop.',
+        actorId,
+        createdAt: now,
+      });
+      conversation.updatedAt = now;
+    });
+    if (!conversation) return null;
+    await this.store.persistConversation?.(conversationId);
+    return this.getConversation(conversationId);
+  }
+
+  async closeExpiredManualCases(now = Date.now()) {
+    const inactivityMs = Number(this.config.manualCaseInactivityMinutes ?? 5) * 60_000;
+    const expired = [];
+    this.store.mutate((state) => {
+      for (const conversation of state.conversations) {
+        if (conversation.manualMode !== 'whatsapp_external' || conversation.status !== 'manual_active') continue;
+        const lastActivity = Date.parse(conversation.manualLastActivityAt ?? conversation.updatedAt ?? conversation.createdAt ?? 0);
+        if (!Number.isFinite(lastActivity) || now - lastActivity < inactivityMs) continue;
+        const closedAt = new Date(now).toISOString();
+        conversation.status = 'closed_no_confirmation';
+        conversation.caseStatus = 'closed_no_confirmation';
+        conversation.inboxState = 'history';
+        conversation.manualMode = 'none';
+        conversation.aiPaused = false;
+        conversation.closedAt = closedAt;
+        conversation.closeReason = 'manual_inactivity';
+        conversation.orderStatus = 'not_confirmed';
+        if (conversation.orderDraft) conversation.orderDraft.status = 'not_confirmed';
+        conversation.nextStep = 'Caso cerrado por inactividad. Un nuevo mensaje abrira un caso nuevo.';
+        conversation.messages ??= [];
+        conversation.messages.push({
+          id: `manual-timeout-${crypto.randomUUID()}`,
+          role: 'system',
+          channel: 'platform',
+          text: 'Atencion manual cerrada por inactividad. Pedido no confirmado.',
+          createdAt: closedAt,
+        });
+        conversation.updatedAt = closedAt;
+        expired.push(conversation.id);
+      }
+    });
+    for (const conversationId of expired) {
+      await this.store.persistConversation?.(conversationId);
+      this.events.emit({
+        type: 'conversation.manual_timeout',
+        tenantId: (await this.getConversation(conversationId))?.tenantId,
+        conversationId,
+        detail: 'Atencion manual cerrada por inactividad; pedido no confirmado.',
+      });
+    }
+    return expired;
   }
 
   async getConversation(conversationId) {
     if (this.store.getConversation) return this.store.getConversation(conversationId);
     return this.store.getState().conversations.find((item) => item.id === conversationId);
+  }
+
+  async createPaymentOffer({ tenantId, conversationId, paymentMethods }) {
+    if (!this.store.createInteractionOffer || !paymentMethods.length) return null;
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const options = paymentMethods.map((method, index) => ({
+      id: `vi:${offerId}:${index + 1}`,
+      title: method.label,
+      action: 'set_payment_method',
+      value: method.id,
+    }));
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      purpose: 'payment_method',
+      options,
+      expiresAt,
+    });
+    const body = '¿Cómo prefieres pagar?';
+    return {
+      offer,
+      interactive: options.length <= 3
+        ? { kind: 'button', body, buttons: options.map(({ id, title }) => ({ id, title })) }
+        : {
+          kind: 'list',
+          body,
+          buttonLabel: 'Elegir pago',
+          sectionTitle: 'Formas de pago',
+          rows: options.map(({ id, title }) => ({ id, title })),
+        },
+    };
+  }
+
+  async handleInteractiveReply({ tenantId, conversationId, normalized }) {
+    const optionId = normalized.interactive?.optionId;
+    const offerId = String(optionId ?? '').match(/^vi:(io-[a-z0-9]+):\d+$/i)?.[1];
+    if (!offerId || !this.store.consumeInteractionOffer) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'No reconocí esa opción. Escríbeme cómo quieres continuar.' });
+    }
+    const result = await this.store.consumeInteractionOffer({ offerId, optionId, tenantId, conversationId });
+    if (result.status !== 'consumed') {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: result.status === 'expired'
+          ? 'Esa opción ya venció. Escríbeme la forma de pago que prefieres y seguimos.'
+          : 'Esa opción ya fue usada o no corresponde a este pedido. Escríbeme cómo quieres continuar.',
+      });
+    }
+    if (result.option?.action !== 'set_payment_method') {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
+    }
+    const conversation = await this.getConversation(conversationId);
+    const draft = structuredClone(conversation?.orderDraft ?? {});
+    draft.paymentMethod = result.option.value;
+    draft.missingFields = (draft.missingFields ?? []).filter((field) => field !== 'payment_method');
+    const paymentLabel = paymentMethodLabel(result.option.value, draft.paymentMethods);
+    const fallbackText = `Listo, queda ${paymentLabel} como forma de pago. ${draft.missingFields.length ? 'Aún necesito completar los datos pendientes para continuar.' : `El subtotal es ${formatCurrency(draft.subtotal ?? 0)}. ¿Confirmas el pedido?`}`;
+    await this.patchConversation(conversationId, {
+      orderDraft: draft,
+      stage: draft.missingFields.length ? 'clarification' : 'quote',
+      zone: draft.missingFields.length ? 'agent' : 'quote',
+      nextStep: draft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
+    });
+    const text = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText,
+      facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [paymentLabel] },
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+    });
+    return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: reason,
+    });
+    return { summary: 'Interactive selection rejected safely' };
+  }
+
+  async composeCustomerReply({ tenantId, conversationId, fallbackText, facts }) {
+    if (!this.planner?.composeReply) return fallbackText;
+    const composed = await this.planner.composeReply({ tenantId, conversationId, facts, fallbackText });
+    return composed.text ?? fallbackText;
   }
 
   async getTenant(tenantId) {
@@ -651,6 +1129,39 @@ export class AgentRuntime {
     });
     await this.store.persistProcessedMessage?.(messageId, payload);
   }
+
+  async claimProcessed(messageId, payload = {}) {
+    if (!messageId) return true;
+    if (this.store.claimProcessedMessage) return this.store.claimProcessedMessage(messageId, payload);
+    if (this.store.getState().processedMessages.includes(messageId)) return false;
+    await this.markProcessed(messageId, payload);
+    return true;
+  }
+}
+
+function isClosedCase(conversation) {
+  return ['closed_no_confirmation', 'completed', 'resolved', 'cancelled'].includes(conversation?.caseStatus ?? conversation?.status);
+}
+
+function isExplicitCaseContinuation(text, previous, config = {}) {
+  if (!isClosedCase(previous)) return false;
+  const windowMs = Number(config.caseContinuationWindowMinutes ?? 30) * 60_000;
+  const lastActivity = Date.parse(previous.closedAt ?? previous.updatedAt ?? previous.createdAt ?? 0);
+  if (!Number.isFinite(lastActivity) || Date.now() - lastActivity > windowMs) return false;
+  const normalized = normalizeText(text);
+  return containsAny(normalized, [
+    'pedido anterior',
+    'pedido de antes',
+    'lo de antes',
+    'el mismo pedido',
+    'continuar el pedido',
+    'continua el pedido',
+    'retomar el pedido',
+    'retoma el pedido',
+    'sumale',
+    'agregale',
+    'agregale al pedido',
+  ]);
 }
 
 function containsAny(text, words) {
@@ -813,7 +1324,41 @@ function removeResolvedBudgetMissingFields(missingFields, item) {
 }
 
 function selectAcceptableOrderProduct(rows = [], item = {}) {
-  return rows.find((row) => isAcceptableOrderProduct(row, item));
+  const candidates = rows.filter((row) => isAcceptableOrderProduct(row, item));
+  if (!candidates.length) return null;
+  if (item.requestedPresentation) {
+    return candidates.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? candidates[0];
+  }
+  return candidates[0];
+}
+
+function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null) {
+  const candidates = [selectedProduct, ...rows]
+    .filter(Boolean)
+    .filter((row) => isAcceptableOrderProduct(row, item));
+  const familyTokens = productFamilyTokens(item, selectedProduct);
+  const relevant = familyTokens.length
+    ? candidates.filter((row) => productFamilyTokens({}, row).some((token) => familyTokens.includes(token)))
+    : candidates;
+  const unique = new Map();
+  for (const product of relevant) {
+    const key = product.sku ?? `${product.name}:${product.presentation ?? ''}`;
+    if (!unique.has(key)) unique.set(key, product);
+  }
+  return [...unique.values()]
+    .sort((left, right) => Number(right.sku === selectedProduct?.sku) - Number(left.sku === selectedProduct?.sku))
+    .slice(0, 4);
+}
+
+function productFamilyTokens(item = {}, product = {}) {
+  const ignored = new Set(['gaseosa', 'bebida', 'bebidas', 'producto', 'presentacion', 'litro', 'litros', 'mililitro', 'mililitros', 'original']);
+  return [...new Set(normalizeText([
+    item.rawName,
+    item.catalogQuery,
+    product?.name,
+    product?.brand,
+    ...(product?.aliases ?? []),
+  ].filter(Boolean).join(' ')).split(/\s+/).filter((token) => token.length >= 4 && !ignored.has(token)))];
 }
 
 function isAcceptableOrderProduct(product, item = {}) {
@@ -913,7 +1458,7 @@ function isCategoryQuery(query) {
   ]);
 }
 
-function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal }) {
+function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods = [] }) {
   const uniqueMissing = [...new Set(missingFields)];
   const foundLines = orderItems
     .filter((item) => item.product)
@@ -927,8 +1472,12 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     });
   if (uniqueMissing.length) {
     const asks = [];
+    const presentationNotes = [];
     if (uniqueMissing.includes('customer_name')) asks.push('tu nombre');
     if (uniqueMissing.includes('delivery_address')) asks.push('la direccion del domicilio');
+    if (uniqueMissing.includes('payment_method')) {
+      asks.push(`cómo prefieres pagar${paymentMethods.length ? `: ${joinSpanish(paymentMethods.map((method) => method.label))}` : ''}`);
+    }
     if (uniqueMissing.includes('order_items')) asks.push('que productos quieres pedir');
     for (const missing of uniqueMissing.filter((item) => item.startsWith('quantity:'))) {
       asks.push(`la cantidad de ${missing.replace('quantity:', '')}`);
@@ -936,10 +1485,14 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     for (const missing of uniqueMissing.filter((item) => item.startsWith('presentation:'))) {
       const query = missing.replace('presentation:', '');
       const item = orderItems.find((candidate) => matchesMissingPresentation(candidate, query));
-      const options = item?.presentationOptions?.map((option) => option.name).filter(Boolean) ?? [];
-      asks.push(options.length > 1
-        ? `escoger la presentacion de ${query}: ${joinSpanish(options)}`
-        : `confirmar la presentacion de ${query}`);
+      const options = item?.presentationOptions ?? [];
+      if (!options.length) {
+        asks.push(`confirmar la presentacion de ${query}`);
+        continue;
+      }
+      const requestedName = requestedProductName(item, query);
+      const requested = item?.requestedPresentation ? `Pediste ${requestedName} de ${item.requestedPresentation}.` : `Para ${requestedName},`;
+      presentationNotes.push(`${requested} Tengo ${joinSpanish(options.map(describeProductOption))}. ¿Cuál prefieres?`);
     }
     for (const missing of uniqueMissing.filter((item) => item.startsWith('product:'))) {
       asks.push(`una referencia mas clara para ${missing.replace('product:', '')}`);
@@ -947,8 +1500,15 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal 
     for (const missing of uniqueMissing.filter((item) => item.startsWith('stock:'))) {
       asks.push(`confirmar alternativa para ${missing.replace('stock:', '')}`);
     }
-    const prefix = foundLines.length ? `Claro. Tengo en la solicitud: ${foundLines.join(', ')}.` : 'Claro, te ayudo con el domicilio.';
-    return `${prefix} Para continuar necesito ${joinSpanish(asks)}.`;
+    const subtotalText = foundLines.length && Number.isFinite(Number(subtotal)) && Number(subtotal) > 0
+      ? ` Subtotal de productos: ${formatCurrency(subtotal)}.`
+      : '';
+    const prefix = foundLines.length
+      ? `Claro. Tengo en la solicitud: ${foundLines.join(', ')}.${subtotalText}`
+      : 'Claro, te ayudo con el domicilio.';
+    const presentationText = presentationNotes.length ? ` ${presentationNotes.join(' ')}` : '';
+    const dataAsk = asks.length ? ` Para continuar necesito ${joinSpanish(asks)}.` : '';
+    return `${prefix}${presentationText}${dataAsk}`;
   }
   const address = customerProfile?.defaultAddress ? ` a tu direccion guardada (${customerProfile.defaultAddress})` : '';
   return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal: ${formatCurrency(subtotal)}. ¿Confirmas el pedido?`;
@@ -962,10 +1522,41 @@ function needsHumanProductResolution(missingFields) {
 }
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {
+  const requestedVolume = presentationVolumeInMilliliters(requestedPresentation);
+  const productVolume = presentationVolumeInMilliliters([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  if (requestedVolume && productVolume) return requestedVolume === productVolume;
   const requestedNumber = normalizeText(requestedPresentation).match(/\d{2,4}/)?.[0];
   if (!requestedNumber) return true;
   const fields = normalizeText([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   return fields.includes(requestedNumber);
+}
+
+function presentationVolumeInMilliliters(value) {
+  const normalized = normalizeText(value)
+    .replace(/\b(?:(?:un|una)\s+)?litro y medio\b/g, '1 5 l')
+    .replace(/\bmedio litro\b/g, '0 5 l');
+  const match = normalized.match(/(\d+(?:\s+\d+)?)\s*(ml|mililitros?|l|litros?)\b/);
+  if (!match) return null;
+  const quantity = Number(match[1].replace(/\s+/, '.'));
+  if (!Number.isFinite(quantity)) return null;
+  return Math.round(match[2].startsWith('l') ? quantity * 1000 : quantity);
+}
+
+function describeProductOption(product) {
+  const name = String(product?.name ?? 'Producto').trim();
+  const presentation = String(product?.presentation ?? '').trim();
+  const includesPresentation = presentation && normalizeText(name).includes(normalizeText(presentation));
+  const label = presentation && !includesPresentation ? `${name}, ${presentation}` : name;
+  return `${label} (${formatCurrency(product?.price ?? 0)})`;
+}
+
+function requestedProductName(item, fallback) {
+  const raw = String(item?.rawName ?? fallback ?? '').trim();
+  if (!item?.requestedPresentation) return raw || fallback;
+  const withoutPresentation = raw
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|mililitros?|l|litros?)\b/gi, '')
+    .trim();
+  return withoutPresentation || fallback;
 }
 
 function buildHumanResolutionReply({ orderItems, missingFields, customerProfile }) {
@@ -1068,6 +1659,7 @@ function extractClarification(text) {
 
 function extractPaymentMethod(text) {
   if (containsAny(text, ['datafono', 'datáfono', 'tarjeta debito', 'tarjeta débito', 'tarjeta'])) return 'card_terminal';
+  if (containsAny(text, ['bre-b', 'breb', 'bre b'])) return 'bre_b';
   if (containsAny(text, ['nequi'])) return 'nequi';
   if (containsAny(text, ['daviplata'])) return 'daviplata';
   if (containsAny(text, ['efectivo'])) return 'cash';
@@ -1096,6 +1688,43 @@ function confirmsPresentation(text, productName) {
 
 function formatCurrency(value) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value);
+}
+
+function paymentMethodsForTenant(tenant) {
+  const configured = tenant?.config?.paymentMethods
+    ?? tenant?.config?.orderPolicy?.paymentMethods
+    ?? [];
+  const methods = Array.isArray(configured) ? configured : [];
+  const normalized = methods
+    .filter((method) => method && method.enabled !== false)
+    .map((method) => typeof method === 'string'
+      ? { id: normalizePaymentMethodId(method), label: paymentMethodLabel(method) }
+      : { id: normalizePaymentMethodId(method.id ?? method.key ?? method.label), label: method.label ?? paymentMethodLabel(method.id ?? method.key) })
+    .filter((method) => method.id && method.label);
+  return normalized.length ? normalized : [
+    { id: 'cash', label: 'Efectivo' },
+    { id: 'card_terminal', label: 'Tarjeta' },
+    { id: 'bre_b', label: 'Bre-B' },
+  ];
+}
+
+function normalizePaymentMethodId(value) {
+  const normalized = normalizeText(value).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  if (['efectivo', 'cash'].includes(normalized)) return 'cash';
+  if (['tarjeta', 'datafono', 'card', 'card_terminal'].includes(normalized)) return 'card_terminal';
+  if (['bre_b', 'breb'].includes(normalized)) return 'bre_b';
+  return normalized;
+}
+
+function paymentMethodLabel(value, configured = []) {
+  const configuredMatch = (configured ?? []).find((method) => method.id === value || method.value === value);
+  if (configuredMatch?.label) return configuredMatch.label;
+  if (value === 'cash') return 'Efectivo';
+  if (value === 'card_terminal') return 'Tarjeta';
+  if (value === 'bre_b') return 'Bre-B';
+  if (value === 'nequi') return 'Nequi';
+  if (value === 'daviplata') return 'Daviplata';
+  return String(value ?? 'la forma de pago');
 }
 
 function formatOrderItems(items = []) {

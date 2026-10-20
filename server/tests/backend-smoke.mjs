@@ -4,21 +4,142 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAppAsync } from '../index.js';
+import { ToolRegistry } from '../services/toolRegistry.js';
+
+const originalGoogleClientId = process.env.GOOGLE_CLIENT_ID;
+const originalGoogleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+process.env.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? 'browser-oauth-client-test';
+process.env.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? 'browser-oauth-secret-test';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-backend-'));
-const { app, store, events, controlPlane } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
+const { app, store, events, controlPlane, runtime } = await createAppAsync({ dataFile: path.join(tempDir, 'store.json'), storageDriver: 'json' });
 const server = app.listen(0, '127.0.0.1');
 
 try {
   const port = await new Promise((resolve) => server.once('listening', () => resolve(server.address().port)));
   const base = `http://127.0.0.1:${port}`;
 
+  // This contract exercises the paid path explicitly. New production tenants
+  // receive the seven-day trial, which is covered in autoservicio-plan.mjs.
+  controlPlane.updateBillingPlan('ventas_ia_400_domicilios', { trialEnabled: false, trialDays: 0 });
+
   const health = await getJson(`${base}/health`);
   assert.equal(health.ok, true);
+  const readiness = await getJson(`${base}/health/ready`);
+  assert.equal(readiness.ok, true);
 
   const overview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.ok(overview.conversations.length > 0);
   assert.ok(overview.tools.some((tool) => tool.name === 'google_sheets_read_table'));
+
+  store.mutate((state) => {
+    state.ordersByTenant.andina ??= [];
+    state.ordersByTenant.andina.unshift({
+      id: 'order-lifecycle-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      waId: '573001111111', customerName: 'Ana', deliveryAddress: 'Calle 10',
+      items: [{ name: 'Pan', quantity: 2 }], subtotal: 8000,
+      status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    state.pendingRequests.unshift({
+      id: 'request-lifecycle-smoke', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      action: 'prepare_delivery_order', status: 'pending', title: 'Alistar domicilio confirmado',
+      contextSnapshot: { orderId: 'order-lifecycle-smoke', action: 'prepare_delivery_order' },
+    });
+  });
+  const lifecycleStart = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(lifecycleStart.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'pending_human_preparation');
+  await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'preparing' }, { expectedStatus: 409 });
+  await postJson(`${base}/api/pending-requests/request-lifecycle-smoke/resolve`, { outcome: 'approved', responseMode: 'none' });
+  const lifecyclePreparing = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(lifecyclePreparing.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
+  await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' }, { expectedStatus: 409 });
+  // A Sheets outage must not prevent a persisted operational transition. The
+  // projection is retried from the outbox by the background worker.
+  const originalSyncOrder = runtime.tools.syncLiveOrderStatus.bind(runtime.tools);
+  runtime.tools.syncLiveOrderStatus = async () => {
+    const error = new Error('Hoja no disponible');
+    error.statusCode = 503;
+    throw error;
+  };
+  try {
+    const dispatchedDuringSheetsOutage = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'dispatched' });
+    assert.equal(dispatchedDuringSheetsOutage.status, 'dispatched');
+    assert.equal(dispatchedDuringSheetsOutage.transition.projection.status, 'queued');
+  } finally {
+    runtime.tools.syncLiveOrderStatus = originalSyncOrder;
+  }
+  const lifecycleDispatched = store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-smoke');
+  assert.equal(lifecycleDispatched.status, 'dispatched');
+  assert.equal(lifecycleDispatched.sheetSyncStatus, 'pending');
+  const lifecycleDelivered = await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'delivered' });
+  assert.equal(lifecycleDelivered.status, 'delivered');
+  assert.equal(lifecycleDelivered.statusHistory.length, 3);
+  assert.equal((await getJson(`${base}/api/ops/overview?tenantId=andina`)).orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'delivered');
+  store.mutate((state) => {
+    state.ordersByTenant.andina.unshift({
+      id: 'order-orphan-smoke', tenantId: 'andina', conversationId: 'wa-orphan-smoke',
+      waId: '573001111112', customerName: 'Luis', deliveryAddress: 'Calle 11',
+      items: [{ name: 'Leche', quantity: 1 }], subtotal: 6000,
+      status: 'pending_human_preparation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+  });
+  assert.equal((await patchJson(`${base}/api/orders/order-orphan-smoke/status`, { status: 'preparing' })).status, 'preparing');
+
+  const sheetWrites = [];
+  const sheetRegistry = new ToolRegistry({
+    store: { getState: () => ({
+      googleConnectionsByTenant: { andina: { status: 'connected', mode: 'live', refreshTokenRef: 'ref' } },
+      googleWorkspacesByTenant: { andina: { spreadsheet: { id: 'sheet-1' } } },
+    }) },
+    secretVault: { readSecret: () => 'refresh-token' },
+    googleWorkspace: {
+      refreshAccessToken: async () => 'access-token',
+      readValues: async () => [['pedido_id'], ['otro'], ['order-lifecycle-smoke']],
+      updateValues: async (args) => { sheetWrites.push(args); },
+    },
+  });
+  await sheetRegistry.syncLiveOrderStatus({
+    tenantId: 'andina', order: lifecycleDispatched, status: 'delivered', updatedAt: '2026-10-17T10:00:00Z',
+  });
+  assert.equal(sheetWrites[0].range, 'Pedidos!G3:J3');
+  assert.equal(sheetWrites[0].values[0][0], 'entregado');
+
+  let tokenRefreshes = 0;
+  let catalogReads = 0;
+  const liveCatalogState = {
+    tenants: [{ id: 'andina', config: { googleSheets: { catalogRange: 'Catalogo!A1:J1000' } } }],
+    googleConnectionsByTenant: { andina: { status: 'connected', mode: 'live', refreshTokenRef: 'ref' } },
+    googleWorkspacesByTenant: { andina: { spreadsheet: { id: 'sheet-1' } } },
+    productsByTenant: {},
+    driveFilesByTenant: {},
+  };
+  const cachedCatalogRegistry = new ToolRegistry({
+    store: {
+      getState: () => liveCatalogState,
+      mutate: (mutator) => mutator(liveCatalogState),
+    },
+    secretVault: { readSecret: () => 'refresh-token' },
+    googleWorkspace: {
+      refreshAccessToken: async () => {
+        tokenRefreshes += 1;
+        return 'access-token';
+      },
+      readValues: async () => {
+        catalogReads += 1;
+        return [
+          ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock'],
+          ['COC-400', 'Coca-Cola original', 'Gaseosas', 'Coca-Cola', '400 ml', '3300', '48'],
+        ];
+      },
+    },
+    config: {},
+  });
+  await Promise.all([
+    cachedCatalogRegistry.googleSheetsReadTable('andina', { filters: { query: 'coca cola' } }),
+    cachedCatalogRegistry.googleSheetsReadTable('andina', { filters: { query: 'coca cola' } }),
+  ]);
+  assert.equal(tokenRefreshes, 1);
+  assert.equal(catalogReads, 1);
 
   store.mutate((state) => {
     state.conversations.unshift({
@@ -121,14 +242,39 @@ try {
   assert.equal(orderRun.conversation.orderDraft.items.length, 2);
   assert.ok(orderRun.conversation.messages.at(-1).text.includes('cantidad de Cifrut granadilla'));
 
+  const unavailablePresentationRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573001112255',
+    profileName: 'Presentacion Pendiente',
+    text: 'Para un domicilio, quiero una coca cola litro y medio',
+  });
+  const unavailablePresentationReply = unavailablePresentationRun.conversation.messages.at(-1).text;
+  assert.equal(unavailablePresentationRun.result.plan.intent, 'delivery_order');
+  assert.ok(unavailablePresentationReply.includes('Coca-Cola 400ml'));
+  assert.match(unavailablePresentationReply, /\$[\s\u00a0]*3\.200/);
+
   const quantityRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
     waId: '573009998877',
     profileName: 'Prueba Local',
     text: '2',
   });
-  assert.equal(quantityRun.result.summary, 'Order clarified and quote sent');
-  assert.equal(quantityRun.conversation.orderDraft.missingFields.length, 0);
+  assert.equal(quantityRun.result.summary, 'Order still needs clarification');
+  assert.ok(quantityRun.conversation.orderDraft.missingFields.includes('payment_method'));
+  const paymentOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((offer) => offer.conversationId === quantityRun.conversation.id && offer.status === 'active');
+  assert.ok(paymentOffer, 'El pedido debe ofrecer medios de pago interactivos');
+  const paymentRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998877',
+    profileName: 'Prueba Local',
+    messageType: 'interactive',
+    text: paymentOffer.options[0].title,
+    interactive: { type: 'button_reply', optionId: paymentOffer.options[0].id, title: paymentOffer.options[0].title },
+  });
+  assert.equal(paymentRun.result.summary, 'Interactive payment method recorded');
+  assert.equal(paymentRun.conversation.orderDraft.paymentMethod, paymentOffer.options[0].value);
+  assert.equal(paymentRun.conversation.orderDraft.missingFields.length, 0);
 
   const confirmRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -138,6 +284,43 @@ try {
   });
   assert.equal(confirmRun.result.plan.intent, 'order_confirmation');
   assert.ok(confirmRun.conversation.orderId);
+
+  const manualCaseRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998899',
+    profileName: 'Caso Manual',
+    text: 'Tienes cafe tostado premium?',
+  });
+  const manualStarted = await postJson(`${base}/api/conversations/${encodeURIComponent(manualCaseRun.conversation.id)}/manual-whatsapp`, {});
+  assert.equal(manualStarted.status, 'manual_active');
+  assert.equal(manualStarted.manualMode, 'whatsapp_external');
+  assert.equal(manualStarted.aiPaused, true);
+  assert.ok(manualStarted.messages.at(-1).text.includes('continua de manera manual'));
+  store.mutate((state) => {
+    const conversation = state.conversations.find((item) => item.id === manualStarted.id);
+    conversation.orderDraft = { items: [{ catalogQuery: 'Pedido anterior que no se debe heredar' }], status: 'not_confirmed' };
+    conversation.manualLastActivityAt = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+  });
+  const expiredManualCases = await runtime.closeExpiredManualCases();
+  assert.ok(expiredManualCases.includes(manualStarted.id));
+  const closedManual = store.getState().conversations.find((item) => item.id === manualStarted.id);
+  assert.equal(closedManual.status, 'closed_no_confirmation');
+  assert.equal(closedManual.caseStatus, 'closed_no_confirmation');
+  assert.equal(closedManual.orderDraft.status, 'not_confirmed');
+  assert.ok(closedManual.messages.at(-1).text.includes('Pedido no confirmado'));
+
+  const newCaseAfterClosure = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998899',
+    profileName: 'Caso Manual',
+    text: 'Quiero 1 chocoramo para domicilio',
+  });
+  assert.notEqual(newCaseAfterClosure.conversation.id, manualStarted.id);
+  assert.equal(newCaseAfterClosure.conversation.orderDraft.items[0].catalogQuery.toLowerCase(), 'chocoramo');
+  assert.equal(newCaseAfterClosure.conversation.orderDraft.items.some((item) => item.catalogQuery === 'Pedido anterior que no se debe heredar'), false);
+  const activeConversationIds = (await getJson(`${base}/api/ops/overview?tenantId=andina`)).conversations.map((item) => item.id);
+  assert.equal(activeConversationIds.includes(manualStarted.id), false);
+  assert.equal(activeConversationIds.includes(newCaseAfterClosure.conversation.id), true);
 
   const newCustomerRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -222,8 +405,8 @@ try {
   assert.ok(realLargeOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
 
   const usage = await getJson(`${base}/api/usage?tenantId=andina`);
-  assert.equal(usage.limits.includedDeliveries, 1000);
-  assert.equal(usage.limits.includedInteractions, 5000);
+  assert.equal(usage.limits.includedDeliveries, 400);
+  assert.equal(usage.limits.includedInteractions, 2700);
   assert.ok(usage.percentages.interactions > 0);
 
   const imageRun = await postJson(`${base}/api/agent/run`, {
@@ -270,8 +453,10 @@ try {
         },
       }],
     }],
-  }, { expectedStatus: 404 });
-  assert.equal(unknownWhatsappTenant.code, 'whatsapp_tenant_not_found');
+  });
+  assert.equal(unknownWhatsappTenant.ok, true);
+  assert.equal(unknownWhatsappTenant.ignored, true);
+  assert.equal(unknownWhatsappTenant.reason, 'whatsapp_tenant_not_found');
 
   const createdTenant = await postJson(`${base}/api/saas/tenants`, {
     storeName: 'Tienda Prueba SaaS',
@@ -283,11 +468,11 @@ try {
   assert.equal(createdTenant.subscription.status, 'pending_payment');
 
   const billingPlans = await getJson(`${base}/api/billing/plans`);
-  assert.ok(billingPlans.plans.some((plan) => plan.id === 'ventas_ia_1000_domicilios' && plan.isActive));
+  assert.ok(billingPlans.plans.some((plan) => plan.id === 'ventas_ia_400_domicilios' && plan.isActive));
 
   const billingStatusBeforeCheckout = await getJson(`${base}/api/billing/status?tenantId=${createdTenant.tenant.id}`);
-  assert.equal(billingStatusBeforeCheckout.plan.includedDeliveries, 1000);
-  assert.equal(billingStatusBeforeCheckout.plan.includedInteractions, 5000);
+  assert.equal(billingStatusBeforeCheckout.plan.includedDeliveries, 400);
+  assert.equal(billingStatusBeforeCheckout.plan.includedInteractions, 2700);
   assert.equal(billingStatusBeforeCheckout.actions.canStartCheckout, true);
   assert.ok(billingStatusBeforeCheckout.notices.some((notice) => notice.key === 'checkout_expired_or_missing'));
 
@@ -329,14 +514,19 @@ try {
 
   const adminOverview = await getJson(`${base}/api/admin/overview`);
   assert.equal(adminOverview.platform.llm.provider, 'deepseek');
+  assert.ok(adminOverview.platform.outboxSummary);
   assert.ok(adminOverview.tenants.some((tenant) => tenant.id === createdTenant.tenant.id));
 
   const webhookAdmin = await getJson(`${base}/api/admin/webhooks?provider=mercado_pago`);
   assert.ok(webhookAdmin.summary.total >= 1);
   assert.ok(webhookAdmin.events.some((event) => event.provider === 'mercado_pago'));
 
+  const outboxAdmin = await getJson(`${base}/api/admin/outbox?tenantId=andina`);
+  assert.ok(outboxAdmin.summary);
+  assert.ok(outboxAdmin.entries.every((entry) => entry.payload === undefined));
+
   const adminPlans = await getJson(`${base}/api/admin/billing/plans`);
-  assert.ok(adminPlans.plans.some((plan) => plan.id === 'ventas_ia_1000_domicilios'));
+  assert.ok(adminPlans.plans.some((plan) => plan.id === 'ventas_ia_400_domicilios'));
 
   const createdAdminPlan = await postJson(`${base}/api/admin/billing/plans`, {
     name: 'Plan Crecimiento Smoke',
@@ -359,7 +549,7 @@ try {
   });
   assert.equal(disabledAdminPlan.isActive, false);
   assert.equal(disabledAdminPlan.trialEnabled, false);
-  const defaultAdminPlan = await patchJson(`${base}/api/admin/billing/plans/ventas_ia_1000_domicilios`, {
+  const defaultAdminPlan = await patchJson(`${base}/api/admin/billing/plans/ventas_ia_400_domicilios`, {
     isDefault: true,
     trialEnabled: false,
     graceDays: 5,
@@ -443,6 +633,12 @@ try {
   assert.ok(billingStatusWithCommercialAdjustments.notices.some((notice) => notice.key === 'discount_active'));
   assert.ok(billingStatusWithCommercialAdjustments.notices.some((notice) => notice.key === 'access_exception_active'));
 
+  const setupAllowedByException = await getJson(`${base}/api/saas/connect/google/${createdTenant.tenant.id}/start`);
+  assert.ok(setupAllowedByException.state);
+  const statusWithException = await getJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/status`);
+  assert.equal(statusWithException.status.setupAccess.source, 'billing_access_exception');
+  assert.equal(statusWithException.status.checks.find((check) => check.key === 'subscription').ok, true);
+
   const revokedDiscount = await patchJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/discounts/${discount.id}/revoke`, {});
   assert.equal(revokedDiscount.status, 'revoked');
   const revokedException = await patchJson(`${base}/api/admin/billing/tenants/${createdTenant.tenant.id}/exceptions/${exception.id}/revoke`, {});
@@ -501,12 +697,12 @@ try {
 
   const downgradedSubscription = await postJson(`${base}/api/billing/change-plan`, {
     tenantId: createdTenant.tenant.id,
-    planId: 'ventas_ia_1000_domicilios',
+    planId: 'ventas_ia_400_domicilios',
     direction: 'downgrade',
   });
   assert.equal(downgradedSubscription.appliesImmediately, false);
   assert.equal(downgradedSubscription.subscription.planId, upgradePlan.id);
-  assert.equal(downgradedSubscription.subscription.pendingPlanChange.planId, 'ventas_ia_1000_domicilios');
+  assert.equal(downgradedSubscription.subscription.pendingPlanChange.planId, 'ventas_ia_400_domicilios');
   assert.equal(downgradedSubscription.noRefunds, true);
 
   const cancelledSubscription = await postJson(`${base}/api/billing/cancel`, {
@@ -522,7 +718,25 @@ try {
   const funnel = await getJson(`${base}/api/admin/billing/funnel`);
   assert.ok(funnel.stages.some((stage) => stage.stage === 'checkout_started' && stage.total >= 1));
 
-  const oauthStart = await getJson(`${base}/api/saas/tenants/${createdTenant.tenant.id}/google/oauth/start`);
+  const browserOAuthStart = await fetch(`${base}/api/saas/connect/google/${createdTenant.tenant.id}/start?redirect=1`, {
+    redirect: 'manual',
+  });
+  assert.equal(browserOAuthStart.status, 302);
+  const browserAuthorizationUrl = new URL(browserOAuthStart.headers.get('location'));
+  assert.equal(browserAuthorizationUrl.hostname, 'accounts.google.com');
+  const browserOAuthState = browserAuthorizationUrl.searchParams.get('state');
+  assert.ok(browserOAuthState);
+  const browserOAuthCallback = await fetch(`${base}/api/saas/google/oauth/callback?state=${browserOAuthState}&code=dev-mock-code&mockAccountEmail=dueno%40example.com`, {
+    redirect: 'manual',
+  });
+  assert.equal(browserOAuthCallback.status, 303);
+  const browserReturnUrl = new URL(browserOAuthCallback.headers.get('location'));
+  assert.equal(browserReturnUrl.searchParams.get('app'), '1');
+  assert.equal(browserReturnUrl.searchParams.get('view'), 'onboarding');
+  assert.equal(browserReturnUrl.searchParams.get('googleOAuth'), 'connected');
+  assert.equal(browserReturnUrl.searchParams.get('tenant'), createdTenant.tenant.id);
+
+  const oauthStart = await getJson(`${base}/api/saas/connect/google/${createdTenant.tenant.id}/start`);
   assert.ok(oauthStart.state);
   assert.ok(oauthStart.authorizationUrl.includes('access_type=offline'));
 
@@ -625,6 +839,10 @@ try {
   server.close();
   await store.close?.();
   fs.rmSync(tempDir, { recursive: true, force: true });
+  if (originalGoogleClientId === undefined) delete process.env.GOOGLE_CLIENT_ID;
+  else process.env.GOOGLE_CLIENT_ID = originalGoogleClientId;
+  if (originalGoogleClientSecret === undefined) delete process.env.GOOGLE_CLIENT_SECRET;
+  else process.env.GOOGLE_CLIENT_SECRET = originalGoogleClientSecret;
 }
 
 async function getJson(url, { expectedStatus = 200 } = {}) {
