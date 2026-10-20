@@ -269,6 +269,52 @@ try {
   assert.ok(unavailablePresentationReply.includes('Coca-Cola 400ml'));
   assert.match(unavailablePresentationReply, /\$[\s\u00a0]*3\.200/);
 
+  // A live catalog can express a 1.5 L item only in its display name. The
+  // runtime must still match it to a request for "1.5 litros" and avoid
+  // quoting another size before asking the customer to choose.
+  store.mutate((state) => {
+    state.productsByTenant.andina.push({
+      sku: 'AND-COC-1500-BARE',
+      name: 'Coca-Cola 1.5',
+      aliases: ['coca cola', 'cocacola', 'coca cola 1.5'],
+      price: 7200,
+      stock: 24,
+      category: 'bebidas',
+    });
+    state.conversations.unshift({
+      id: 'wa-exact-presentation-smoke',
+      tenantId: 'andina',
+      waId: '573001112256',
+      customer: 'Presentación exacta',
+      status: 'live',
+      stage: 'inbound',
+      zone: 'agent',
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId: 'andina',
+    conversationId: 'wa-exact-presentation-smoke',
+    normalized: { waId: '573001112256', profileName: 'Presentación exacta', text: 'Quiero una Coca-Cola de 1.5 litros para domicilio.' },
+    customerProfile: null,
+    plan: {
+      intent: 'delivery_order',
+      order: {
+        delivery: true,
+        paymentMethod: 'cash',
+        items: [{ rawName: 'Coca-Cola 1.5', catalogQuery: 'Coca-Cola', skuHint: 'AND-COC-1500-BARE', requestedPresentation: '1.5 litros', quantity: 1 }],
+      },
+      missingFields: ['customer_name', 'delivery_address'],
+      toolPlan: [],
+    },
+  });
+  const exactPresentationConversation = store.getState().conversations.find((item) => item.id === 'wa-exact-presentation-smoke');
+  assert.equal(exactPresentationConversation.orderDraft.items[0].product.sku, 'AND-COC-1500-BARE');
+  assert.equal(exactPresentationConversation.orderDraft.missingFields.some((field) => field.startsWith('presentation:')), false);
+  assert.equal(exactPresentationConversation.messages.at(-1).text.includes('¿Cual prefieres?'), false);
+
   const quantityRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
     waId: '573009998877',
@@ -299,6 +345,106 @@ try {
   });
   assert.equal(confirmRun.result.plan.intent, 'order_confirmation');
   assert.ok(confirmRun.conversation.orderId);
+
+  // Confirmation plans can be sparse. The confirmed order must retain the
+  // product names that were already validated in the conversation draft.
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: 'wa-confirmed-name-smoke',
+      tenantId: 'andina',
+      waId: '573001112257',
+      customer: 'Nombre comercial',
+      status: 'live',
+      stage: 'quote',
+      zone: 'quote',
+      messages: [],
+      orderDraft: {
+        delivery: true,
+        paymentMethod: 'breb',
+        paymentMethodLabel: 'Bre-B',
+        missingFields: [],
+        subtotal: 10000,
+        items: [
+          {
+            rawName: 'Coca-Cola 1.5',
+            catalogQuery: 'Coca-Cola',
+            skuHint: 'BOG-BEB-044',
+            quantity: 1,
+            product: { sku: 'BOG-BEB-044', name: 'Coca-Cola original', price: 7200, stock: 24, presentation: '1.5 L' },
+            lineTotal: 7200,
+          },
+          {
+            rawName: 'chocorramo',
+            catalogQuery: 'Chocoramo',
+            skuHint: 'BOG-PAN-019',
+            quantity: 1,
+            product: { sku: 'BOG-PAN-019', name: 'Ponque Chocoramo', price: 2800, stock: 55, presentation: '65 g' },
+            lineTotal: 2800,
+          },
+        ],
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+  await runtime.handleOrderConfirmation({
+    tenantId: 'andina',
+    conversationId: 'wa-confirmed-name-smoke',
+    normalized: { waId: '573001112257', profileName: 'Nombre comercial', text: 'Confirmo el pedido' },
+    customerProfile: { name: 'Nombre comercial', defaultAddress: 'Calle 10 # 20-30' },
+    plan: {
+      intent: 'order_confirmation',
+      order: {
+        delivery: true,
+        paymentMethod: 'breb',
+        subtotal: 10000,
+        items: [
+          { skuHint: 'BOG-BEB-044', catalogQuery: 'BOG-BEB-044', quantity: 1 },
+          { skuHint: 'BOG-PAN-019', catalogQuery: 'BOG-PAN-019', quantity: 1 },
+        ],
+      },
+      missingFields: [],
+    },
+  });
+  const namedOrder = store.getState().ordersByTenant.andina.find((item) => item.conversationId === 'wa-confirmed-name-smoke');
+  assert.deepEqual(namedOrder.items.map((item) => item.name), ['Coca-Cola original', 'Ponque Chocoramo']);
+  const namedOrderRequest = store.getState().pendingRequests.find((item) => item.conversationId === 'wa-confirmed-name-smoke');
+  assert.deepEqual(namedOrderRequest.contextSnapshot.items.map((item) => item.name), ['Coca-Cola original', 'Ponque Chocoramo']);
+
+  // Older confirmed orders may have stored their SKU as the item name. The
+  // operations API repairs that display-only representation from the catalog.
+  store.mutate((state) => {
+    state.ordersByTenant.andina.unshift({
+      id: 'legacy-sku-display-smoke',
+      tenantId: 'andina',
+      conversationId: 'wa-legacy-sku-display-smoke',
+      waId: '573001112258',
+      customerName: 'Pedido legado',
+      deliveryAddress: 'Calle 11 # 12-13',
+      items: [{ sku: 'AND-COC-1500-BARE', name: 'AND-COC-1500-BARE', quantity: 1, lineTotal: 7200 }],
+      subtotal: 7200,
+      status: 'pending_human_preparation',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    state.pendingRequests.unshift({
+      id: 'legacy-sku-display-request-smoke',
+      tenantId: 'andina',
+      conversationId: 'wa-legacy-sku-display-smoke',
+      action: 'prepare_delivery_order',
+      assignedTeam: 'operaciones',
+      title: 'Alistar domicilio confirmado',
+      status: 'pending',
+      contextSnapshot: {
+        orderId: 'legacy-sku-display-smoke',
+        action: 'prepare_delivery_order',
+        items: [{ sku: 'AND-COC-1500-BARE', name: 'AND-COC-1500-BARE', quantity: 1, lineTotal: 7200 }],
+      },
+    });
+  });
+  const legacyDisplayOverview = await getJson(`${base}/api/ops/overview?tenantId=andina`);
+  assert.equal(legacyDisplayOverview.orders.find((item) => item.id === 'legacy-sku-display-smoke').items[0].name, 'Coca-Cola 1.5');
+  assert.equal(legacyDisplayOverview.pendingRequests.find((item) => item.id === 'legacy-sku-display-request-smoke').contextSnapshot.items[0].name, 'Coca-Cola 1.5');
 
   const manualCaseRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',

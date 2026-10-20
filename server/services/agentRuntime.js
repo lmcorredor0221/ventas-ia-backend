@@ -573,7 +573,13 @@ export class AgentRuntime {
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
-    const orderDraft = structuredClone(plan.order ?? {});
+    // A confirmation message is intentionally terse. Its LLM plan can omit
+    // resolved catalog data, so the persisted quote is the authoritative
+    // source for the items, amounts and product names being confirmed.
+    const conversation = await this.getConversation(conversationId);
+    const orderDraft = structuredClone(
+      conversation?.orderDraft?.items?.length ? conversation.orderDraft : plan.order ?? {},
+    );
     const selectedPaymentMethod = resolvePaymentMethod(orderDraft.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(normalized.text, paymentMethods);
     if (orderDraft.delivery && !selectedPaymentMethod) {
@@ -1538,18 +1544,20 @@ function describeOperationalFailure(error) {
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod }) {
   const uniqueMissing = [...new Set(missingFields)];
   const foundLines = orderItems
-    .filter((item) => item.product)
+    .filter((item) => item.product && !hasMissingPresentation(item, uniqueMissing))
     .map((item) => {
-      const presentationMissing = uniqueMissing.find((missing) =>
-        missing.startsWith('presentation:') && matchesMissingPresentation(item, missing.replace('presentation:', ''))
-      );
-      const name = presentationMissing ? item.rawName : item.product.name;
+      const name = item.product.name;
       if (item.budgetAmount) return `${formatCurrency(item.budgetAmount)} de ${name}`;
       const price = Number(item.product?.price ?? 0);
       const unitPrice = price > 0 ? ` (${formatCurrency(price)} c/u)` : '';
       return `${item.quantity ?? 'cantidad pendiente'} x ${name}${unitPrice}`;
     });
-  const subtotalLine = Number(subtotal ?? 0) > 0 ? ` Subtotal de productos: ${formatCurrency(subtotal)}.` : '';
+  const quotedSubtotal = uniqueMissing.some((missing) => missing.startsWith('presentation:'))
+    ? orderItems
+      .filter((item) => item.product && !hasMissingPresentation(item, uniqueMissing))
+      .reduce((sum, item) => sum + Number(item.lineTotal ?? 0), 0)
+    : Number(subtotal ?? 0);
+  const subtotalLine = quotedSubtotal > 0 ? ` Subtotal de productos: ${formatCurrency(quotedSubtotal)}.` : '';
   if (uniqueMissing.length) {
     const asks = [];
     const presentationNotes = [];
@@ -1597,19 +1605,52 @@ function needsHumanProductResolution(missingFields) {
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {
   const requestedVolume = presentationVolumeInMilliliters(requestedPresentation);
-  const fields = normalizeText([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
-  if (requestedVolume) return presentationVolumeInMilliliters(fields) === requestedVolume;
+  const fields = [product.name, product.presentation, ...(product.aliases ?? [])]
+    .filter(Boolean)
+    .map(normalizeText);
+  if (requestedVolume) {
+    const productVolumes = fields.flatMap(presentationVolumesInMilliliters);
+    if (productVolumes.includes(requestedVolume)) return true;
+
+    // Some imported catalogs put "Coca-Cola 1.5" in the name but leave the
+    // presentation cell blank. A matching numeric presentation is still a
+    // precise match, not a reason to ask the customer to choose it again.
+    const requestedAmounts = presentationNumbers(requestedPresentation);
+    return requestedAmounts.some((amount) => fields.some((field) => presentationNumbers(field).includes(amount)));
+  }
+  const fieldsText = fields.join(' ');
   const requestedNumber = normalizeText(requestedPresentation).match(/\d{2,4}/)?.[0];
   if (!requestedNumber) return true;
-  return fields.includes(requestedNumber);
+  return fieldsText.includes(requestedNumber);
 }
 
 function presentationVolumeInMilliliters(value) {
-  const match = normalizeText(value).match(/\b(\d+(?:[.,]\d+)?)\s*(ml|cc|l|litro|litros)\b/);
-  if (!match) return null;
-  const amount = Number(match[1].replace(',', '.'));
-  if (!Number.isFinite(amount)) return null;
-  return ['l', 'litro', 'litros'].includes(match[2]) ? Math.round(amount * 1000) : Math.round(amount);
+  return presentationVolumesInMilliliters(value)[0] ?? null;
+}
+
+function presentationVolumesInMilliliters(value) {
+  const normalized = normalizeText(value);
+  const volumes = [];
+  for (const match of normalized.matchAll(/\b(\d+(?:[.,]\d+)?)\s*(ml|cc|l|litro|litros)\b/g)) {
+    const amount = Number(match[1].replace(',', '.'));
+    if (!Number.isFinite(amount)) continue;
+    volumes.push(['l', 'litro', 'litros'].includes(match[2]) ? Math.round(amount * 1000) : Math.round(amount));
+  }
+  if (/\blitro\s+y\s+medio\b/.test(normalized)) volumes.push(1500);
+  if (/\bmedio\s+litro\b/.test(normalized)) volumes.push(500);
+  return [...new Set(volumes)];
+}
+
+function presentationNumbers(value) {
+  return [...normalizeText(value).matchAll(/\b(\d+(?:[.,]\d+)?)\b/g)]
+    .map((match) => Number(match[1].replace(',', '.')))
+    .filter(Number.isFinite);
+}
+
+function hasMissingPresentation(item, missingFields) {
+  return missingFields.some((missing) => (
+    missing.startsWith('presentation:') && matchesMissingPresentation(item, missing.replace('presentation:', ''))
+  ));
 }
 
 function describeProductOption(product) {

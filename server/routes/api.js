@@ -166,7 +166,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
       const filteredEvents = await events.list({ tenantId, limit: 50 });
       const state = store.getState();
       const tenantOrders = (state.ordersByTenant?.[tenantId] ?? []).map((order) => ({
-        ...order,
+        ...enrichOrderForDisplay(order, state),
         status: orders.effectiveStatus(order, state.pendingRequests),
       }));
       const usageSummary = tenantId ? await usage.summary(tenantId) : null;
@@ -370,27 +370,55 @@ function filterTenantScoped(records, scope) {
 
 function enrichPendingRequests(requests, state) {
   return requests.map((request) => {
-    if (request.contextSnapshot?.items?.length || request.context_snapshot?.items?.length) return request;
+    const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
     const title = String(request.title ?? '').toLowerCase();
-    const looksLikeDelivery = request.assignedTeam === 'operaciones' || title.includes('pedido') || title.includes('domicilio');
+    const looksLikeDelivery = request.action === 'prepare_delivery_order'
+      || snapshot.action === 'prepare_delivery_order'
+      || request.assignedTeam === 'operaciones'
+      || title.includes('pedido')
+      || title.includes('domicilio');
     if (!looksLikeDelivery) return request;
-    const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.conversationId === request.conversationId);
+    const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => (
+      item.id === snapshot.orderId || item.conversationId === request.conversationId
+    ));
     if (!order) return request;
+    const displayOrder = enrichOrderForDisplay(order, state);
     return {
       ...request,
       action: 'prepare_delivery_order',
       title: request.title?.toLowerCase().includes('alistar') ? request.title : 'Alistar domicilio confirmado',
       consequence: 'El tendero toma el pedido para alistarlo y coordinar la entrega.',
       contextSnapshot: {
-        ...(request.contextSnapshot ?? request.context_snapshot ?? {}),
+        ...snapshot,
         action: 'prepare_delivery_order',
-        orderId: order.id,
-        subtotal: order.subtotal,
-        customerName: order.customerName,
-        customerWaId: order.waId,
-        deliveryAddress: order.deliveryAddress ?? 'Dirección pendiente por confirmar',
-        items: order.items ?? [],
+        orderId: displayOrder.id,
+        subtotal: displayOrder.subtotal,
+        customerName: displayOrder.customerName,
+        customerWaId: displayOrder.waId,
+        deliveryAddress: displayOrder.deliveryAddress ?? 'Dirección pendiente por confirmar',
+        items: displayOrder.items ?? [],
       },
     };
   });
+}
+
+function enrichOrderForDisplay(order, state) {
+  const productsBySku = new Map(
+    (state.productsByTenant?.[order.tenantId] ?? []).map((product) => [product.sku, product]),
+  );
+  return {
+    ...order,
+    items: (order.items ?? []).map((item) => {
+      const product = productsBySku.get(item.sku ?? item.skuHint);
+      const currentName = String(item.name ?? item.catalogQuery ?? '').trim();
+      const technicalName = !currentName
+        || currentName === item.sku
+        || currentName === item.skuHint
+        || /^producto(?:\s+por\s+validar)?$/i.test(currentName);
+      return {
+        ...item,
+        name: technicalName ? ((product?.name ?? currentName) || 'Producto por validar') : currentName,
+      };
+    }),
+  };
 }
