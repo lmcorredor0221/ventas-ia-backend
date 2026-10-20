@@ -27,6 +27,10 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
+    // Snapshot writes are intentionally independent from critical row writes.
+    // A large app_state projection must never make an operator wait to take
+    // or dispatch an order already persisted through its mirror table.
+    this.snapshotQueue = Promise.resolve();
     this.snapshotSaveTimer = null;
     this.snapshotSaveDeferred = null;
     this.snapshotSaving = false;
@@ -556,7 +560,7 @@ export class PostgresStore {
     this.snapshotSaveDeferred = null;
     this.snapshotDirty = false;
     this.snapshotSaving = true;
-    const write = this.queueWrite(() => this.save(), 'deferred snapshot save');
+    const write = this.queueSnapshotWrite(() => this.save(), 'deferred snapshot save');
     write.then(
       () => snapshot?.resolve(),
       (error) => snapshot?.reject(error),
@@ -575,16 +579,24 @@ export class PostgresStore {
     return this.saveQueue;
   }
 
+  queueSnapshotWrite(operation, label) {
+    this.snapshotQueue = this.snapshotQueue.catch(() => undefined).then(operation);
+    this.snapshotQueue.catch((error) => {
+      console.error(`PostgresStore ${label} failed`, error);
+    });
+    return this.snapshotQueue;
+  }
+
   async flush() {
     if (this.snapshotSaveTimer) {
       clearTimeout(this.snapshotSaveTimer);
       this.snapshotSaveTimer = null;
     }
     this.startSnapshotSave();
-    await this.saveQueue;
+    await Promise.all([this.saveQueue, this.snapshotQueue]);
     if (this.snapshotDirty) {
       this.startSnapshotSave();
-      await this.saveQueue;
+      await Promise.all([this.saveQueue, this.snapshotQueue]);
     }
   }
 
