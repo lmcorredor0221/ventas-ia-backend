@@ -260,6 +260,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
         timestamp: Date.now(),
         messageType: req.body?.messageType ?? 'text',
         text: req.body?.text ?? '',
+        interactive: req.body?.interactive ?? null,
         mediaRef: req.body?.mediaRef ?? null,
         rawPayloadRef: 'local_api',
       });

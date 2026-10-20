@@ -510,6 +510,9 @@ export class AgentRuntime {
     const paymentOffer = !requiresHumanResolution && !selectedPaymentMethod && missingFields.includes('payment_method')
       ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
       : null;
+    const confirmationOffer = canQuote && !requiresHumanResolution && !paymentOffer
+      ? await this.createOrderConfirmationOffer({ tenantId, conversationId })
+      : null;
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -523,6 +526,9 @@ export class AgentRuntime {
     });
     const paymentInteractive = paymentOffer?.interactive
       ? { ...paymentOffer.interactive, body: customerReply }
+      : undefined;
+    const confirmationInteractive = confirmationOffer?.interactive
+      ? { ...confirmationOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -585,7 +591,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentInteractive,
+      interactive: paymentInteractive ?? confirmationInteractive,
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
@@ -779,6 +785,9 @@ export class AgentRuntime {
     const paymentOffer = !draft.paymentMethod && draft.missingFields.includes('payment_method')
       ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
       : null;
+    const confirmationOffer = canQuote && !paymentOffer
+      ? await this.createOrderConfirmationOffer({ tenantId, conversationId })
+      : null;
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -792,6 +801,9 @@ export class AgentRuntime {
     });
     const paymentInteractive = paymentOffer?.interactive
       ? { ...paymentOffer.interactive, body: customerReply }
+      : undefined;
+    const confirmationInteractive = confirmationOffer?.interactive
+      ? { ...confirmationOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -814,7 +826,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentInteractive,
+      interactive: paymentInteractive ?? confirmationInteractive,
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
@@ -1304,6 +1316,33 @@ export class AgentRuntime {
     };
   }
 
+  async createOrderConfirmationOffer({ tenantId, conversationId }) {
+    if (!this.store.createInteractionOffer) return null;
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const options = [
+      { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order' },
+      { id: `vi:${offerId}:2`, title: 'Ajustar pedido', action: 'adjust_order' },
+      { id: `vi:${offerId}:3`, title: 'Hablar con la tienda', action: 'human_handoff' },
+    ];
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      purpose: 'order_confirmation',
+      options,
+      expiresAt,
+    });
+    return {
+      offer,
+      interactive: {
+        kind: 'button',
+        body: '¿Confirmas el pedido?',
+        buttons: options.map(({ id, title }) => ({ id, title })),
+      },
+    };
+  }
+
   async handleInteractiveReply({ tenantId, conversationId, normalized }) {
     const optionId = normalized.interactive?.optionId;
     const offerId = String(optionId ?? '').match(/^vi:(io-[a-z0-9]+):\d+$/i)?.[1];
@@ -1320,6 +1359,15 @@ export class AgentRuntime {
           ? 'Esa opción ya venció. Escríbeme la forma de pago que prefieres y seguimos.'
           : 'Esa opción ya fue usada o no corresponde a este pedido. Escríbeme cómo quieres continuar.',
       });
+    }
+    if (result.option?.action === 'confirm_order') {
+      return this.confirmOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
+    }
+    if (result.option?.action === 'adjust_order') {
+      return this.requestOrderAdjustment({ tenantId, conversationId, normalized, option: result.option });
+    }
+    if (result.option?.action === 'human_handoff') {
+      return this.requestStoreHandoff({ tenantId, conversationId, normalized, option: result.option });
     }
     if (result.option?.action !== 'set_payment_method') {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
@@ -1344,12 +1392,80 @@ export class AgentRuntime {
       fallbackText,
       facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [draft.paymentMethodLabel] },
     });
+    const confirmationOffer = draft.missingFields.length
+      ? null
+      : await this.createOrderConfirmationOffer({ tenantId, conversationId });
+    const confirmationInteractive = confirmationOffer?.interactive
+      ? { ...confirmationOffer.interactive, body: text }
+      : undefined;
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text,
+      interactive: confirmationInteractive,
     });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async confirmOrderFromInteraction({ tenantId, conversationId, normalized, option }) {
+    const customerLookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+      wa_id: normalized.waId,
+      profile_name: normalized.profileName,
+    });
+    const customerProfile = customerLookup.profile;
+    if (customerProfile?.name) {
+      await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
+    }
+    const conversation = await this.getConversation(conversationId);
+    const plan = {
+      intent: 'order_confirmation',
+      order: structuredClone(conversation?.orderDraft ?? {}),
+      executionMode: 'interactive',
+      provider: 'whatsapp',
+      model: null,
+    };
+    const result = await this.handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile });
+    return { ...result, interaction: option };
+  }
+
+  async requestOrderAdjustment({ tenantId, conversationId, normalized, option }) {
+    await this.patchConversation(conversationId, {
+      stage: 'clarification',
+      zone: 'agent',
+      status: 'live',
+      progress: 56,
+      nextStep: 'Esperar el ajuste solicitado por el cliente.',
+      lastTool: 'whatsapp_business_messaging',
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: 'Claro. Dime qué quieres ajustar del pedido y actualizo el total antes de confirmarlo.',
+    });
+    return { summary: 'Order adjustment requested', interaction: option };
+  }
+
+  async requestStoreHandoff({ tenantId, conversationId, normalized, option }) {
+    const conversation = await this.getConversation(conversationId);
+    const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
+      reason: 'Cliente solicita hablar con la tienda antes de confirmar el pedido',
+      urgency: 'Alta',
+      assigned_team: 'ventas',
+      context_snapshot: {
+        summary: 'El cliente eligió hablar con la tienda desde la confirmación del pedido.',
+        action: 'resolve_handoff',
+        customerWaId: normalized.waId,
+        orderDraft: conversation?.orderDraft ?? null,
+      },
+    });
+    if (!handoff.reused) {
+      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+        action: 'send_session_message',
+        wa_id: normalized.waId,
+        text: 'Listo, ya le avisé a la tienda. Te atenderán por este mismo chat antes de confirmar el pedido.',
+      });
+    }
+    return { summary: handoff.reused ? 'Store handoff already pending' : 'Store handoff requested', interaction: option };
   }
 
   async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {

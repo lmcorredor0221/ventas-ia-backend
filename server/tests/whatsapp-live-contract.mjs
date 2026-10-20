@@ -19,8 +19,18 @@ global.fetch = async (url, options = {}) => {
   const body = JSON.parse(options.body);
   assert.equal(body.messaging_product, 'whatsapp');
   assert.equal(body.to, '573001110002');
-  assert.equal(body.type, 'text');
-  assert.equal(body.text.body, 'Mensaje live de prueba');
+  if (body.type === 'text') {
+    assert.equal(body.text.body, 'Mensaje live de prueba');
+  } else {
+    assert.equal(body.type, 'interactive');
+    assert.equal(body.interactive.type, 'button');
+    assert.equal(body.interactive.body.text, '¿Confirmas el pedido?');
+    assert.deepEqual(body.interactive.action.buttons.map((button) => button.reply), [
+      { id: 'vi:confirmation:1', title: 'Confirmar pedido' },
+      { id: 'vi:confirmation:2', title: 'Ajustar pedido' },
+      { id: 'vi:confirmation:3', title: 'Hablar con la tienda' },
+    ]);
+  }
   return jsonResponse({
     messaging_product: 'whatsapp',
     contacts: [{ input: '573001110002', wa_id: '573001110002' }],
@@ -48,6 +58,23 @@ try {
     event.action === 'tool.whatsapp_business_messaging.sent' &&
     event.metadata?.live === true
   ));
+
+  const confirmationResult = await tools.call('whatsapp_business_messaging', 'andina', 'whatsapp-live-contract', {
+    action: 'send_session_message',
+    wa_id: '573001110002',
+    text: '¿Confirmas el pedido?',
+    interactive: {
+      kind: 'button',
+      body: '¿Confirmas el pedido?',
+      buttons: [
+        { id: 'vi:confirmation:1', title: 'Confirmar pedido' },
+        { id: 'vi:confirmation:2', title: 'Ajustar pedido' },
+        { id: 'vi:confirmation:3', title: 'Hablar con la tienda' },
+      ],
+    },
+  });
+  assert.equal(confirmationResult.delivery_status, 'accepted_by_provider');
+  assert.equal(outboundCalls.length, 2);
 
   global.fetch = async () => jsonResponse({
     error: {

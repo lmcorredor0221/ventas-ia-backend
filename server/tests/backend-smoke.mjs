@@ -352,14 +352,95 @@ try {
   assert.equal(paymentMethodRun.conversation.orderDraft.paymentMethod, 'cash');
   assert.match(paymentMethodRun.conversation.messages.at(-1).text, /Subtotal de productos/i);
 
+  const confirmationOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((offer) => offer.conversationId === quantityRun.conversation.id && offer.purpose === 'order_confirmation' && offer.status === 'active');
+  assert.ok(confirmationOffer, 'Al completar la cotización debe aparecer una confirmación interactiva');
+  assert.deepEqual(confirmationOffer.options.map((option) => ({ action: option.action, title: option.title })), [
+    { action: 'confirm_order', title: 'Confirmar pedido' },
+    { action: 'adjust_order', title: 'Ajustar pedido' },
+    { action: 'human_handoff', title: 'Hablar con la tienda' },
+  ]);
+
   const confirmRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
     waId: '573009998877',
     profileName: 'Prueba Local',
-    text: 'Confirmo el pedido',
+    messageType: 'interactive',
+    text: confirmationOffer.options[0].title,
+    interactive: { type: 'button_reply', optionId: confirmationOffer.options[0].id, title: confirmationOffer.options[0].title },
   });
-  assert.equal(confirmRun.result.plan.intent, 'order_confirmation');
+  assert.equal(confirmRun.result.summary, 'Confirmed order registered and handed off');
   assert.ok(confirmRun.conversation.orderId);
+
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: 'wa-confirmation-adjust-smoke',
+      tenantId: 'andina',
+      waId: '573009998876',
+      customer: 'Ajuste interactivo',
+      status: 'live',
+      stage: 'quote',
+      zone: 'quote',
+      orderDraft: { delivery: true, items: [], missingFields: [], subtotal: 10000, paymentMethod: 'cash' },
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+  store.createInteractionOffer({
+    id: 'io-adjustmentcontract',
+    tenantId: 'andina',
+    conversationId: 'wa-confirmation-adjust-smoke',
+    purpose: 'order_confirmation',
+    options: [{ id: 'vi:io-adjustmentcontract:1', title: 'Ajustar pedido', action: 'adjust_order' }],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const adjustmentRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998876',
+    profileName: 'Ajuste interactivo',
+    messageType: 'interactive',
+    text: 'Ajustar pedido',
+    interactive: { type: 'button_reply', optionId: 'vi:io-adjustmentcontract:1', title: 'Ajustar pedido' },
+  });
+  assert.equal(adjustmentRun.result.summary, 'Order adjustment requested');
+  assert.equal(adjustmentRun.conversation.stage, 'clarification');
+  assert.equal(adjustmentRun.conversation.status, 'live');
+
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: 'wa-confirmation-handoff-smoke',
+      tenantId: 'andina',
+      waId: '573009998875',
+      customer: 'Tienda interactiva',
+      status: 'live',
+      stage: 'quote',
+      zone: 'quote',
+      orderDraft: { delivery: true, items: [], missingFields: [], subtotal: 10000, paymentMethod: 'cash' },
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+  store.createInteractionOffer({
+    id: 'io-handoffcontract',
+    tenantId: 'andina',
+    conversationId: 'wa-confirmation-handoff-smoke',
+    purpose: 'order_confirmation',
+    options: [{ id: 'vi:io-handoffcontract:1', title: 'Hablar con la tienda', action: 'human_handoff' }],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const handoffRun = await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina',
+    waId: '573009998875',
+    profileName: 'Tienda interactiva',
+    messageType: 'interactive',
+    text: 'Hablar con la tienda',
+    interactive: { type: 'button_reply', optionId: 'vi:io-handoffcontract:1', title: 'Hablar con la tienda' },
+  });
+  assert.equal(handoffRun.result.summary, 'Store handoff requested');
+  assert.equal(handoffRun.conversation.status, 'blocked');
+  assert.ok(store.getState().pendingRequests.some((request) => request.conversationId === 'wa-confirmation-handoff-smoke' && request.type === 'human_handoff'));
 
   // Confirmation plans can be sparse. The confirmed order must retain the
   // product names that were already validated in the conversation draft.
