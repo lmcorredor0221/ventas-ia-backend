@@ -86,7 +86,7 @@ global.fetch = async (url, options = {}) => {
 
   if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && href.includes(':clear')) {
     assert.equal(options.headers.authorization, 'Bearer access-token-refreshed');
-    return jsonResponse({ clearedRange: 'Catalogo!A1:J1000' });
+    return jsonResponse({ clearedRange: 'Catalogo!A1:P1000' });
   }
 
   if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && options.method === 'GET') {

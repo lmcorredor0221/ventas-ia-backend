@@ -128,15 +128,9 @@ try {
     whatsappNumber: '+57 300 999 0000',
   }, { expectedStatus: 201 });
   const tenantId = createdTenant.tenant.id;
-  assert.equal(createdTenant.subscription.status, 'pending_payment');
-
-  const blockedRun = await postJson(`${base}/api/agent/run`, {
-    tenantId,
-    waId: `57300${suffix.slice(-6)}`,
-    profileName: 'Cliente PG Bloqueado',
-    text: 'tienes chocoramo?',
-  }, { expectedStatus: 402 });
-  assert.equal(blockedRun.code, 'tenant_not_operational');
+  assert.equal(createdTenant.tenant.status, 'trial');
+  assert.equal(createdTenant.subscription.status, 'trial');
+  assert.ok(createdTenant.subscription.trialEndsAt, 'La prueba gratuita debe registrar su fecha de vencimiento.');
 
   await postJson(`${base}/api/saas/tenants/${tenantId}/subscription/mock-activate`, {});
   const oauthStart = await getJson(`${base}/api/saas/tenants/${tenantId}/google/oauth/start`);

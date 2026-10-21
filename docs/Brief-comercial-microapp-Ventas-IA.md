@@ -264,8 +264,9 @@ Un plan activo inicial, con capacidad de configurar varios planes desde administ
 
 ### Limites base definidos
 
-- 1.000 domicilios por ciclo.
-- 5.000 interacciones por ciclo.
+- Hasta 400 domicilios por ciclo como promesa comercial del Plan Basico.
+- Aproximadamente 2.700 llamadas reales al agente IA como referencia del costo interno objetivo de US$3.
+- Hasta 5.000 interacciones tecnicas solo como limite superior de proteccion, no como equivalencia comercial de 400 domicilios.
 
 ### Facturacion
 

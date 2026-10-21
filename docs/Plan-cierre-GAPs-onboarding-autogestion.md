@@ -1,6 +1,6 @@
 # Plan de cierre de GAPs del onboarding autogestionado
 
-Fecha: 2026-10-14  
+Fecha: 2026-10-16
 Producto: Ventas IA Ops Store  
 Objetivo: permitir que cada cliente configure por autoservicio su Google Drive/Sheets y su WhatsApp Business, manteniendo el resto de la plataforma bajo control del administrador.
 
@@ -153,6 +153,33 @@ Criterios de cierre:
 - Se valida lectura y escritura real.
 - Otro tenant no puede consultar ni editar los recursos.
 
+#### Avance verificable al 2026-10-16
+
+Se implemento el retorno de OAuth orientado a una persona no tecnica:
+
+- El boton de Google inicia el flujo desde el onboarding y vuelve automaticamente a ese mismo paso cuando el owner autoriza o cancela.
+- El callback ya no expone una respuesta JSON tecnica en una pestana separada.
+- La aplicacion muestra un resultado claro de conexion o de cancelacion y vuelve a consultar el estado del onboarding.
+- Se agregaron las rutas publicas `/privacidad` y `/terminos`, necesarias para explicar el uso de Drive, Sheets y datos operativos.
+- El flujo de navegador queda cubierto por `server/tests/backend-smoke.mjs`, junto con la prueba contractual de Google y el build del frontend.
+
+Esto resuelve el producto local y deja intacta la separacion correcta: hay una aplicacion OAuth global de Ventas IA, pero cada tenant entrega su propio consentimiento, recibe su propio refresh token cifrado y usa su propio Drive y Sheets.
+
+#### Cierre productivo pendiente de plataforma
+
+El error `403 access_denied` visto durante la creacion de la tienda demo no es un fallo de aislamiento por tenant. El cliente OAuth de Google Cloud esta en modo **Prueba** y solo autoriza correos incluidos como usuarios de prueba. Se agrego `ventasiaopsstore@gmail.com` para validar el flujo actual, pero esto no habilita el autoservicio publico.
+
+Para abrir el alta a cualquier propietario se debe completar una unica vez, a nombre de la plataforma:
+
+1. Publicar en Google Cloud una marca completa: nombre del operador, correo de soporte, pagina principal, aviso de privacidad y terminos. Las URLs previstas son `https://via.leanagentbuilder.com/landing`, `/privacidad` y `/terminos`.
+2. Verificar en Google Search Console la propiedad de `leanagentbuilder.com`; ese dominio debe aparecer como autorizado en la pantalla de consentimiento.
+3. Cambiar el redirect URI de Google a `https://via.leanagentbuilder.com/api/saas/google/oauth/callback`. Vercel ya puede enrutar `/api` hacia Render, por lo que no depende de que Render Free admita un dominio personalizado.
+4. Configurar en Render `GOOGLE_REDIRECT_URI` con exactamente esa URL y mantener `FRONTEND_APP_URL=https://via.leanagentbuilder.com`.
+5. Solicitar y esperar la verificacion OAuth de Google para el scope sensible de Google Sheets. Hasta su aprobacion no se debe abrir el registro comercial sin limitarlo a usuarios de prueba.
+6. Rotar las credenciales OAuth o DeepSeek que hayan quedado expuestas fuera del vault antes de habilitar usuarios reales.
+
+Los pasos 1 a 5 no crean un proyecto Google por tenant ni hacen que el cliente copie credenciales: son una configuracion y una revision globales de Ventas IA. Despues de ese unico cierre, el cliente solo elige su cuenta Google y autoriza su propia carpeta y hoja.
+
 ### Fase P1-A: entrada de autoservicio y ciclo de onboarding
 
 Objetivo: que un nuevo cliente pueda comenzar sin intervencion tecnica.
@@ -304,7 +331,7 @@ Pendiente para cerrar P0-A completamente:
 - Probar con dos tenants autenticados y verificar que un token, conexión o webhook de un tenant no pueda operar sobre otro.
 - Completar la matriz de permisos visuales para la creación de tenant nuevo y la reapertura de onboarding.
 
-### 2026-10-14 — P0-B, control de conexión WhatsApp
+### 2026-10-16 — P0-B, control de conexión WhatsApp
 
 Implementado como base segura, pendiente de credenciales y prueba real de Meta:
 
@@ -313,13 +340,42 @@ Implementado como base segura, pendiente de credenciales y prueba real de Meta:
 - La ruta de binding ya no puede marcar un número como conectado sin validación del proveedor.
 - El envío live ya no usa `WHATSAPP_ACCESS_TOKEN` global como respaldo; exige la referencia de secreto del tenant.
 - Se documentaron `META_APP_ID`, `META_APP_SECRET`, `WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID` y la URI de retorno como configuración de plataforma.
+- Después de autorizar en Meta, el backend suscribe automáticamente la WABA al webhook de Ventas IA y registra el número cuando el alta parte de WhatsApp Business App o de un negocio nuevo.
+- El owner crea un PIN de seis dígitos solo para el registro del número. El PIN se transmite a Meta una vez, no se guarda, no se devuelve y no se incluye en auditoría.
+- La pantalla del tenant dejó de mostrar referencias de secretos, identificadores, la lista técnica de pasos y enlaces que abandonan el producto hacia Business Suite. Ahora el owner elige su punto de partida y pulsa un único botón: `Conectar con Meta`.
+- La prueba contractual cubre intercambio de código, validación WABA/número, suscripción al webhook y registro del número; la auditoría visual cubre escritorio y móvil.
 
-Pendiente:
+Pendiente externo:
 
 - Configurar App Review, permisos avanzados, HTTPS y callback público de Meta.
 - Ejecutar prueba real de alta, OTP, webhook y mensaje de salida.
 
 La prueba local conserva un fixture interno marcado como `verifiedByProvider` para validar el resto del flujo sin fingir una respuesta de Meta. No se considera evidencia de alta real.
+
+### 2026-10-16 — Auditoría de la app global de Meta
+
+Se verificó directamente la app global existente de Ventas IA en Meta for Developers. El caso de uso de WhatsApp y la configuración de Business Login ya existen, por lo que **no se debe crear una app Meta por tenant**. El tenant autentica y autoriza su negocio, WABA y número dentro de Embedded Signup; la plataforma conserva una única app global y configura el webhook común.
+
+Hallazgos de publicación:
+
+- La app continúa en modo desarrollo y Meta mantiene deshabilitado el botón de publicación.
+- En Configuración básica faltan el dominio de la app, URL de privacidad, URL de términos, URL/instrucciones de eliminación de datos, categoría e ícono.
+- La publicación y el uso con clientes externos requieren completar esos datos, activar la app, solicitar los permisos y la revisión que Meta determine para el caso de proveedor tecnológico.
+- El frontend ahora publica los textos en `/privacidad`, `/terminos` y `/eliminar-datos`; falta desplegarlos y registrar sus URL HTTPS en Meta.
+
+Configuración de producción que permanece global y exclusiva del backend (Render):
+
+- `META_APP_ID`, `META_APP_SECRET` y `WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID`.
+- `WHATSAPP_WEBHOOK_VERIFY_TOKEN`.
+- `WHATSAPP_WEBHOOK_PUBLIC_URL=https://via.leanagentbuilder.com/webhooks/whatsapp` para conservar el dominio comercial; Vercel debe reenviar esa ruta al backend Render.
+
+El secreto de Meta no pertenece a Vercel, al frontend ni a la configuración de cada tenant. El backend usa la app global únicamente para completar la autorización; el token operativo de cada WABA se cifra en `SecretVault` y queda asociado exclusivamente a su tenant.
+
+Correcciones locales aplicadas tras la auditoría:
+
+- El arranque de Embedded Signup distingue entre app Meta incompleta y webhook HTTPS incompleto, en vez de reportar ambos casos como el mismo error.
+- El listener del SDK acepta mensajes solo de `facebook.com`, sus subdominios, `meta.com` o sus subdominios; ya no acepta dominios que simplemente contengan esas palabras.
+- El webhook exige token de verificación y firma en producción; acepta `META_APP_SECRET` como fuente de firma cuando no se define una variable duplicada específica de WhatsApp.
 
 ### 2026-10-14 — Registro técnico de Meta
 
@@ -364,7 +420,7 @@ Implementado y validado localmente:
 - La respuesta marca `reused: true` para que la UI pueda comunicar que se retomó una configuración existente.
 - Se agregó evidencia al smoke test con dos llamadas consecutivas y el mismo `spreadsheet.id`.
 
-La prueba contractual de WhatsApp cubre el intercambio de código, la validación de pertenencia del número al WABA y la lectura posterior del secreto en `SecretVault`, usando Graph API simulado y sin publicar la aplicación.
+La prueba contractual de WhatsApp cubre el intercambio de código, la validación de pertenencia del número al WABA, la suscripción de la WABA, el registro del número y la lectura posterior del secreto en `SecretVault`, usando Graph API simulado y sin publicar la aplicación.
 
 ### 2026-10-14 — P1-B/P1-C, administración y estados visibles
 

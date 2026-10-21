@@ -578,8 +578,8 @@ export class SaasControlPlane {
       const nextTenant = next.tenants.find((item) => item.id === tenantId);
       if (nextTenant) {
         nextTenant.config.googleSheets.spreadsheetIdRef = `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`;
-        nextTenant.config.googleSheets.range = 'Catalogo!A1:J1000';
-        nextTenant.config.googleSheets.catalogRange = 'Catalogo!A1:J1000';
+        nextTenant.config.googleSheets.range = 'Catalogo!A1:P1000';
+        nextTenant.config.googleSheets.catalogRange = 'Catalogo!A1:P1000';
         nextTenant.config.googleSheets.customerProfilesRange = 'Clientes!A1:H1000';
         nextTenant.config.googleSheets.ordersRange = 'Pedidos!A1:M1000';
         nextTenant.config.googleDrive.rootFolderRef = `${tenantId.toUpperCase()}_GOOGLE_DRIVE_ROOT_FOLDER_ID_REF`;
@@ -667,13 +667,13 @@ export class SaasControlPlane {
     const products = validation.rows.filter((row) => row.activo).map(catalogRowToProduct);
     const source = live ? 'google_sheets_live' : 'local_test_fixture';
     const sheetValues = catalogRowsToSheetValues(validation.rows);
-    const catalogRange = tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:J1000';
+    const catalogRange = tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:P1000';
     if (live) {
       await this.googleWorkspace.clearValues({ accessToken: live.accessToken, spreadsheetId: live.spreadsheetId, range: catalogRange });
       await this.googleWorkspace.updateValues({
         accessToken: live.accessToken,
         spreadsheetId: live.spreadsheetId,
-        range: `Catalogo!A1:J${validation.rows.length + 1}`,
+        range: `Catalogo!A1:P${validation.rows.length + 1}`,
         values: sheetValues,
       });
     }
@@ -1965,8 +1965,8 @@ function tenantConfigFor(tenantId) {
     },
     googleSheets: {
       spreadsheetIdRef: `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-      range: 'Catalogo!A1:J1000',
-      catalogRange: 'Catalogo!A1:J1000',
+      range: 'Catalogo!A1:P1000',
+      catalogRange: 'Catalogo!A1:P1000',
       customerProfilesRange: 'Clientes!A1:H1000',
       ordersRange: 'Pedidos!A1:M1000',
       primaryKey: 'sku',

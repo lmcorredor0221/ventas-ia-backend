@@ -1,20 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import LandingPage from './components/LandingPage.jsx';
+import { patchJson, postJson } from './core/api/client.js';
+import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
+import OrderProgressCard from './features/orders/OrderProgressCard.jsx';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   BadgeCheck,
   BarChart3,
   Bell,
   Bot,
   Building2,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   CircleDollarSign,
   Clock3,
+  Calculator,
   Database,
   Eye,
   FileImage,
+  FileUp,
   Gauge,
   KeyRound,
   Layers3,
@@ -29,6 +37,7 @@ import {
   PanelLeftOpen,
   Pause,
   Play,
+  Plus,
   PlugZap,
   RotateCcw,
   Search,
@@ -36,7 +45,10 @@ import {
   Settings2,
   ShieldCheck,
   ShoppingBag,
+  Sparkles,
   Store,
+  Truck,
+  Trash2,
   UserCheck,
   Users,
   X,
@@ -47,7 +59,6 @@ import {
   conversations,
   createConversationLoadFixture,
   eventTemplates,
-  metricSeed,
   pendingRequests,
   storeZones,
   tenants,
@@ -65,6 +76,8 @@ const statusLabel = {
   fallback_available: 'Fallback',
   approval_required: 'Aprobación',
   resolved: 'Resuelto',
+  manual_active: 'Atención manual activa',
+  closed_no_confirmation: 'Cerrado sin confirmar',
 };
 
 const statusIcon = {
@@ -72,6 +85,8 @@ const statusIcon = {
   approval_required: UserCheck,
   blocked: AlertTriangle,
   degraded: Clock3,
+  manual_active: UserCheck,
+  closed_no_confirmation: Clock3,
   needs_binding: PlugZap,
   sandbox_ready: ShieldCheck,
   resolved: BadgeCheck,
@@ -87,28 +102,31 @@ const zoneIcon = {
   event: Activity,
 };
 
-const navigationItems = [
-  ['summary', LayoutDashboard, 'Resumen'],
+const ownerNavigationItems = [
+  ['summary', LayoutDashboard, 'Hoy'],
+  ['approvals', ListChecks, 'Pedidos y pendientes'],
   ['store', Store, 'Tienda viva'],
   ['conversations', MessageSquareText, 'Conversaciones'],
-  ['onboarding', ShieldCheck, 'Onboarding'],
+  ['onboarding', ShieldCheck, 'Poner en marcha'],
+  ['analytics', BarChart3, 'Uso del plan'],
+  ['config', Settings2, 'Ajustes'],
+];
+const adminNavigationItems = [
+  ...ownerNavigationItems,
   ['admin', Gauge, 'Centro de control'],
   ['observability', Activity, 'Observabilidad'],
-  ['approvals', ListChecks, 'Aprobaciones'],
-  ['analytics', BarChart3, 'Analítica'],
-  ['config', Settings2, 'Configuración'],
 ];
 
 const viewHeader = {
-  summary: ['Centro multicliente', 'Resumen operativo'],
-  store: ['Tienda viva', 'Operación comercial en tiempo real'],
-  conversations: ['Atención comercial', 'Conversaciones supervisables'],
-  onboarding: ['Activación guiada', 'Puesta en marcha de la tienda'],
+  summary: ['Tu negocio hoy', 'Lo que pasa en tu tienda'],
+  store: ['Tienda viva', 'Tu negocio en este momento'],
+  conversations: ['Clientes', 'Conversaciones de WhatsApp'],
+  onboarding: ['Primeros pasos', 'Poner en marcha tu tienda'],
   admin: ['Centro de control', 'Salud comercial de la plataforma'],
   observability: ['Observabilidad', 'Eventos de conexión e integraciones'],
-  approvals: ['Apoyo humano', 'Bandeja de decisiones'],
-  analytics: ['Analítica', 'Uso y desempeño operativo'],
-  config: ['Configuración', 'Parámetros de la tienda'],
+  approvals: ['Tu trabajo pendiente', 'Pedidos y clientes por atender'],
+  analytics: ['Tu plan', 'Uso y actividad'],
+  config: ['Tu tienda', 'Ajustes'],
 };
 
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
@@ -116,6 +134,25 @@ const loadFixtureSize = typeof window !== 'undefined'
   ? Number(new URLSearchParams(window.location.search).get('loadFixture') ?? 0)
   : 0;
 const initialConversations = loadFixtureSize ? createConversationLoadFixture(loadFixtureSize) : conversations;
+
+function currentRouteQuery() {
+  return typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+}
+
+function googleOAuthNotice(query = currentRouteQuery()) {
+  const outcome = query?.get('googleOAuth');
+  if (outcome === 'connected') return 'Google quedó conectado. Ahora crea la estructura de tu tienda en Drive y Sheets.';
+  if (outcome === 'cancelled') return 'La autorización de Google no se completó. Puedes intentarlo de nuevo cuando tengas la cuenta de la tienda a mano.';
+  if (outcome === 'failed') return 'No fue posible terminar la conexión con Google. Inténtalo de nuevo o revisa la cuenta seleccionada.';
+  return '';
+}
+
+function legalDocumentForPath(pathname) {
+  if (pathname === '/privacidad' || pathname === '/privacy') return 'privacy';
+  if (pathname === '/terminos' || pathname === '/terms') return 'terms';
+  if (pathname === '/eliminar-datos' || pathname === '/data-deletion') return 'deletion';
+  return null;
+}
 
 function zoneCenter(zoneId) {
   const zone = storeZones.find((item) => item.id === zoneId) ?? storeZones[0];
@@ -226,7 +263,9 @@ function prioritySignalForStore(events, conversationItems, pendingIds, requestIt
   const requestsById = new Map(requestItems.map((request) => [request.id, request]));
   const priorityEvent = events.find((event) => {
     const conversation = conversationsById.get(event?.conversationId);
-    return conversation && isPriorityMapEvent(event);
+    return conversation
+      && isPriorityMapEvent(event)
+      && (pendingIds.has(conversation.id) || ['approval_required', 'blocked', 'degraded', 'needs_binding'].includes(conversation.status));
   });
   if (priorityEvent) {
     const conversation = conversationsById.get(priorityEvent.conversationId);
@@ -371,6 +410,18 @@ function loadFacebookSdk(appId, version) {
   return window.__ventasIaFacebookSdkPromise;
 }
 
+function isTrustedMetaOrigin(origin) {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'facebook.com'
+      || host.endsWith('.facebook.com')
+      || host === 'meta.com'
+      || host.endsWith('.meta.com');
+  } catch {
+    return false;
+  }
+}
+
 async function launchMetaEmbeddedSignup(launch) {
   if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
   const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
@@ -391,7 +442,7 @@ async function launchMetaEmbeddedSignup(launch) {
       reject(error);
     };
     const onMessage = (event) => {
-      if (!event.origin.includes('facebook.com') && !event.origin.includes('meta.com')) return;
+      if (!isTrustedMetaOrigin(event.origin)) return;
       let data = event.data;
       if (typeof data === 'string') {
         try { data = JSON.parse(data); } catch { return; }
@@ -437,22 +488,34 @@ function canAccessPlatformAdmin(auth) {
   return Boolean(auth?.isPlatformAdmin || auth?.user?.platformRole === 'platform_admin');
 }
 
+function ownerGuidedNextStep(status, isPlatformAdmin = false) {
+  if (isPlatformAdmin) return status?.nextStep;
+  const nextOwnerStep = (status?.checks ?? []).find((check) => !check.ok && check.key !== 'llm');
+  return nextOwnerStep?.key ?? status?.nextStep;
+}
+
 function App() {
+  const initialRouteQuery = currentRouteQuery();
   const [tenantList, setTenantList] = useState(tenants);
   const [toolList, setToolList] = useState(tools);
-  const [conversationList, setConversationList] = useState(initialConversations);
+  const [conversationList, setConversationList] = useState(loadFixtureSize ? initialConversations : []);
   const [backendStatus, setBackendStatus] = useState('connecting');
-  const [tenantId, setTenantId] = useState(tenants[0].id);
-  const [activeView, setActiveView] = useState('summary');
-  const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? conversations[0].id);
+  const [tenantId, setTenantId] = useState(() => initialRouteQuery?.get('tenant') ?? tenants[0].id);
+  const [activeView, setActiveView] = useState(() => initialRouteQuery?.get('view') === 'onboarding' ? 'onboarding' : 'summary');
+  const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? '');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationQuery, setConversationQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [isPlaying, setIsPlaying] = useState(true);
-  const [events, setEvents] = useState(() =>
-    conversations.slice(0, 5).map((conversation, index) => createEvent(index, conversation.tenantId, conversation)),
-  );
-  const [requests, setRequests] = useState(pendingRequests);
+  const [events, setEvents] = useState(() => loadFixtureSize
+    ? conversations.slice(0, 5).map((conversation, index) => createEvent(index, conversation.tenantId, conversation))
+    : []);
+  const [requests, setRequests] = useState(loadFixtureSize ? pendingRequests : []);
+  const [orders, setOrders] = useState([]);
+  const [queueFocus, setQueueFocus] = useState('pending');
+  const [resolvingRequestId, setResolvingRequestId] = useState('');
+  const [updatingOrderId, setUpdatingOrderId] = useState('');
+  const [queueNotice, setQueueNotice] = useState(null);
   const [draftReply, setDraftReply] = useState('Producto identificado. Continuar con cotización preliminar.');
   const [humanReplyMode, setHumanReplyMode] = useState('whatsapp');
   const [conversationDetailCollapsed, setConversationDetailCollapsed] = useState(false);
@@ -467,23 +530,40 @@ function App() {
   const [onboardingBundle, setOnboardingBundle] = useState(null);
   const [onboardingBusy, setOnboardingBusy] = useState('');
   const [onboardingError, setOnboardingError] = useState('');
+  const [onboardingNotice, setOnboardingNotice] = useState(() => googleOAuthNotice(initialRouteQuery));
   const [adminOverview, setAdminOverview] = useState(null);
   const [adminError, setAdminError] = useState('');
   const [billingStatus, setBillingStatus] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
+  const [selectedOrderId, setSelectedOrderId] = useState('');
   const conversationSearchRef = useRef(null);
+  const onboardingRedirectedTenantIds = useRef(new Set());
 
   const tenant = tenantList.find((item) => item.id === tenantId) ?? tenantList[0] ?? tenants[0];
   const visibleConversations = conversationList.filter((item) => item.tenantId === tenantId);
   const selectedConversation =
-    visibleConversations.find((item) => item.id === selectedId) ?? visibleConversations[0] ?? conversationList[0] ?? conversations[0];
+    visibleConversations.find((item) => item.id === selectedId) ?? visibleConversations[0] ?? null;
   const visibleRequests = requests.filter((item) => item.tenantId === tenantId);
+  const visibleOrders = orders.filter((item) => item.tenantId === tenantId);
+  const activeOrderCount = operationalOrders(visibleOrders, visibleRequests).length + visibleRequests.filter(isDeliveryRequest).length;
+  const deliveryRequestCount = visibleRequests.filter(isDeliveryRequest).length;
+  const responseRequestCount = visibleRequests.length - deliveryRequestCount;
   const visibleEvents = events.filter((item) => item.tenantId === tenantId).slice(0, 9);
   const pendingIds = useMemo(() => new Set(visibleRequests.map((item) => item.conversationId)), [visibleRequests]);
   const [headerEyebrow, headerTitle] = viewHeader[activeView] ?? viewHeader.summary;
   const isPlatformAdmin = canAccessPlatformAdmin(auth);
   const sessionTenantId = isPlatformAdmin ? '' : firstActiveTenantId(auth);
+  const activationInProgress = Boolean(onboardingBundle?.status && !onboardingBundle.status.readyForOperation);
+  const visibleNavigationItems = isPlatformAdmin ? adminNavigationItems : ownerNavigationItems;
+  const routeQuery = currentRouteQuery();
+  const appRoute = routeQuery?.get('app') === '1';
+  const legalDocument = typeof window !== 'undefined' ? legalDocumentForPath(window.location.pathname) : null;
+  const landingRoute = typeof window !== 'undefined'
+    && !appRoute
+    && (window.location.pathname === '/'
+      || window.location.pathname === '/landing'
+      || routeQuery?.get('landing') === '1');
 
   useEffect(() => {
     let cancelled = false;
@@ -520,6 +600,24 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const query = currentRouteQuery();
+    const outcome = query?.get('googleOAuth');
+    if (!outcome || typeof window === 'undefined') return;
+
+    const callbackTenantId = query.get('tenant');
+    if (callbackTenantId) setTenantId(callbackTenantId);
+    setActiveView('onboarding');
+    setOnboardingNotice(googleOAuthNotice(query));
+    setOnboardingError(outcome === 'connected' ? '' : googleOAuthNotice(query));
+    setRefreshKey((value) => value + 1);
+
+    const nextUrl = new URL(window.location.href);
+    ['view', 'googleOAuth', 'tenant', 'reason'].forEach((key) => nextUrl.searchParams.delete(key));
+    nextUrl.searchParams.set('app', '1');
+    window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadOverview() {
@@ -542,17 +640,27 @@ function App() {
           return;
         }
         if (!response.ok) throw new Error(`Backend ${response.status}`);
-        const overview = await response.json();
+        const overview = normalizeOpsOverview(await response.json());
         if (cancelled) return;
         setTenantList(overview.tenants?.length ? overview.tenants : tenants);
-        setToolList(overview.tools?.length ? overview.tools : tools);
-        if (!loadFixtureSize) setConversationList(overview.conversations?.length ? overview.conversations : conversations);
+        setToolList(overview.tools ?? []);
+        if (!loadFixtureSize) setConversationList(overview.conversations ?? []);
         setRequests(overview.pendingRequests ?? []);
+        setOrders(overview.orders ?? []);
         setEvents(overview.events ?? []);
         setUsageSummary(overview.usage ?? defaultUsageSummary(effectiveTenantId));
         const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(effectiveTenantId)}/status`, { credentials: 'include' });
         if (!cancelled && statusResponse.ok) {
-          setOnboardingBundle(await statusResponse.json());
+          const bundle = await statusResponse.json();
+          setOnboardingBundle(bundle);
+          if (
+            !isPlatformAdmin
+            && !bundle.status?.readyForOperation
+            && !onboardingRedirectedTenantIds.current.has(effectiveTenantId)
+          ) {
+            onboardingRedirectedTenantIds.current.add(effectiveTenantId);
+            setActiveView('onboarding');
+          }
         } else if (!cancelled) {
           setOnboardingBundle(null);
         }
@@ -602,7 +710,7 @@ function App() {
   }, [tenantId, selectedId, visibleConversations]);
 
   useEffect(() => {
-    if (!isPlaying) return undefined;
+    if (!isPlaying || !loadFixtureSize) return undefined;
     const timer = window.setInterval(() => {
       setEvents((current) => {
         const pool = conversationList.filter((item) => item.tenantId === tenantId);
@@ -615,16 +723,16 @@ function App() {
   }, [isPlaying, tenantId, conversationList, backendStatus]);
 
   const metrics = useMemo(() => {
-    const active = visibleConversations.filter((item) => ['live', 'degraded'].includes(item.status)).length;
+    const active = visibleConversations.filter((item) => ['live', 'degraded', 'manual_active'].includes(item.status)).length;
     const pending = visibleRequests.length;
-    const blocked = visibleConversations.filter((item) => item.status === 'blocked').length;
+    const blocked = visibleConversations.filter((item) => ['blocked', 'degraded'].includes(item.status)).length;
     const binding = toolList.filter((item) => item.status === 'needs_binding').length;
     return {
-      ...metricSeed,
-      active: active + 14,
+      active,
       pending,
-      failed: blocked + 1,
+      failed: blocked,
       binding,
+      response: '—',
     };
   }, [visibleConversations, visibleRequests, toolList]);
 
@@ -650,6 +758,48 @@ function App() {
     focusConversation(id, 'conversations');
     setConversationWorkspaceTab('detail');
     setMobileConversationOpen(true);
+  }
+
+  async function markManualWhatsApp(id) {
+    if (backendStatus !== 'connected' || !id) return;
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(id)}/manual-whatsapp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+      });
+      if (!response.ok) return;
+      const updated = await response.json();
+      setConversationList((current) => current.map((item) => item.id === id ? updated : item));
+    } catch {
+      // WhatsApp remains available even if the local trace cannot be saved.
+    }
+  }
+
+  async function deleteConversation(id) {
+    const conversation = conversationList.find((item) => item.id === id);
+    if (!conversation || backendStatus !== 'connected') return;
+    const confirmed = window.confirm(`Eliminar la conversación de ${conversation.customer ?? conversation.waId}? Esta acción quita también las tareas pendientes asociadas y no se puede deshacer.`);
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: csrfHeaders(auth),
+        credentials: 'include',
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error ?? `No se pudo eliminar la conversación (${response.status}).`);
+      setConversationList((current) => current.filter((item) => item.id !== id));
+      setRequests((current) => current.filter((request) => request.conversationId !== id));
+      setSelectedId((current) => current === id ? '' : current);
+      setConversationWorkspaceTab('list');
+      setMobileConversationOpen(false);
+      setBackendStatus('connected');
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setBackendStatus((current) => (current === 'offline' ? current : 'connected'));
+      setQueueNotice({ tone: 'error', text: error.message });
+    }
   }
 
   useEffect(() => {
@@ -681,9 +831,39 @@ function App() {
     return () => window.removeEventListener('keydown', handleConversationKeys);
   }, [activeView, filteredConversations, selectedConversation?.id]);
 
-  function openApprovals(requestId = '') {
+  function openApprovals(requestId = '', tab = 'pending') {
     setSelectedHumanRequestId(requestId);
+    setSelectedOrderId('');
+    setQueueFocus(tab);
+    setQueueNotice(null);
     setActiveView('approvals');
+  }
+
+  function openOrder(orderId) {
+    setSelectedHumanRequestId('');
+    setSelectedOrderId(orderId);
+    setQueueFocus('delivery');
+    setQueueNotice(null);
+    setActiveView('approvals');
+  }
+
+  function navigateToView(nextView) {
+    if (!viewHeader[nextView]) {
+      setActiveView('onboarding');
+      return;
+    }
+
+    if (!isPlatformAdmin && activationInProgress && nextView === 'config') {
+      setOnboardingNotice('Sigue la puesta en marcha paso a paso. Las referencias técnicas se administran de forma segura y se muestran solo cuando la tienda esté lista.');
+      setActiveView('onboarding');
+      return;
+    }
+    if (nextView === 'approvals') {
+      setQueueFocus('pending');
+      setSelectedHumanRequestId('');
+      setSelectedOrderId('');
+    }
+    setActiveView(nextView);
   }
 
   async function updateTenantConfig(configPatch) {
@@ -711,7 +891,7 @@ function App() {
       return;
     }
     if (action === 'config-whatsapp') {
-      setActiveView('config');
+      setActiveView('onboarding');
       return;
     }
     if (action === 'config-llm') {
@@ -719,7 +899,7 @@ function App() {
       return;
     }
     const postRoutes = {
-      subscription: `/api/saas/tenants/${encodeURIComponent(tenantId)}/subscription/mock-activate`,
+      subscription: `/api/saas/tenants/${encodeURIComponent(tenantId)}/subscription/start-trial`,
       'billing-checkout': '/api/billing/checkout',
       'billing-continue': '/api/billing/continue-checkout',
       'billing-cancel': '/api/billing/cancel',
@@ -730,10 +910,8 @@ function App() {
     setOnboardingBusy(action);
     try {
       if (action === 'google-oauth') {
-        const response = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/google/oauth/start`, { credentials: 'include' });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error ?? `OAuth ${response.status}`);
-        if (result.authorizationUrl) window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer');
+        window.location.assign(`/api/saas/connect/google/${encodeURIComponent(tenantId)}/start?redirect=1`);
+        return;
       } else {
         if (!postRoutes[action]) throw new Error(`Acción no configurada: ${action}`);
         const body = ['billing-checkout', 'billing-continue', 'billing-cancel'].includes(action)
@@ -755,6 +933,36 @@ function App() {
     } catch (error) {
       setBackendStatus((current) => (current === 'offline' ? current : 'connected'));
       setOnboardingError(error.message);
+    } finally {
+      setOnboardingBusy('');
+    }
+  }
+
+  async function runCatalogImport(action, payload = {}) {
+    setOnboardingError('');
+    const route = action === 'validate'
+      ? `/api/saas/tenants/${encodeURIComponent(tenantId)}/google/catalog/validate`
+      : `/api/saas/tenants/${encodeURIComponent(tenantId)}/google/catalog/import`;
+    setOnboardingBusy(`catalog-${action}`);
+    try {
+      const response = await fetch(route, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
+        credentials: 'include',
+        body: JSON.stringify({ csvText: payload.csvText ?? '', fileName: payload.fileName ?? null }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = result.validation?.errors?.[0]?.message ?? result.error ?? `Catalogo ${response.status}`;
+        throw new Error(detail);
+      }
+      if (result.onboarding) setOnboardingBundle(result.onboarding);
+      setBackendStatus('connected');
+      setRefreshKey((value) => value + 1);
+      return result;
+    } catch (error) {
+      setOnboardingError(error.message);
+      return null;
     } finally {
       setOnboardingBusy('');
     }
@@ -784,11 +992,15 @@ function App() {
       }
       if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
         const signup = await launchMetaEmbeddedSignup(result.launch);
+        const completionPayload = {
+          ...signup,
+          registrationPin: payload.registrationPin,
+        };
         const completionResponse = await fetch(routes.complete, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
           credentials: 'include',
-          body: JSON.stringify(signup),
+          body: JSON.stringify(completionPayload),
         });
         const completion = await completionResponse.json().catch(() => ({}));
         if (!completionResponse.ok) throw new Error(completion.error ?? `WhatsApp ${completionResponse.status}`);
@@ -827,41 +1039,44 @@ function App() {
   }
 
   async function resolveRequest(id, outcome, options = {}) {
-    const request = requests.find((item) => item.id === id);
     const note = options.note ?? draftReply;
     const responseMode = options.responseMode ?? 'none';
-    if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
+    setResolvingRequestId(id);
+    setQueueNotice(null);
     try {
-      if (backendStatus === 'connected') {
-        await fetch(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...csrfHeaders(auth) },
-          credentials: 'include',
-          body: JSON.stringify({ outcome, note, responseMode, approverId: 'micro-app-user' }),
-        });
-        const response = await fetch(`/api/ops/overview?tenantId=${encodeURIComponent(tenantId)}`, { credentials: 'include' });
-        const overview = await response.json();
-        setConversationList(overview.conversations ?? conversationList);
-        setRequests(overview.pendingRequests ?? []);
-        setEvents(overview.events ?? []);
-        setUsageSummary(overview.usage ?? defaultUsageSummary(tenantId));
-        return;
-      }
-    } catch {
-      setBackendStatus('offline');
+      if (backendStatus !== 'connected') throw new Error('offline');
+      await postJson(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, { outcome, note, responseMode, approverId: auth?.user?.id ?? 'micro-app-user' }, { headers: csrfHeaders(auth) });
+      if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
+      setRequests((current) => current.filter((item) => item.id !== id));
+      setQueueNotice({ type: 'success', text: outcome === 'approved' ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.' : 'Decisión guardada. La lista se actualizará enseguida.' });
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setQueueNotice({ type: 'error', text: normalizeApiErrorMessage(error, 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.') });
+      setRefreshKey((value) => value + 1);
+    } finally {
+      setResolvingRequestId('');
     }
-    setRequests((current) => current.filter((item) => item.id !== id));
-    setEvents((current) => [
-      {
-        id: `evt-${Date.now()}-${outcome}`,
-        at: formatTime(),
-        type: outcome === 'approved' ? 'approval.granted' : 'approval.denied',
-        tenantId,
-        conversationId: request?.conversationId ?? 'system',
-        detail: outcome === 'approved' ? 'Intervención humana resuelta y flujo reanudado' : 'Operación rechazada por usuario humano',
-      },
-      ...current,
-    ]);
+  }
+
+  async function advanceOrder(orderId, status) {
+    setUpdatingOrderId(orderId);
+    setQueueNotice(null);
+    try {
+      const result = await patchJson(`/api/orders/${encodeURIComponent(orderId)}/status`, { status }, { headers: csrfHeaders(auth) });
+      setOrders((current) => current.map((order) => order.id === orderId ? result : order));
+      if (status === 'delivered') setQueueFocus('finished');
+      setQueueNotice({ type: 'success', text: {
+        preparing: 'Pedido tomado. Ya puedes alistarlo.',
+        dispatched: 'Pedido marcado en camino.',
+        delivered: 'Pedido marcado como entregado.',
+      }[status] });
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      setQueueNotice({ type: 'error', text: error.message });
+      setRefreshKey((value) => value + 1);
+    } finally {
+      setUpdatingOrderId('');
+    }
   }
 
   async function handleGoogleCredential(idToken) {
@@ -909,12 +1124,13 @@ function App() {
     }
   }
 
-  function applySession(session) {
+  function applySession(session, { startOnboarding = false } = {}) {
     setAuth(session);
     setAuthStatus('signed_in');
     setAuthRequired(false);
     setAuthError('');
     if (session.memberships?.[0]?.tenantId) setTenantId(session.memberships[0].tenantId);
+    if (startOnboarding) setActiveView('onboarding');
   }
 
   async function handleLogout() {
@@ -925,6 +1141,14 @@ function App() {
     }).catch(() => {});
     setAuth(null);
     setAuthStatus('guest');
+  }
+
+  if (legalDocument) {
+    return <LegalPage document={legalDocument} />;
+  }
+
+  if (landingRoute) {
+    return <LandingPage />;
   }
 
   if (authRequired && !auth?.user) {
@@ -942,7 +1166,7 @@ function App() {
     return (
       <TenantCreationView
         auth={auth}
-        onCreated={(session) => applySession(session)}
+        onCreated={(session) => applySession(session, { startOnboarding: true })}
       />
     );
   }
@@ -956,7 +1180,7 @@ function App() {
           </div>
           <div>
             <span className="eyebrow">Ventas IA</span>
-            <strong>Ops Store</strong>
+            <strong>Tu tienda</strong>
           </div>
           <button
             aria-label={sidebarCollapsed ? 'Mostrar menú lateral' : 'Ocultar menú lateral'}
@@ -969,7 +1193,7 @@ function App() {
           </button>
         </div>
 
-        <label className="tenant-picker">
+        {(isPlatformAdmin || tenantList.length > 1) && <label className="tenant-picker">
           <span>Cliente activo</span>
           <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
             {tenantList.map((item) => (
@@ -978,14 +1202,16 @@ function App() {
               </option>
             ))}
           </select>
-        </label>
+        </label>}
 
         <nav className="nav-stack">
-          {navigationItems.map(([key, Icon, label]) => (
+          {visibleNavigationItems.map(([key, Icon, label]) => (
             <button
-              className={activeView === key ? 'nav-item is-active' : 'nav-item'}
+              aria-label={label}
+              className={`${activeView === key ? 'nav-item is-active' : 'nav-item'} ${key === 'onboarding' && activationInProgress ? 'is-guided' : ''}`}
               key={key}
-              onClick={() => setActiveView(key)}
+              onClick={() => navigateToView(key)}
+              title={label}
               type="button"
             >
               <Icon size={18} />
@@ -1007,33 +1233,45 @@ function App() {
         </div>
       </aside>
 
-      <section className={`workspace ${activeView === 'store' ? 'workspace-compact' : ''} ${activeView === 'conversations' && mobileConversationOpen ? 'mobile-conversation-detail' : ''}`}>
+      <section className={`workspace ${activeView === 'store' ? 'workspace-compact' : ''} ${['onboarding', 'config'].includes(activeView) ? 'workspace-setup' : ''} ${activeView === 'conversations' && mobileConversationOpen ? 'mobile-conversation-detail' : ''}`}>
         <header className="topbar">
           <div>
             <span className="eyebrow">{headerEyebrow}</span>
             <h1>{headerTitle}</h1>
           </div>
           <div className="top-actions">
-            <label className="global-search">
+            <details className="mobile-more">
+              <summary>Más opciones <ChevronDown size={15} aria-hidden="true" /></summary>
+              <div>
+                {visibleNavigationItems.slice(4).map(([key, Icon, label]) => (
+                  <button key={key} type="button" onClick={(event) => { navigateToView(key); event.currentTarget.closest('details')?.removeAttribute('open'); }}>
+                    <Icon size={16} aria-hidden="true" />{label}
+                  </button>
+                ))}
+                {auth?.user && <button type="button" onClick={handleLogout}><X size={16} aria-hidden="true" />Cerrar sesión</button>}
+              </div>
+            </details>
+            {activeView === 'conversations' && <label className="global-search">
               <Search size={16} />
               <input
                 aria-label="Buscar conversación"
                 onChange={(event) => setConversationQuery(event.target.value)}
-                placeholder="Buscar cliente, ID o herramienta"
+                placeholder="Buscar un cliente"
                 value={conversationQuery}
               />
-            </label>
-            <button className="icon-btn" type="button" title={`${visibleRequests.length} aprobaciones pendientes`} onClick={() => openApprovals()}>
+            </label>}
+            <button className="icon-btn" type="button" title={`${visibleRequests.length} tareas pendientes`} aria-label={`Ver ${visibleRequests.length} tareas pendientes`} onClick={() => openApprovals()}>
               <Bell size={18} />
               {visibleRequests.length > 0 && <span>{visibleRequests.length}</span>}
             </button>
-            <button className="icon-btn" type="button" title={isPlaying ? 'Pausar eventos' : 'Reproducir eventos'} onClick={() => setIsPlaying((value) => !value)}>
+            {Boolean(loadFixtureSize) && <button className="icon-btn" type="button" title={isPlaying ? 'Pausar ejemplo' : 'Reanudar ejemplo'} onClick={() => setIsPlaying((value) => !value)}>
               {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-            </button>
-            <button className="ghost-btn" type="button">
+            </button>}
+            <span className="connection-state" role="status">
               <ShieldCheck size={17} />
-              {backendStatus === 'connected' ? 'Backend conectado' : 'Modo local'}
-            </button>
+              <span className="connection-desktop">{backendStatus === 'connected' ? 'Tienda sincronizada' : backendStatus === 'connecting' ? 'Conectando tienda' : 'Sin conexión'}</span>
+              <span className="connection-mobile">{backendStatus === 'connected' ? 'En línea' : backendStatus === 'connecting' ? 'Conectando' : 'Sin conexión'}</span>
+            </span>
             <AuthBadge
               auth={auth}
               authStatus={authStatus}
@@ -1045,10 +1283,9 @@ function App() {
         </header>
 
         <section className="metric-strip" aria-label="Indicadores operativos">
-          <Metric icon={Activity} label="Activas" value={metrics.active} tone="green" />
-          <Metric icon={UserCheck} label="Requiere apoyo" value={metrics.pending} tone="gold" />
-          <Metric icon={PlugZap} label="Conexiones pendientes" value={metrics.binding} tone="red" />
-          <Metric icon={Gauge} label="Primera respuesta" value={metrics.response} tone="mint" />
+          <Metric icon={ShoppingBag} label="Pedidos activos" value={activeOrderCount} tone="gold" />
+          <Metric icon={UserCheck} label="Por responder" value={responseRequestCount} tone="red" />
+          <Metric icon={Activity} label="En conversación" value={metrics.active} tone="green" />
           <Metric icon={ShoppingBag} label="Domicilios del plan" value={formatUsageRatio(usageSummary.metrics.deliveries_confirmed, usageSummary.limits.includedDeliveries)} tone="ink" />
         </section>
 
@@ -1057,9 +1294,12 @@ function App() {
             conversations={visibleConversations}
             events={visibleEvents}
             metrics={metrics}
-            onNavigate={setActiveView}
+            onNavigate={navigateToView}
+            onOpenOrders={() => openApprovals('', 'delivery')}
+            onOpenResponses={() => openApprovals('', 'response')}
             onSelectConversation={focusConversation}
             requests={visibleRequests}
+            orders={visibleOrders}
             tools={toolList}
             usage={usageSummary}
           />
@@ -1072,6 +1312,9 @@ function App() {
               events={visibleEvents}
               selectedId={selectedConversation?.id}
               onOpenApprovals={openApprovals}
+              onOpenOrders={() => openApprovals('', 'delivery')}
+              onOpenOrder={openOrder}
+              onOpenResponses={() => openApprovals('', 'response')}
               onOpenList={() => {
                 setConversationWorkspaceTab('list');
                 setActiveView('conversations');
@@ -1081,6 +1324,7 @@ function App() {
               }}
               onSelect={openWhatsAppConversation}
               pendingIds={pendingIds}
+              orders={visibleOrders}
               requests={visibleRequests}
             />
           </section>
@@ -1093,6 +1337,8 @@ function App() {
             detailCollapsed={conversationDetailCollapsed}
             events={visibleEvents}
             onSelectConversation={openWhatsAppConversation}
+            onDeleteConversation={deleteConversation}
+            onOpenWhatsAppExternally={markManualWhatsApp}
             onOpenApprovals={openApprovals}
             onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
             pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation?.id)}
@@ -1116,6 +1362,10 @@ function App() {
         {activeView === 'approvals' && (
           <HumanQueue
             requests={visibleRequests}
+            orders={visibleOrders}
+            onAdvanceOrder={advanceOrder}
+            updatingOrderId={updatingOrderId}
+            selectedOrderId={selectedOrderId}
             conversations={visibleConversations}
             onSelectConversation={openWhatsAppConversation}
             onResolve={resolveRequest}
@@ -1124,6 +1374,9 @@ function App() {
             replyMode={humanReplyMode}
             setReplyMode={setHumanReplyMode}
             selectedRequestId={selectedHumanRequestId}
+            focusTab={queueFocus}
+            notice={queueNotice}
+            resolvingRequestId={resolvingRequestId}
           />
         )}
 
@@ -1133,10 +1386,12 @@ function App() {
             billingStatus={billingStatus}
             busyAction={onboardingBusy}
             error={onboardingError}
+            notice={onboardingNotice}
             isPlatformAdmin={isPlatformAdmin}
             onAction={runOnboardingAction}
+            onCatalogImport={runCatalogImport}
             onWhatsAppAction={runWhatsAppOnboarding}
-            onNavigate={setActiveView}
+            onNavigate={navigateToView}
             tenant={tenant}
           />
         )}
@@ -1161,10 +1416,10 @@ function App() {
         )}
 
         {activeView === 'analytics' && (
-          <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} />
+          <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration onNavigate={setActiveView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
     </main>
   );
@@ -1196,10 +1451,10 @@ function defaultUsageSummary(tenantId) {
   return {
     tenantId,
     period: new Date().toISOString().slice(0, 7),
-    planCode: 'ventas_ia_1000_domicilios',
+    planCode: 'ventas_ia_400_domicilios',
     limits: {
-      includedDeliveries: 1000,
-      includedInteractions: 5000,
+      includedDeliveries: 400,
+      includedInteractions: 2700,
       includedLlmTokens: null,
     },
     metrics: {
@@ -1289,6 +1544,75 @@ function AuthGate({ authError, authStatus, onGoogleCredential, onSandboxLogin })
         )}
       </section>
     </main>
+  );
+}
+
+function LegalPage({ document }) {
+  const isPrivacy = document === 'privacy';
+  const isDeletion = document === 'deletion';
+  const title = isPrivacy ? 'Aviso de privacidad' : isDeletion ? 'Instrucciones para eliminar datos' : 'Términos de uso';
+  const description = isPrivacy
+    ? 'Cómo Ventas IA trata la información necesaria para operar una tienda conectada.'
+    : isDeletion
+      ? 'Cómo solicitar la eliminación de datos asociados a una tienda o a una conversación de WhatsApp.'
+      : 'Las reglas básicas para usar Ventas IA en la atención de pedidos por WhatsApp.';
+
+  return (
+    <main className="legal-page">
+      <header className="landing-nav legal-nav">
+        <a className="landing-brand" href="/landing" aria-label="Ventas IA inicio">
+          <span className="landing-brand-mark"><Store size={20} /></span>
+          <span><b>VENTAS IA</b><strong>Ops Store</strong></span>
+        </a>
+        <a className="landing-login" href="/?app=1">Entrar a mi tienda</a>
+      </header>
+      <article className="legal-document">
+        <span className="landing-kicker">Ventas IA Ops Store</span>
+        <h1>{title}</h1>
+        <p className="legal-lead">{description}</p>
+        {isPrivacy ? <PrivacyNotice /> : isDeletion ? <DataDeletionNotice /> : <TermsNotice />}
+        <div className="legal-callout">
+          <ShieldCheck size={20} />
+          <p>Operador: Centro de Innovación Visual SAS. Solicitudes sobre privacidad y eliminación de datos: <a href="mailto:lmcorredor@gmail.com">lmcorredor@gmail.com</a>.</p>
+        </div>
+        <p className="legal-updated">Última actualización: 19 de octubre de 2026.</p>
+      </article>
+    </main>
+  );
+}
+
+function PrivacyNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Información que procesa la plataforma</h2><p>La plataforma procesa los datos que el dueño de la tienda autoriza para atender pedidos: catálogo, existencias, clientes, direcciones, pedidos y conversaciones operativas. También usa el nombre y correo de la cuenta Google que inicia sesión para identificar su acceso a la tienda.</p></section>
+      <section><h2>Información de Google</h2><p>Cuando el dueño conecta Google, Ventas IA solicita permisos para crear y administrar la estructura operativa de esa tienda: una carpeta de Drive y una hoja de cálculo con catálogo, clientes, pedidos y configuración. El acceso se usa para leer el catálogo y los datos que la tienda registra, y para guardar los pedidos que el cliente confirma.</p></section>
+      <section><h2>Información de WhatsApp</h2><p>Cuando la tienda conecta su propio canal de WhatsApp Business, la plataforma procesa los mensajes necesarios para identificar la solicitud, consultar el catálogo, responder, escalar dudas al tendero y registrar la trazabilidad del pedido. Los cargos y condiciones del canal de WhatsApp son responsabilidad de la tienda frente a Meta.</p></section>
+      <section><h2>Uso y protección</h2><p>La información se usa únicamente para prestar el servicio contratado, mantener la operación, prevenir fallos y atender solicitudes de soporte. Los tokens de acceso a Google y a proveedores se almacenan como referencias protegidas, separados por tienda. La plataforma no vende el catálogo ni los datos operativos de una tienda a otras tiendas.</p></section>
+      <section><h2>Control de la tienda</h2><p>El dueño conserva el control sobre su cuenta Google, su catálogo y su WhatsApp. Puede desconectar las integraciones desde la plataforma y solicitar la revisión o eliminación de los datos que estén bajo administración de Ventas IA, según el contrato aplicable.</p></section>
+    </div>
+  );
+}
+
+function DataDeletionNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Solicitudes de clientes de una tienda</h2><p>Si escribiste por WhatsApp a una tienda que usa Ventas IA y quieres que se eliminen tus datos de atención, escríbele a esa misma tienda por su canal oficial. La tienda es quien decide sobre su catálogo, pedidos y relación con sus clientes; confirmará la solicitud con su dueño y la enviará al soporte de la plataforma cuando corresponda.</p></section>
+      <section><h2>Solicitudes de dueños de tienda</h2><p>Ingresa a la consola con la cuenta propietaria. Antes de solicitar eliminación, descarga o conserva los pedidos y registros que necesites por obligaciones comerciales. Puedes desconectar Google y WhatsApp desde Onboarding y solicitar la eliminación de la información administrada por la plataforma escribiendo a <a href="mailto:lmcorredor@gmail.com">lmcorredor@gmail.com</a>.</p></section>
+      <section><h2>Qué se elimina</h2><p>La solicitud puede incluir los datos de contacto, conversaciones operativas, configuraciones y secretos de integración almacenados para esa tienda. No se eliminan de inmediato los registros que una tienda deba conservar por razones contables, legales o de seguridad. Google, Meta/WhatsApp y Mercado Pago gestionan sus propios datos y solicitudes bajo sus respectivas políticas.</p></section>
+      <section><h2>Verificación y respuesta</h2><p>Para proteger la información, se valida la identidad de quien solicita la eliminación y su relación con la tienda o la conversación. La plataforma registra el resultado de la solicitud y confirma por el mismo canal de contacto disponible.</p></section>
+    </div>
+  );
+}
+
+function TermsNotice() {
+  return (
+    <div className="legal-copy">
+      <section><h2>Qué ofrece el servicio</h2><p>Ventas IA ayuda a organizar conversaciones de WhatsApp, consultar el catálogo autorizado por la tienda y presentar pedidos claros para su preparación. La plataforma no reemplaza el criterio del tendero ni garantiza existencias, precios, tiempos de entrega o la aceptación de un pedido.</p></section>
+      <section><h2>Responsabilidad de la tienda</h2><p>La tienda debe mantener actualizado su catálogo, existencias, precios, datos de contacto y reglas de atención. También debe contar con los permisos necesarios para usar Google, WhatsApp Business y la información de sus clientes.</p></section>
+      <section><h2>Decisiones humanas</h2><p>Cuando el agente no puede confirmar un producto, detecta ambigüedad, falta información crítica o el pedido necesita preparación, el caso se presenta a una persona. La decisión final sobre confirmar, preparar, cobrar o entregar un pedido pertenece a la tienda.</p></section>
+      <section><h2>Servicios de terceros</h2><p>Google, Meta/WhatsApp, Mercado Pago y el proveedor de inteligencia artificial son servicios independientes. Sus condiciones, disponibilidad y cobros pueden cambiar. Ventas IA informa su uso dentro de la plataforma, pero no controla sus decisiones ni sus interrupciones.</p></section>
+      <section><h2>Acceso y suscripción</h2><p>El acceso se habilita de acuerdo con el estado de la suscripción y el plan contratado. La tienda puede revisar el consumo operativo desde la consola. Los límites, renovaciones, cambios de plan y estados de pago se aplican según las condiciones comerciales vigentes.</p></section>
+    </div>
   );
 }
 
@@ -1487,13 +1811,6 @@ const characterProfiles = [
   },
 ];
 
-const ambientCharacters = [
-  { className: 'person-a', role: 'shopper', profile: characterProfiles[0], mood: 'interested', label: 'Cliente observando productos' },
-  { className: 'person-b', role: 'shopper', profile: characterProfiles[2], mood: 'waiting', label: 'Cliente esperando respuesta' },
-  { className: 'person-c', role: 'supervisor', profile: { ...characterProfiles[3], shirt: '#455b72', accent: '#f0c15d' }, mood: 'steady', label: 'Supervisor humano disponible' },
-  { className: 'person-d', role: 'shopper', profile: characterProfiles[4], mood: 'satisfied', label: 'Cliente satisfecho' },
-];
-
 function getCharacterProfile(conversation, index) {
   const seed = Array.from(conversation.id).reduce((sum, char) => sum + char.charCodeAt(0), index);
   return characterProfiles[seed % characterProfiles.length];
@@ -1641,9 +1958,9 @@ function CharacterFigure({
   );
 }
 
-function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenApprovals, onOpenList, onReset, pendingIds, requests = [] }) {
-  const [showRoutes, setShowRoutes] = useState(true);
-  const [reducedMotion, setReducedMotion] = useState(false);
+function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenApprovals, onOpenOrders, onOpenOrder, onOpenResponses, onOpenList, onReset, pendingIds, requests = [], orders = [] }) {
+  const [showRoutes, setShowRoutes] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const [activeZoneId, setActiveZoneId] = useState('approval');
   const [zonePanelCollapsed, setZonePanelCollapsed] = useState(true);
   const [camera, setCamera] = useState({ x: 0, y: 0, scale: 1 });
@@ -1654,7 +1971,13 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
   const activePointersRef = useRef(new Map());
   const suppressStageClickRef = useRef(false);
   const cameraWheelTimerRef = useRef(null);
-  const pendingCount = conversations.filter((conversation) => pendingIds.has(conversation.id) || conversation.status === 'approval_required').length;
+  const pendingCount = requests.length;
+  const ordersToPrepare = requests.filter(isDeliveryRequest).length;
+  const ordersWithoutTask = operationalOrders(orders, requests).filter((order) => order.status === 'pending_human_preparation').length;
+  const ordersInPreparation = orders.filter((order) => order.status === 'preparing').length;
+  const ordersOnTheWay = orders.filter((order) => order.status === 'dispatched').length;
+  const orderActors = operationalOrders(orders, requests).slice(0, 10);
+  const customersToAnswer = pendingCount - ordersToPrepare;
   const activeZone = storeZones.find((zone) => zone.id === activeZoneId) ?? storeZones[0];
   const activeZoneConversations = conversations.filter((conversation) => conversationBelongsToZone(conversation, activeZone.id, pendingIds));
   const activeZoneCount = activeZoneConversations.length;
@@ -1727,8 +2050,9 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
     setCamera({ x: 0, y: 0, scale: 1 });
   }
 
-  function focusZone(zoneId) {
+  function focusZone(zoneId, revealPanel = true) {
     setActiveZoneId(zoneId);
+    if (revealPanel) setZonePanelCollapsed(false);
     const center = zoneCenter(zoneId);
     const rect = mapRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -1868,7 +2192,7 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
   useEffect(() => {
     if (!prioritySignal || autoFocusedSignalRef.current === prioritySignal.id) return;
     autoFocusedSignalRef.current = prioritySignal.id;
-    focusZone(prioritySignal.zone);
+    focusZone(prioritySignal.zone, false);
   }, [prioritySignal?.id]);
 
   useEffect(() => {
@@ -1883,7 +2207,8 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
       <div className="map-header">
         <div>
           <span className="eyebrow">Tienda viva</span>
-          <h2>Operación comercial en tiempo real</h2>
+          <h2>Qué pasa en tu tienda</h2>
+          <p className="map-hint">Toca un personaje o una zona para ver qué ocurre.</p>
         </div>
         <div className="map-toolbar">
           <div className="legend">
@@ -1892,7 +2217,7 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
             <span><i className="dot blocked" /> Bloqueo</span>
           </div>
           <button className="map-chip" type="button" aria-pressed={showRoutes} onClick={() => setShowRoutes((value) => !value)}>
-            {showRoutes ? 'Rutas visibles' : 'Rutas ocultas'}
+            {showRoutes ? 'Ocultar recorrido' : 'Mostrar recorrido'}
           </button>
           <button className="map-chip" type="button" onClick={onOpenList}>
             Vista lista
@@ -1908,6 +2233,23 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
             {reducedMotion ? 'Movimiento reducido' : 'Animación viva'}
           </button>
         </div>
+      </div>
+      <div className="store-work-now" aria-label="Trabajo de la tienda ahora">
+        <button type="button" onClick={onOpenOrders}>
+          <ShoppingBag size={20} aria-hidden="true" />
+          <span><strong>{ordersToPrepare + ordersWithoutTask + ordersInPreparation + ordersOnTheWay} {ordersToPrepare + ordersWithoutTask + ordersInPreparation + ordersOnTheWay === 1 ? 'pedido activo' : 'pedidos activos'}</strong><small>{ordersToPrepare + ordersWithoutTask} nuevos · {ordersInPreparation} alistando · {ordersOnTheWay} en camino</small></span>
+          <ArrowRight size={17} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={onOpenResponses}>
+          <MessageCircle size={20} aria-hidden="true" />
+          <span><strong>{customersToAnswer} por responder</strong><small>Ver clientes</small></span>
+          <ArrowRight size={17} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={onOpenList}>
+          <Activity size={20} aria-hidden="true" />
+          <span><strong>{conversations.length} conversaciones</strong><small>Ver lista</small></span>
+          <ArrowRight size={17} aria-hidden="true" />
+        </button>
       </div>
       <div className="zone-quick-nav" aria-label="Navegación rápida por zonas de la tienda">
         {storeZones.map((zone) => (
@@ -1927,11 +2269,11 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
 
       <div
         ref={mapRef}
-        className={`store-map iso-store lod-${lodMode} camera-${cameraGesture} ${lodMode !== 'individual' ? 'performance-mode' : ''} ${showRoutes ? 'show-routes' : 'hide-routes'} ${reducedMotion ? 'reduce-motion' : ''}`}
+        className={`store-map iso-store lod-${lodMode} camera-${cameraGesture} ${lodMode !== 'individual' ? 'performance-mode' : ''} ${showRoutes && conversations.length ? 'show-routes' : 'hide-routes'} ${reducedMotion ? 'reduce-motion' : ''}`}
         data-camera-scale={camera.scale.toFixed(2)}
         data-camera-gesture={cameraGesture}
         role="region"
-        aria-label="Tienda isométrica interactiva con conversaciones reales del agente"
+        aria-label="Tienda interactiva con la actividad actual de los clientes"
       >
         <div className="camera-dock" role="toolbar" aria-label="Controles de cámara de Tienda viva">
           <button type="button" onClick={() => zoomCamera(0.12)} aria-label="Acercar cámara">
@@ -1951,12 +2293,19 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
         <button
           className={`intervention-sign ${pendingCount ? 'is-hot' : ''}`}
           type="button"
-          onClick={pendingCount ? onOpenApprovals : undefined}
+          onClick={pendingCount ? () => onOpenApprovals() : undefined}
           aria-label={pendingCount ? `Abrir ${pendingCount} solicitudes que requieren apoyo humano` : 'Sin solicitudes humanas pendientes'}
         >
           <strong>Requiere apoyo</strong>
           <span>{pendingCount ? `${pendingCount} casos` : 'sin pendientes'}</span>
         </button>
+        {!conversations.length && !pendingCount && !orderActors.length && (
+          <div className="store-empty-state" role="status">
+            <ShoppingBag size={27} aria-hidden="true" />
+            <strong>Sin actividad ahora</strong>
+            <span>Los mensajes y pedidos aparecerán aquí cuando lleguen.</span>
+          </div>
+        )}
 
         <div
           className={`zone-focus-panel ${activeZoneRisk.includes('apoyo') ? 'has-risk' : ''} ${zonePanelCollapsed ? 'is-collapsed' : 'is-expanded'}`}
@@ -2093,35 +2442,6 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
             <path className="route route-intervention" d="M36 51 C52 60 66 66 88 64" />
           </svg>
 
-          {ambientCharacters.map((person) => (
-            <CharacterFigure
-              className={person.className}
-              key={person.className}
-              label={person.label}
-              mood={person.mood}
-              profile={person.profile}
-              role={person.role}
-            />
-          ))}
-          <CharacterFigure
-            className="agent-assistant bot-a"
-            label="Agente IA atendiendo la conversación"
-            mood="talking"
-            profile={{ skin: '#cdeaf0', hair: '#3d8394', shirt: '#9ee7f3', pants: '#3f6570', accent: '#f6d674', accessory: 'badge', motion: 'steady' }}
-            role="agent"
-          >
-            <span className="agent-aura"><Bot size={13} /></span>
-          </CharacterFigure>
-          <CharacterFigure
-            className="agent-assistant bot-b"
-            label="Agente IA acompañando solicitud de ayuda"
-            mood={pendingCount ? 'waiting' : 'talking'}
-            profile={{ skin: '#d8f2f5', hair: '#487d8b', shirt: '#b4edf5', pants: '#3c6070', accent: '#ffb25e', accessory: 'badge', motion: 'steady' }}
-            role="agent"
-          >
-            <span className="agent-aura"><Bot size={12} /></span>
-          </CharacterFigure>
-
           {visibleAvatars.map((conversation, index) => {
             const latestEvent = latestEventByConversation.get(conversation.id);
             const semanticZone = semanticZoneForConversation(conversation, pendingIds, latestEvent);
@@ -2161,6 +2481,35 @@ function StoreMap({ conversations, events = [], selectedId, onSelect, onOpenAppr
                 </span>
                 <span className="operation-state-label">{operationalPose.label}</span>
                 <span className="character-badge">{conversation.avatar}</span>
+                <i className="status-light" />
+              </CharacterFigure>
+            );
+          })}
+          {orderActors.map((order, index) => {
+            const position = order.status === 'dispatched' ? { x: 18, y: 51 } : { x: 49, y: 48 };
+            const offset = stableAvatarOffset(order.id, index + 20);
+            const isDispatched = order.status === 'dispatched';
+            const isPending = order.status === 'pending_human_preparation';
+            const OrderIcon = isDispatched ? Truck : ShoppingBag;
+            return (
+              <CharacterFigure
+                className={`order-actor ${isPending ? 'is-pending' : isDispatched ? 'is-dispatched' : 'is-preparing'}`}
+                data-order-id={order.id}
+                data-operation-state={order.status}
+                key={order.id}
+                interactive
+                label={`Abrir pedido de ${order.customerName || 'cliente'}: ${isPending ? 'por tomar' : isDispatched ? 'en camino' : 'alistando'}`}
+                mood="waiting"
+                onClick={() => onOpenOrder(order.id)}
+                operationState={isPending ? 'human' : isDispatched ? 'message' : 'basket'}
+                profile={getCharacterProfile(order, index + 20)}
+                role="worker"
+                style={{ left: `calc(${position.x}% + ${offset.x}px)`, top: `calc(${position.y}% + ${offset.y}px)`, transitionDelay: `${index * 45}ms` }}
+              >
+                <em className="speech-bubble">{isDispatched ? '→' : '✓'}</em>
+                <span className="operation-prop" aria-hidden="true"><OrderIcon size={12} strokeWidth={2.6} /></span>
+                <span className="operation-state-label">{isPending ? 'Por tomar' : isDispatched ? 'En camino' : 'Alistando'}</span>
+                <span className="character-badge">{initials(order.customerName || 'Pedido')}</span>
                 <i className="status-light" />
               </CharacterFigure>
             );
@@ -2240,15 +2589,12 @@ function ZoneLabel({ zone, Icon }) {
   );
 }
 
-function SummaryView({ conversations: conversationItems, events, metrics, onNavigate, onSelectConversation, requests: requestItems, tools: toolItems, usage }) {
+function SummaryView({ conversations: conversationItems, events, metrics, onNavigate, onOpenOrders, onOpenResponses, onSelectConversation, requests: requestItems, orders, tools: toolItems, usage }) {
   const [activeSummaryFocus, setActiveSummaryFocus] = useState('attention');
-  const activePipeline = [
-    ['Entrada', conversationItems.filter((item) => item.path.includes('whatsapp')).length],
-    ['Atención IA', conversationItems.filter((item) => item.path.includes('agent')).length],
-    ['Catálogo', conversationItems.filter((item) => item.stage === 'catalog').length],
-    ['Aprobación', requestItems.length],
-    ['Cierre', conversationItems.filter((item) => item.stage === 'payment').length],
-  ];
+  const deliveryRequests = requestItems.filter(isDeliveryRequest).length;
+  const ordersToPrepare = deliveryRequests + operationalOrders(orders, requestItems).filter((order) => order.status === 'pending_human_preparation').length;
+  const activeOrders = operationalOrders(orders, requestItems).length + deliveryRequests;
+  const customersToAnswer = requestItems.length - deliveryRequests;
   const health = toolItems.reduce(
     (acc, tool) => {
       acc[tool.status] = (acc[tool.status] ?? 0) + 1;
@@ -2257,7 +2603,7 @@ function SummaryView({ conversations: conversationItems, events, metrics, onNavi
     {},
   );
   const summaryFocusTabs = [
-    ['attention', ListChecks, 'Atención', requestItems.length ? `${requestItems.length} pendientes` : 'Sin bloqueos'],
+    ['attention', ListChecks, 'Atención', requestItems.length || activeOrders ? `${requestItems.length + operationalOrders(orders, requestItems).length} en curso` : 'Todo al día'],
     ['usage', ShoppingBag, 'Uso del plan', formatUsageRatio(usage.metrics.deliveries_confirmed, usage.limits.includedDeliveries)],
     ['activity', Activity, 'Actividad', `${events.length} eventos`],
   ];
@@ -2267,7 +2613,7 @@ function SummaryView({ conversations: conversationItems, events, metrics, onNavi
       <div className="section-title split-title summary-titlebar">
         <div>
           <span className="eyebrow">Resumen operativo</span>
-          <h2>Qué requiere atención ahora</h2>
+          <h2>Qué necesita tu atención</h2>
         </div>
         <div className="workspace-tabs compact-tabs summary-tabs" role="tablist" aria-label="Foco del resumen operativo">
           {summaryFocusTabs.map(([key, Icon, label, hint]) => (
@@ -2293,30 +2639,19 @@ function SummaryView({ conversations: conversationItems, events, metrics, onNavi
             <span>Prioridad</span>
             <StatusPill status={requestItems.length ? 'approval_required' : 'resolved'} />
           </div>
-          <h3>{requestItems.length ? `${requestItems.length} aprobaciones pendientes` : 'Operación sin bloqueos humanos'}</h3>
-          <p>Las aprobaciones muestran contexto, consecuencia y acciones trazables antes de liberar el flujo.</p>
+          <h3>{requestItems.length || activeOrders ? `${activeOrders} ${activeOrders === 1 ? 'pedido activo' : 'pedidos activos'} · ${customersToAnswer} ${customersToAnswer === 1 ? 'cliente por responder' : 'clientes por responder'}` : 'Sin tareas pendientes por ahora'}</h3>
+          <p>{requestItems.length || activeOrders ? `${ordersToPrepare} pedidos nuevos por tomar. Entra a la bandeja para ver los que estás alistando o van en camino.` : 'Cuando llegue un pedido o un cliente necesite ayuda, aparecerá aquí.'}</p>
           <button className="approve-btn" type="button" onClick={() => onNavigate('approvals')}>
             <ListChecks size={16} />
-            Revisar aprobaciones
+            Ver pedidos y pendientes
           </button>
         </article>
         {activeSummaryFocus === 'attention' && (
-          <article className="ops-card">
-            <span className="eyebrow">Embudo vivo</span>
-            <div className="funnel-bars">
-              {activePipeline.map(([label, value], index) => (
-                <button
-                  className="funnel-row"
-                  key={label}
-                  onClick={() => onNavigate(index === 3 ? 'approvals' : 'conversations')}
-                  type="button"
-                >
-                  <span>{label}</span>
-                  <b style={{ width: `${Math.min(100, Math.max(value * 18, 12))}%` }} />
-                  <strong>{value}</strong>
-                </button>
-              ))}
-            </div>
+          <article className="ops-card daily-work-card">
+            <span className="eyebrow">Trabajo de hoy</span>
+            <button type="button" onClick={onOpenOrders}><ShoppingBag size={20} /><span>Ver pedidos activos</span><strong>{activeOrders}</strong><ArrowRight size={17} /></button>
+            <button type="button" onClick={onOpenResponses}><MessageCircle size={20} /><span>Responder clientes</span><strong>{customersToAnswer}</strong><ArrowRight size={17} /></button>
+            <button type="button" onClick={() => onNavigate('conversations')}><Activity size={20} /><span>Ver conversaciones</span><strong>{conversationItems.length}</strong><ArrowRight size={17} /></button>
           </article>
         )}
         {(activeSummaryFocus === 'attention' || activeSummaryFocus === 'usage') && (
@@ -2393,21 +2728,11 @@ function UsagePlanCard({ usage, onOpenAnalytics }) {
         percent={deliveriesPct}
       />
       <UsageMeter
-        label="Interacciones"
+        label="Mensajes atendidos"
         used={usage.metrics.agent_interactions}
         limit={usage.limits.includedInteractions}
         percent={interactionsPct}
       />
-      <div className="usage-mini-grid">
-        <div>
-          <span>Motor IA</span>
-          <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)} tokens</strong>
-        </div>
-        <div>
-          <span>Herramientas</span>
-          <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
-        </div>
-      </div>
       {onOpenAnalytics && (
         <button className="ghost-btn compact" type="button" onClick={onOpenAnalytics}>
           <BarChart3 size={16} />
@@ -2439,6 +2764,8 @@ function ConversationsView({
   detailCollapsed,
   events,
   onOpenApprovals,
+  onDeleteConversation,
+  onOpenWhatsAppExternally,
   onSelectConversation,
   onToggleDetail,
   pendingRequest,
@@ -2457,7 +2784,7 @@ function ConversationsView({
   tab,
   setTab,
 }) {
-  const statuses = ['all', 'live', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
+  const statuses = ['all', 'live', 'manual_active', 'approval_required', 'blocked', 'degraded', 'needs_binding'];
   const activeWorkspaceTab = workspaceTab === 'detail' ? 'detail' : 'list';
   function selectConversation(id) {
     onSelectConversation(id);
@@ -2471,7 +2798,7 @@ function ConversationsView({
     <section className={`conversations-layout ${mobileDetailOpen ? 'is-detail-open' : ''} conversation-workspace-${activeWorkspaceTab}`}>
       <div className="section-title split-title conversation-titlebar">
         <div>
-          <span className="eyebrow">{activeWorkspaceTab === 'list' ? 'Vista lista' : 'Vista detalle'}</span>
+          <span className="eyebrow">{activeWorkspaceTab === 'list' ? 'Clientes' : 'Conversación'}</span>
           <h2>{activeWorkspaceTab === 'list' ? 'Bandeja de conversaciones' : selectedConversation?.customer ?? 'Detalle de conversación'}</h2>
         </div>
         <div className="conversation-workspace-tabs" role="tablist" aria-label="Navegación de conversaciones">
@@ -2545,8 +2872,8 @@ function ConversationsView({
             {conversationItems.length === 0 && (
               <div className="empty-state">
                 <Search size={28} />
-                <h3>Sin conversaciones para este filtro</h3>
-                <p>Ajusta la búsqueda o vuelve a todos los estados.</p>
+                <h3>{query || statusFilter !== 'all' ? 'No encontramos conversaciones' : 'Aún no hay conversaciones'}</h3>
+                <p>{query || statusFilter !== 'all' ? 'Prueba otra búsqueda o vuelve a todos los estados.' : 'Los mensajes de tus clientes aparecerán aquí.'}</p>
               </div>
             )}
             {conversationItems.map((conversation) => (
@@ -2560,13 +2887,9 @@ function ConversationsView({
                 <span className="avatar-token">{conversation.avatar}</span>
                 <div>
                   <strong>{conversation.customer}</strong>
-                  <span>{conversation.id} · {toolLabel(conversation.lastTool)}</span>
+                  <span>{conversation.orderId ? 'Pedido registrado' : stageLabel(conversation.stage)}</span>
                   <small>{conversation.nextStep}</small>
                 </div>
-                <span className="conversation-progress" title="Progreso estimado del flujo operativo de esta conversación">
-                  <small>Progreso</small>
-                  <b>{conversation.progress}%</b>
-                </span>
                 <StatusPill status={conversation.status} />
               </button>
             ))}
@@ -2579,8 +2902,10 @@ function ConversationsView({
             events={events}
             onBack={returnToList}
             onOpenApprovals={() => onOpenApprovals?.(pendingRequest?.id ?? '')}
+            onDeleteConversation={onDeleteConversation}
             onToggleDetail={onToggleDetail}
             pendingRequest={pendingRequest}
+            onOpenWhatsAppExternally={onOpenWhatsAppExternally}
             tab={tab}
             setTab={setTab}
           />
@@ -2605,7 +2930,9 @@ function ConversationPanel({
   events,
   onBack,
   onClose,
+  onDeleteConversation,
   onOpenApprovals,
+  onOpenWhatsAppExternally,
   onOpenList,
   onToggleDetail,
   pendingRequest,
@@ -2621,7 +2948,7 @@ function ConversationPanel({
 
   if (!conversation) return null;
   const relevantEvents = events.filter((event) => event.conversationId === conversation.id).slice(0, 3);
-  const eventPreview = relevantEvents.length ? relevantEvents : events.slice(0, 3);
+  const eventPreview = relevantEvents;
   const needsHuman = conversation.status === 'approval_required' || conversation.status === 'blocked' || Boolean(pendingRequest);
   const nextAction = needsHuman
     ? pendingRequest?.title ?? conversation.humanReason ?? 'Revisar intervención humana'
@@ -2659,7 +2986,7 @@ function ConversationPanel({
             </button>
           )}
           {waHref && (
-            <a className="ghost-btn compact whatsapp-header-btn" href={waHref} target="_blank" rel="noreferrer">
+            <a className="ghost-btn compact whatsapp-header-btn" href={waHref} target="_blank" rel="noreferrer" onClick={() => onOpenWhatsAppExternally?.(conversation.id)}>
               <Send size={15} />
               Abrir WhatsApp
             </a>
@@ -2683,7 +3010,7 @@ function ConversationPanel({
               role="tab"
               type="button"
             >
-              {item === 'chat' ? 'Chat' : item === 'summary' ? 'Resumen' : 'Acciones'}
+              {item === 'chat' ? 'Mensajes' : item === 'summary' ? 'Resumen' : 'Acciones'}
             </button>
           ))}
         </div>
@@ -2696,7 +3023,7 @@ function ConversationPanel({
           <strong>{riskLabel}</strong>
         </div>
         {waHref && (
-          <a className="ghost-btn compact whatsapp-open-btn" href={waHref} target="_blank" rel="noreferrer">
+          <a className="ghost-btn compact whatsapp-open-btn" href={waHref} target="_blank" rel="noreferrer" onClick={() => onOpenWhatsAppExternally?.(conversation.id)}>
             <Send size={15} />
             Abrir WhatsApp
           </a>
@@ -2719,10 +3046,17 @@ function ConversationPanel({
               Lista de chats
             </button>
           )}
+          {!conversation.orderId && onDeleteConversation && (
+            <button className="ghost-btn compact danger-btn" type="button" onClick={() => onDeleteConversation(conversation.id)}>
+              <Trash2 size={16} />
+              Eliminar conversación
+            </button>
+          )}
         </div>
       </div>
 
       <div className="whatsapp-message-list tab-chat" aria-label="Mensajes recientes" aria-live="polite">
+        {!messages.length && <div className="conversation-message-empty"><MessageCircle size={24} aria-hidden="true" /><strong>Aún no hay mensajes guardados</strong><span>Cuando llegue un mensaje del cliente, aparecerá aquí.</span></div>}
         {messages.map((message) => (
           <div className={`whatsapp-message is-${message.role}`} key={message.id}>
             <span>{message.label}</span>
@@ -2759,6 +3093,7 @@ function ConversationPanel({
           <strong>Última actividad</strong>
           <Eye size={16} />
         </div>
+        {eventPreview.length === 0 && <p>Sin actividad reciente para este cliente.</p>}
         {eventPreview.map((event) => (
           <p key={event.id}>
             <span>{formatEventTime(event.at)}</span> {eventTypeLabel(event.type)}
@@ -2771,24 +3106,6 @@ function ConversationPanel({
 
 function conversationMessages(conversation) {
   const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
-  if (!messages.length) {
-    return [
-      {
-        id: `${conversation.id}-need`,
-        role: 'user',
-        label: 'Cliente',
-        text: conversation.need || 'Conversación recibida por WhatsApp.',
-        createdAt: conversation.updatedAt ?? conversation.createdAt,
-      },
-      {
-        id: `${conversation.id}-next`,
-        role: conversation.status === 'blocked' || conversation.status === 'approval_required' ? 'system' : 'agent',
-        label: conversation.status === 'blocked' || conversation.status === 'approval_required' ? 'Sistema' : 'Agente IA',
-        text: conversation.humanReason || conversation.nextStep || 'El agente está gestionando la conversación.',
-        createdAt: conversation.updatedAt ?? conversation.createdAt,
-      },
-    ];
-  }
   return messages.slice(-8).map((message) => ({
     id: message.id ?? `${conversation.id}-${message.createdAt ?? message.text}`,
     role: message.role === 'human' ? 'human' : message.role === 'user' ? 'user' : message.role === 'system' ? 'system' : 'agent',
@@ -2797,8 +3114,8 @@ function conversationMessages(conversation) {
       : message.role === 'user'
         ? 'Cliente'
         : message.role === 'system'
-          ? 'Sistema'
-          : 'Agente IA',
+          ? 'Aviso'
+          : 'Asistente',
     text: message.text || `[${message.messageType ?? 'mensaje'}]`,
     createdAt: message.createdAt,
   }));
@@ -2811,9 +3128,9 @@ function whatsappHref(waId) {
 }
 
 function formatMessageTime(value) {
-  if (!value) return 'Ahora';
+  if (!value) return 'Sin hora';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Ahora';
+  if (Number.isNaN(date.getTime())) return 'Sin hora';
   return date.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
 }
 
@@ -2829,11 +3146,26 @@ function InfoLine({ icon: Icon, label, value }) {
   );
 }
 
-function humanRequestViewModel(request, conversation) {
+function isDeliveryRequest(request) {
   const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
-  const isDeliveryOrder = request.action === 'prepare_delivery_order'
+  return request.action === 'prepare_delivery_order'
     || snapshot.action === 'prepare_delivery_order'
     || (request.assignedTeam === 'operaciones' && normalizeLabel(request.title).includes('pedido'));
+}
+
+function operationalOrders(orders, requests) {
+  const pendingOrderRequests = requests.filter(isDeliveryRequest);
+  return orders.filter((order) => (
+    ['preparing', 'dispatched'].includes(order.status)
+    || (order.status === 'pending_human_preparation' && !pendingOrderRequests.some((request) => (
+      request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId
+    )))
+  ));
+}
+
+function humanRequestViewModel(request, conversation) {
+  const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
+  const isDeliveryOrder = isDeliveryRequest(request);
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const itemLines = items.map((item) => ({
     name: item.name ?? item.catalogQuery ?? 'Producto por validar',
@@ -2843,8 +3175,8 @@ function humanRequestViewModel(request, conversation) {
   const subtotal = snapshot.subtotal ?? itemLines.reduce((sum, item) => sum + Number(item.total ?? 0), 0);
   return {
     isDeliveryOrder,
-    title: isDeliveryOrder ? 'Alistar domicilio' : request.title,
-    task: isDeliveryOrder ? 'Preparar y entregar' : eventTypeLabel(request.type),
+    title: isDeliveryOrder ? 'Pedido por preparar' : request.title,
+    task: isDeliveryOrder ? 'Pedido confirmado' : 'Cliente por responder',
     customer: snapshot.customerName ?? conversation?.customer ?? request.conversationId,
     address: snapshot.deliveryAddress ?? conversation?.deliveryAddress ?? 'Sin dirección registrada',
     waId: snapshot.customerWaId ?? conversation?.waId ?? '',
@@ -2854,7 +3186,7 @@ function humanRequestViewModel(request, conversation) {
     paymentMethod: snapshot.paymentMethod ?? null,
     context: request.context,
     consequence: isDeliveryOrder
-      ? 'El tendero toma el pedido para alistarlo. Si falta algo, responde al cliente desde la conversación.'
+      ? 'Revisa productos y dirección. Al tomarlo, te encargas de alistarlo y coordinar la entrega.'
       : request.consequence,
     primaryAction: isDeliveryOrder ? 'Marcar tomado' : 'Aprobar',
     denyAction: isDeliveryOrder ? 'No puedo alistar' : 'Rechazar',
@@ -2868,8 +3200,8 @@ function normalizeLabel(value = '') {
     .toLowerCase();
 }
 
-function HumanQueue({ requests, conversations, onSelectConversation, onResolve, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '' }) {
-  const [activeQueueTab, setActiveQueueTab] = useState('pending');
+function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
+  const [activeQueueTab, setActiveQueueTab] = useState(focusTab);
   const selectedRequestRef = useRef(null);
   const queueRows = requests.map((request) => {
     const conversation = conversations.find((item) => item.id === request.conversationId);
@@ -2881,19 +3213,28 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
   });
   const deliveryRows = queueRows.filter((row) => row.view.isDeliveryOrder);
   const responseRows = queueRows.filter((row) => !row.view.isDeliveryOrder);
+  const activeOrders = operationalOrders(orders, requests);
+  const finishedOrders = orders.filter((order) => ['delivered', 'cancelled'].includes(order.status));
   const queueTabs = [
-    ['pending', ListChecks, 'Pendientes', queueRows.length],
-    ['delivery', ShoppingBag, 'Preparar pedidos', deliveryRows.length],
+    ['pending', ListChecks, 'Todo', queueRows.length + activeOrders.length],
+    ['delivery', ShoppingBag, 'Pedidos', deliveryRows.length + activeOrders.length],
     ['response', Send, 'Responder cliente', responseRows.length],
-    ['history', BadgeCheck, 'Historial', 0],
+    ['finished', CheckCircle2, 'Finalizados', finishedOrders.length],
   ];
   const visibleQueueRows = activeQueueTab === 'delivery'
     ? deliveryRows
     : activeQueueTab === 'response'
       ? responseRows
-      : activeQueueTab === 'history'
-        ? []
         : queueRows;
+  const visibleOrders = activeQueueTab === 'finished'
+    ? finishedOrders
+    : ['pending', 'delivery'].includes(activeQueueTab)
+      ? activeOrders
+      : [];
+
+  useEffect(() => {
+    setActiveQueueTab(focusTab);
+  }, [focusTab]);
 
   useEffect(() => {
     if (!selectedRequestId || !selectedRequestRef.current) return;
@@ -2908,12 +3249,19 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
     setActiveQueueTab(selectedRow.view.isDeliveryOrder ? 'delivery' : 'response');
   }, [selectedRequestId, requests]);
 
+  useEffect(() => {
+    if (!selectedOrderId) return;
+    const card = [...document.querySelectorAll('.order-progress-card')].find((item) => item.dataset.orderId === selectedOrderId);
+    card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card?.focus({ preventScroll: true });
+  }, [selectedOrderId, activeQueueTab, orders]);
+
   return (
     <section className="queue-layout">
       <div className="section-title split-title queue-titlebar">
         <div>
-          <span className="eyebrow">Aprobaciones</span>
-          <h2>Bandeja priorizada de intervención humana</h2>
+          <span className="eyebrow">Lo que sigue</span>
+          <h2>{queueRows.length + activeOrders.length ? `${queueRows.length + activeOrders.length} ${queueRows.length + activeOrders.length === 1 ? 'asunto en curso' : 'asuntos en curso'}` : 'Todo al día'}</h2>
         </div>
         <div className="workspace-tabs compact-tabs" role="tablist" aria-label="Tipos de aprobaciones">
           {queueTabs.map(([key, Icon, label, count]) => (
@@ -2932,14 +3280,31 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
           ))}
         </div>
       </div>
+      {notice && (
+        <div className={`queue-notice is-${notice.type}`} role={notice.type === 'error' ? 'alert' : 'status'}>
+          {notice.type === 'error' ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          <span>{notice.text}</span>
+        </div>
+      )}
       <div className="queue-grid">
-        {visibleQueueRows.length === 0 && (
+        {visibleQueueRows.length === 0 && visibleOrders.length === 0 && (
           <article className="empty-state">
-            {activeQueueTab === 'history' ? <Clock3 size={28} /> : <BadgeCheck size={28} />}
-            <h3>{activeQueueTab === 'history' ? 'Historial pendiente de consolidar' : 'Sin pendientes para este filtro'}</h3>
-            <p>{activeQueueTab === 'history' ? 'Cuando se persistan resoluciones recientes, aparecerán aquí como solo lectura.' : 'Cambia de tab o espera nuevas solicitudes humanas del agente.'}</p>
+            <BadgeCheck size={28} />
+            <h3>{activeQueueTab === 'finished' ? 'Aún no hay pedidos finalizados' : 'Sin pendientes por ahora'}</h3>
+            <p>{activeQueueTab === 'finished' ? 'Aquí aparecerán los pedidos entregados o cancelados.' : 'Cuando llegue un pedido o un cliente necesite ayuda, lo verás aquí.'}</p>
           </article>
         )}
+        {visibleOrders.map((order) => (
+          <OrderProgressCard
+            key={order.id}
+            order={order}
+            conversationAvailable={conversations.some((conversation) => conversation.id === order.conversationId)}
+            onSelectConversation={onSelectConversation}
+            onAdvance={onAdvanceOrder}
+            busy={updatingOrderId === order.id}
+            selected={selectedOrderId === order.id}
+          />
+        ))}
         {visibleQueueRows.map(({ request, conversation, view }) => {
           const isSelected = request.id === selectedRequestId;
           return (
@@ -2958,11 +3323,16 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
               <h3>{view.title}</h3>
               {view.isDeliveryOrder ? (
                 <div className="delivery-brief">
+                  <ol className="order-journey" aria-label="Estado del pedido">
+                    <li className="is-done"><Check size={13} aria-hidden="true" />Pedido confirmado</li>
+                    <li className="is-current"><ShoppingBag size={13} aria-hidden="true" />Por preparar</li>
+                    <li><Clock3 size={13} aria-hidden="true" />Entrega coordinada por tu tienda</li>
+                  </ol>
                   <div className="delivery-main">
                     <ShoppingBag size={20} />
                     <div>
                       <span>Pedido</span>
-                      <strong>{view.orderId || 'Pedido confirmado'}</strong>
+                      <strong>{view.orderId || 'Sin número de referencia'}</strong>
                     </div>
                     <b>{formatCurrency(view.subtotal)}</b>
                   </div>
@@ -3007,11 +3377,11 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
                 </>
               )}
               <div className="button-row">
-                <button className="approve-btn" type="button" onClick={() => onResolve(request.id, 'approved', { responseMode: 'none' })}>
+                <button className="approve-btn" type="button" disabled={Boolean(resolvingRequestId)} onClick={() => onResolve(request.id, 'approved', { responseMode: 'none' })}>
                   <Check size={16} />
-                  {view.primaryAction}
+                  {resolvingRequestId === request.id ? 'Guardando…' : view.primaryAction}
                 </button>
-                <button className="deny-btn" type="button" onClick={() => onResolve(request.id, 'denied', { responseMode: 'none' })}>
+                <button className="deny-btn" type="button" disabled={Boolean(resolvingRequestId)} onClick={() => onResolve(request.id, 'denied', { responseMode: 'none' })}>
                   <X size={16} />
                   {view.denyAction}
                 </button>
@@ -3019,6 +3389,7 @@ function HumanQueue({ requests, conversations, onSelectConversation, onResolve, 
                   <button
                     className="ghost-btn compact"
                     type="button"
+                    disabled={Boolean(resolvingRequestId)}
                     onClick={() => onResolve(request.id, 'approved', { responseMode: replyMode, note: draftReply })}
                   >
                     <Send size={16} />
@@ -3041,21 +3412,71 @@ function onboardingTabForStep(step) {
   return 'route';
 }
 
-function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAdmin, onAction, onNavigate, onWhatsAppAction, tenant }) {
+function whatsappMetaReviewCopy(status) {
+  if (status === 'in_review') {
+    return {
+      label: 'En revisión de Meta',
+      title: 'Meta está revisando el acceso de Ventas IA',
+      detail: 'La solicitud de la plataforma ya fue enviada. Tu tienda no necesita aportar credenciales ni verificar su negocio por este trámite. Cuando Meta apruebe el acceso, podrás conectar tu número aquí.',
+    };
+  }
+  if (status === 'changes_requested') {
+    return {
+      label: 'Ajustes solicitados por Meta',
+      title: 'Ventas IA está atendiendo los cambios de Meta',
+      detail: 'Meta pidió ajustes a la solicitud de la plataforma. Tu tienda no necesita aportar credenciales por este trámite. El botón de conexión aparecerá cuando se obtenga la aprobación.',
+    };
+  }
+  return {
+    label: 'Solicitud pendiente de envío',
+    title: 'Ventas IA debe completar su solicitud a Meta',
+    detail: 'El negocio de la plataforma ya está verificado, pero la solicitud de permisos para conectar tiendas aún no se ha enviado. Es una tarea de Ventas IA, no de tu tienda. Aquí aparecerá el botón cuando puedas conectar tu número.',
+  };
+}
+
+function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPlatformAdmin, onAction, onCatalogImport, onNavigate, onWhatsAppAction, tenant }) {
   const status = bundle?.status ?? fallbackOnboardingStatus(tenant);
-  const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(status.nextStep));
+  const guidedNextStep = ownerGuidedNextStep(status, isPlatformAdmin);
+  const [activeOnboardingTab, setActiveOnboardingTab] = useState(() => onboardingTabForStep(guidedNextStep));
   const checks = status.checks ?? [];
   const enrichedSteps = checks.map((check) => ({ ...check, meta: onboardingStepMeta(check.key) }));
-  const next = nextOnboardingAction(status, isPlatformAdmin);
+  const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
+  const metaReviewCopy = whatsappMetaReviewCopy(whatsappOnboarding.platformReadiness?.appReviewStatus);
+  const next = guidedNextStep === 'whatsapp' && whatsappOnboarding.reason === 'meta_app_review_pending'
+    ? {
+      action: null,
+      label: metaReviewCopy.label,
+      title: metaReviewCopy.title,
+      detail: metaReviewCopy.detail,
+    }
+    : nextOnboardingAction({ ...status, nextStep: guidedNextStep }, isPlatformAdmin);
   const completeCount = checks.filter((item) => item.ok).length;
   const progress = Math.round((completeCount / Math.max(checks.length, 1)) * 100);
   const workspace = bundle?.googleWorkspace;
   const googleConnection = bundle?.googleConnection;
-  const whatsappOnboarding = bundle?.whatsappOnboarding ?? fallbackWhatsAppOnboarding(tenant);
   const subscription = status.subscription ?? bundle?.subscription;
-  const currentStep = enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
-  const currentMeta = currentStep?.meta ?? onboardingStepMeta(status.nextStep);
+  const setupAccess = status.setupAccess ?? {
+    allowed: ['active', 'authorized', 'trial', 'grace_period'].includes(subscription?.status),
+    source: 'subscription',
+    expiresAt: null,
+  };
+  const subscriptionLabel = setupAccess.source === 'billing_access_exception'
+    ? 'Acceso temporal de piloto'
+    : humanState(subscription?.status) ?? 'Por validar';
+  const currentStep = enrichedSteps.find((item) => item.key === guidedNextStep) ?? enrichedSteps.find((item) => !item.ok) ?? enrichedSteps.at(-1);
+  const currentMeta = currentStep?.meta ?? onboardingStepMeta(guidedNextStep);
   const CurrentIcon = currentMeta.icon;
+  const openNextStep = () => {
+    if (next.action === 'open-orders') {
+      onNavigate('approvals');
+      return;
+    }
+    if (next.action === 'config-whatsapp' || next.action === 'open-billing') {
+      setActiveOnboardingTab(next.action === 'config-whatsapp' ? 'whatsapp' : 'billing');
+      return;
+    }
+    onAction(next.action);
+  };
   const operationLabel = status.readyForOperation
     ? 'Operación habilitada'
     : status.readyForActivation
@@ -3066,12 +3487,12 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
     {
       icon: CircleDollarSign,
       label: 'Suscripción',
-      value: humanState(subscription?.status) ?? 'Por validar',
-      state: subscription?.status === 'active' || subscription?.status === 'authorized' ? 'ok' : 'warn',
+      value: subscriptionLabel,
+      state: setupAccess.allowed ? 'ok' : 'warn',
     },
     {
       icon: UserCheck,
-      label: 'Google del cliente',
+      label: 'Tu cuenta Google',
       value: googleConnection?.accountEmail ?? 'Pendiente',
       state: googleConnection?.accountEmail ? 'ok' : 'warn',
     },
@@ -3081,16 +3502,10 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
       value: tenant.config?.whatsapp?.phoneNumberId ? 'Número conectado' : 'Por conectar',
       state: tenant.config?.whatsapp?.phoneNumberId ? 'ok' : 'warn',
     },
-    {
-      icon: Bot,
-      label: 'Motor IA',
-      value: 'DeepSeek plataforma',
-      state: 'ok',
-    },
   ];
   const onboardingTabs = [
     ['route', ShieldCheck, 'Ruta', `${completeCount}/${checks.length}`],
-    ['billing', CircleDollarSign, 'Pago', humanState(subscription?.status) ?? 'Pendiente'],
+    ['billing', CircleDollarSign, 'Pago', subscriptionLabel],
     ['google', Database, 'Google', googleConnection?.accountEmail ? 'Conectado' : 'Pendiente'],
     ['whatsapp', MessageCircle, 'WhatsApp', tenant.config?.whatsapp?.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['test', Play, 'Prueba', status.readyForOperation ? 'Lista' : 'Pendiente'],
@@ -3103,32 +3518,32 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
     {
       key: 'authorize',
       icon: UserCheck,
-      title: 'Autorizar Drive y Sheets',
-      detail: 'El dueño entra con la cuenta Google de la tienda y aprueba permisos para crear archivos operativos.',
+      title: 'Conectar tu cuenta Google',
+      detail: 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
       done: googleConnected,
-      status: googleConnected ? 'sandbox_ready' : 'needs_binding',
-      statusText: googleConnected ? 'Cuenta conectada' : 'Pendiente',
+      status: googleConnected ? 'sandbox_ready' : setupAccess.allowed ? 'needs_binding' : 'approval_required',
+      statusText: googleConnected ? 'Cuenta conectada' : setupAccess.allowed ? 'Pendiente' : 'Inicia tu prueba primero',
       action: 'google-oauth',
       actionLabel: googleConnected ? 'Reconectar Google' : 'Conectar Google',
-      disabled: false,
+      disabled: !setupAccess.allowed,
     },
     {
       key: 'provision',
       icon: Database,
-      title: 'Crear estructura en Drive',
-      detail: 'La plataforma crea la carpeta de la tienda y el Google Sheet con catalogo, clientes y pedidos.',
+      title: 'Crear la hoja de tu tienda',
+      detail: 'Prepararemos un lugar para tus productos, clientes y pedidos.',
       done: googleProvisioned,
       status: googleProvisioned ? 'sandbox_ready' : googleConnected ? 'approval_required' : 'needs_binding',
       statusText: googleProvisioned ? 'Estructura creada' : googleConnected ? 'Lista para crear' : 'Esperando cuenta',
       action: googleProvisioned ? null : 'provision',
-      actionLabel: 'Crear Drive y Sheets',
+      actionLabel: 'Crear mi hoja',
       disabled: !googleConnected,
     },
     {
       key: 'complete',
       icon: ShoppingBag,
-      title: 'Completar datos base',
-      detail: 'El usuario abre la hoja, completa catalogo, stock, clientes frecuentes y valida que la tienda pueda operar.',
+      title: 'Agregar tus productos',
+      detail: 'Escribe productos, precios y existencias para comenzar a recibir pedidos.',
       done: googleProvisioned,
       status: googleProvisioned ? 'sandbox_ready' : 'needs_binding',
       statusText: googleProvisioned ? 'Lista para editar' : 'Despues de crear estructura',
@@ -3137,23 +3552,24 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
   ];
 
   useEffect(() => {
-    setActiveOnboardingTab(onboardingTabForStep(status.nextStep));
-  }, [status.nextStep, tenant.id]);
+    setActiveOnboardingTab(onboardingTabForStep(guidedNextStep));
+  }, [guidedNextStep, tenant.id]);
 
   return (
     <section className="onboarding-layout">
       <div className="onboarding-hero">
         <div className="onboarding-hero-copy">
-          <span className="eyebrow">Puesta en marcha guiada</span>
-          <h2>{tenant.name}</h2>
+          <span className="eyebrow">Paso a paso</span>
+          <h2>{status.readyForOperation ? tenant.name : `Dejemos ${tenant.name} lista`}</h2>
           <p>
-            Acompañamos la activación de la tienda paso a paso: pago de plataforma, Google del cliente,
-            estructura operativa, DeepSeek y WhatsApp aislado por tienda.
+            {status.readyForOperation
+              ? 'Tu tienda ya tiene lo necesario para recibir pedidos y mantenerlos organizados.'
+              : 'Completa el siguiente paso para recibir y organizar pedidos por WhatsApp.'}
           </p>
           <div className="hero-next">
             <CurrentIcon size={18} />
             <span>{operationLabel}</span>
-            <strong>{currentMeta.short}</strong>
+            <strong>{status.readyForOperation ? 'Lista para recibir pedidos' : currentMeta.short}</strong>
           </div>
         </div>
         <div className="onboarding-score" style={{ '--setup-progress': `${progress}%` }}>
@@ -3163,14 +3579,21 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
           <i />
         </div>
         <div className="onboarding-hero-actions">
-          <button className="ghost-btn" type="button" onClick={() => onAction('validate')} disabled={busyAction === 'validate'}>
+          {!status.readyForOperation && <button className="ghost-btn" type="button" onClick={() => onAction('validate')} disabled={busyAction === 'validate'}>
             <RotateCcw size={16} />
-            Validar
-          </button>
-          <button className="approve-btn" type="button" onClick={() => onAction(next.action)} disabled={!next.action || Boolean(busyAction)}>
-            <Check size={16} />
-            {busyAction ? 'Procesando' : next.label}
-          </button>
+            Comprobar progreso
+          </button>}
+          {next.action ? (
+            <button className="approve-btn" type="button" onClick={openNextStep} disabled={Boolean(busyAction)}>
+              <Check size={16} />
+            {busyAction ? 'Un momento…' : next.label}
+            </button>
+          ) : (
+            <div className="onboarding-waiting">
+              <Clock3 size={16} />
+              <span>{next.label}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -3200,6 +3623,13 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
           </button>
         ))}
       </div>
+
+      {notice && (
+        <div className={`setup-notice ${error ? 'is-warning' : ''}`} role="status">
+          {error ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
+          <span>{notice}</span>
+        </div>
+      )}
 
       {activeOnboardingTab === 'billing' && (
         <BillingOwnerPanel
@@ -3262,7 +3692,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
           </div>
           <div className="readiness-list">
             <ResourceRow icon={ShieldCheck} label="Operación" value={operationLabel} />
-            <ResourceRow icon={CircleDollarSign} label="Pago plataforma" value={humanState(subscription?.status) ?? 'Sin validar'} />
+            <ResourceRow icon={CircleDollarSign} label="Plan" value={subscriptionLabel} />
             <ResourceRow icon={UserCheck} label="Cuenta Google" value={googleConnection?.accountEmail ?? 'No conectada'} />
             <ResourceRow icon={MessageCircle} label="WhatsApp" value={tenant.config?.whatsapp?.phoneNumberId ? 'Número conectado' : 'Pendiente'} />
           </div>
@@ -3283,9 +3713,12 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
               busyAction={busyAction}
               check={check}
               index={index}
-              isCurrent={!check.ok && check.key === status.nextStep}
+              isCurrent={!check.ok && check.key === guidedNextStep}
+              isPlatformAdmin={isPlatformAdmin}
               key={check.key}
-              onAction={onAction}
+              onAction={(action) => {
+                onAction(action);
+              }}
             />
           ))}
         </div>
@@ -3335,7 +3768,9 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
         busyAction={busyAction}
         onboarding={whatsappOnboarding}
         onAction={onWhatsAppAction}
-        onOpenConfig={() => onNavigate('config')}
+        isPlatformAdmin={isPlatformAdmin}
+        onSelectOnboardingTab={setActiveOnboardingTab}
+        onOpenPlatformControl={() => onNavigate('admin')}
         tenant={tenant}
       />
       )}
@@ -3344,12 +3779,9 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
       <div className="google-onboarding-grid">
         <article className="guide-panel google-guide-panel">
           <div>
-            <span className="eyebrow">Conectar Google Drive</span>
-            <h3>Guía para dejar Drive y Sheets listos</h3>
-            <p>
-              Este paso conecta la cuenta Google del cliente, crea la estructura operativa en su Drive
-              y deja una hoja editable para catálogo, clientes y pedidos.
-            </p>
+            <span className="eyebrow">Tus productos</span>
+            <h3>Conecta tus productos y precios</h3>
+            <p>Conecta tu cuenta Google. Prepararemos una hoja para tus productos, clientes y pedidos.</p>
           </div>
 
           <div className="google-step-stack">
@@ -3387,10 +3819,6 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
                             Abrir Google Sheets
                           </a>
                         )}
-                        <button className="ghost-btn" onClick={() => onNavigate('config')} type="button">
-                          <Settings2 size={16} />
-                          Editar configuración Google
-                        </button>
                       </div>
                     )}
                   </div>
@@ -3398,17 +3826,23 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
               );
             })}
           </div>
+          <CatalogImportPanel
+            busyAction={busyAction}
+            error={error}
+            googleReady={googleProvisioned}
+            onImport={onCatalogImport}
+            spreadsheetUrl={workspace?.spreadsheet?.url}
+          />
         </article>
 
         <article className="guide-panel google-result-panel">
           <div>
-            <span className="eyebrow">Recursos del cliente</span>
-            <h3>{googleProvisioned ? 'Drive operativo creado' : 'Estructura pendiente'}</h3>
-            <p>
-              Cada tienda mantiene sus archivos en su propio Google. La plataforma guarda referencias
-              por tenant y valida permisos antes de habilitar la operación.
-            </p>
+            <span className="eyebrow">Archivos de tu tienda</span>
+            <h3>{googleProvisioned ? 'Tu hoja está lista' : 'Tu hoja aún no está lista'}</h3>
+            <p>Estos archivos quedan en tu cuenta Google y sirven para consultar productos y guardar pedidos.</p>
           </div>
+          <details className="advanced-config">
+            <summary>Ver detalles de archivos</summary>
           <div className="resource-list compact-resource-list">
             <ResourceRow icon={UserCheck} label="Cuenta" value={googleConnection?.accountEmail ?? 'Pendiente'} />
             <ResourceRow icon={Database} label="Google Sheets" value={workspace?.spreadsheet?.id ?? 'Pendiente'} />
@@ -3416,11 +3850,12 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
             <ResourceRow icon={MessageCircle} label="Clientes" value={tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:H1000'} />
             <ResourceRow icon={CircleDollarSign} label="Pedidos" value={tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:M1000'} />
           </div>
+          </details>
           <div className="google-note">
             <ShieldCheck size={18} />
             <div>
-              <strong>Qué debe hacer el usuario</strong>
-              <span>Autorizar Google, crear la hoja y completar catálogo/stock. WhatsApp se configura en su propia pestaña.</span>
+              <strong>Qué sigue</strong>
+              <span>Conecta Google, crea la hoja y agrega productos y precios. Después, conecta WhatsApp.</span>
             </div>
           </div>
         </article>
@@ -3430,15 +3865,88 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, isPlatformAd
   );
 }
 
+function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsheetUrl }) {
+  const inputRef = useRef(null);
+  const [file, setFile] = useState(null);
+  const [csvText, setCsvText] = useState('');
+  const [result, setResult] = useState(null);
+  const [localError, setLocalError] = useState('');
+
+  async function selectFile(event) {
+    const selected = event.target.files?.[0];
+    event.target.value = '';
+    if (!selected) return;
+    setLocalError('');
+    setResult(null);
+    if (selected.size > 2 * 1024 * 1024) {
+      setLocalError('El archivo supera 2 MB. Divide el catalogo en archivos mas pequenos.');
+      return;
+    }
+    const text = await selected.text();
+    setFile(selected);
+    setCsvText(text);
+    const validation = await onImport('validate', { csvText: text, fileName: selected.name });
+    if (validation) setResult(validation);
+  }
+
+  async function importFile() {
+    if (!csvText) return;
+    const imported = await onImport('import', { csvText, fileName: file?.name });
+    if (imported) setResult(imported);
+  }
+
+  const validationErrors = result?.errors ?? [];
+  const validationWarnings = result?.warnings ?? [];
+  return (
+    <article className="catalog-import-card">
+      <div className="catalog-import-heading">
+        <div>
+          <span className="eyebrow">Catalogo inicial</span>
+          <h4>Carga tus productos desde CSV</h4>
+          <p>Preparamos una vista previa antes de cambiar la hoja de tu tienda. Puedes corregir el archivo y volver a intentarlo.</p>
+        </div>
+        <FileUp size={21} />
+      </div>
+      <input accept=".csv,text/csv" className="visually-hidden" onChange={selectFile} ref={inputRef} type="file" />
+      <div className="catalog-import-actions">
+        <button className="ghost-btn" onClick={() => inputRef.current?.click()} type="button">
+          <FileUp size={16} />
+          Elegir CSV
+        </button>
+        {file && <span className="catalog-file-name">{file.name}</span>}
+        {result?.valid && result.canImport && (
+          <button className="approve-btn" disabled={Boolean(busyAction)} onClick={importFile} type="button">
+            <Check size={16} />
+            {busyAction === 'catalog-import' ? 'Importando' : 'Copiar a Google Sheets'}
+          </button>
+        )}
+      </div>
+      {(localError || error) && <p className="catalog-import-error"><AlertTriangle size={15} />{localError || error}</p>}
+      {result && (
+        <div className={`catalog-import-result ${result.valid ? 'is-valid' : 'is-invalid'}`}>
+          <strong>{result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
+          <span>{result.message}</span>
+          {result.valid && <small>{result.activeRows ?? result.totalRows} productos activos · {googleReady ? 'Google preparado' : 'Conecta Google para importarlo'}</small>}
+          {validationErrors.slice(0, 4).map((item) => <small className="is-error" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
+          {validationWarnings.slice(0, 3).map((item) => <small className="is-warning" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
+          {result.status === 'imported' && spreadsheetUrl && (
+            <a className="catalog-sheet-link" href={spreadsheetUrl} rel="noreferrer" target="_blank">Abrir hoja actualizada</a>
+          )}
+        </div>
+      )}
+      <small className="catalog-import-hint">Columnas obligatorias: <b>sku</b> y <b>nombre</b>. También puedes incluir precio, stock, categoría, marca y presentación.</small>
+    </article>
+  );
+}
+
 function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
   const plan = billing?.plan;
   const activeSubscription = billing?.subscription ?? subscription;
   const usage = billing?.usageCycle;
   const payments = billing?.payments ?? [];
   const deliveriesUsed = Number(usage?.deliveriesUsed ?? 0);
-  const interactionsUsed = Number(usage?.interactionsUsed ?? 0);
-  const includedDeliveries = Number(plan?.includedDeliveries ?? activeSubscription?.includedDeliveries ?? 1000);
-  const includedInteractions = Number(plan?.includedInteractions ?? activeSubscription?.includedInteractions ?? 5000);
+  const includedDeliveries = Number(plan?.includedDeliveries ?? activeSubscription?.includedDeliveries);
+  const planAmount = Number(plan?.amount ?? activeSubscription?.amount);
   const canContinue = billing?.actions?.canContinueCheckout;
   const canStart = billing?.actions?.canStartCheckout;
   const status = activeSubscription?.status ?? 'pending_payment';
@@ -3454,13 +3962,12 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
       </div>
       <div className="billing-owner-status">
         <span className={`billing-state is-${status}`}>{humanState(status)}</span>
-        <strong>{formatCurrency(plan?.amount ?? activeSubscription?.amount ?? 89000, plan?.currency ?? 'COP')}</strong>
+        <strong>{Number.isFinite(planAmount) ? formatCurrency(planAmount, plan?.currency ?? 'COP') : 'Precio por consultar'}</strong>
         <small>{nextDate ? `Próximo cobro ${formatDateShort(nextDate)}` : 'Cobro por aniversario de suscripción'}</small>
       </div>
-      <div className="billing-owner-usage">
+      {Number.isFinite(includedDeliveries) && includedDeliveries > 0 && <div className="billing-owner-usage">
         <UsageMiniBar label="Domicilios" value={deliveriesUsed} limit={includedDeliveries} />
-        <UsageMiniBar label="Interacciones" value={interactionsUsed} limit={includedInteractions} />
-      </div>
+      </div>}
       {notices.length > 0 && (
         <div className="billing-notice-list">
           {notices.slice(0, 3).map((notice) => (
@@ -3525,7 +4032,7 @@ function UsageMiniBar({ label, value, limit }) {
   );
 }
 
-function OnboardingStep({ busyAction, check, index, isCurrent, onAction }) {
+function OnboardingStep({ busyAction, check, index, isCurrent, isPlatformAdmin, onAction }) {
   const meta = check.meta ?? onboardingStepMeta(check.key);
   const Icon = meta.icon;
   const action = onboardingStepAction(check.key);
@@ -3545,7 +4052,7 @@ function OnboardingStep({ busyAction, check, index, isCurrent, onAction }) {
       ) : (
         <button className="ghost-btn compact" type="button" onClick={() => onAction(action.key)} disabled={busyAction === action.key}>
           {action.icon}
-          {busyAction === action.key ? 'Procesando' : action.label}
+          {busyAction === action.key ? 'Un momento…' : action.label}
         </button>
       )}
     </article>
@@ -3579,49 +4086,12 @@ function onboardingDetailLabel(check) {
   return check.detail ?? 'Pendiente';
 }
 
-function whatsappPathLabel(value) {
-  const labels = {
-    cloud_api_existing: 'Ya tiene integración oficial',
-    business_app_existing: 'Tiene WhatsApp Business App',
-    new_business: 'Empieza desde cero',
-  };
-  return labels[value] ?? 'Sin seleccionar';
-}
-
-function whatsappStepLabel(step) {
-  const byKey = {
-    diagnosis: 'Diagnóstico',
-    meta_auth: 'Autorización Meta',
-    business: 'Cuenta WhatsApp',
-    phone: 'Número y código',
-    webhook: 'Eventos de conexión',
-    test: 'Mensaje de prueba',
-  };
-  return byKey[step?.key] ?? String(step?.label ?? '').replace('Webhook', 'Eventos de conexión');
-}
-
-function whatsappStepDetail(step) {
-  const details = {
-    diagnosis: 'Preguntar si ya tiene WhatsApp Business, integración oficial o empieza desde cero.',
-    meta_auth: 'Guiar al cliente en Meta Business hasta habilitar la cuenta.',
-    business: 'Seleccionar o crear la cuenta WhatsApp del cliente, negocio, nombre visible y categoría.',
-    phone: 'Validar el número del cliente, recibir el código y obtener el identificador del número.',
-    webhook: 'Conectar los mensajes entrantes de WhatsApp con la URL pública de la plataforma.',
-    test: 'Enviar un mensaje real cuando la URL pública esté publicada.',
-  };
-  return details[step?.key] ?? String(step?.detail ?? '')
-    .replaceAll('phone_number_id', 'identificador del número')
-    .replaceAll('WABA', 'cuenta WhatsApp')
-    .replaceAll('webhook', 'evento de conexión')
-    .replaceAll('Webhook', 'Evento de conexión');
-}
-
-function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConfig, tenant }) {
+function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onAction, onOpenPlatformControl, onSelectOnboardingTab, tenant }) {
   const paths = [
     {
       key: 'cloud_api_existing',
       title: 'Ya tiene integración oficial',
-      detail: 'Conectamos la cuenta, el número y la referencia segura del negocio existente.',
+      detail: 'Conectamos la cuenta y el número del negocio que ya usa la integración oficial.',
       hasWhatsAppBusiness: true,
     },
     {
@@ -3637,105 +4107,186 @@ function WhatsAppActivationWizard({ busyAction, onboarding, onAction, onOpenConf
       hasWhatsAppBusiness: false,
     },
   ];
+  const [registrationPin, setRegistrationPin] = useState('');
   const currentPath = onboarding.setupPath;
   const connected = onboarding.status === 'connected';
+  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
+  const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
+  const platformBlock = onboarding.reason === 'meta_app_review_pending'
+    ? whatsappMetaReviewCopy(onboarding.platformReadiness?.appReviewStatus)
+    : onboarding.reason === 'status_unavailable'
+      ? {
+        title: 'No pudimos comprobar el estado de Meta',
+        detail: 'Vuelve a comprobar el progreso cuando se restablezca la conexión con Ventas IA. Por ahora no ingreses datos técnicos.',
+      }
+    : onboarding.reason === 'meta_webhook_not_configured'
+      ? {
+        title: 'Estamos terminando de habilitar el canal de mensajes',
+        detail: 'Tu tienda ya eligió cómo conectarse. Falta activar una vez el receptor seguro de mensajes de Meta para toda la plataforma. No debes copiar datos ni hacer nada en Meta todavía.',
+      }
+      : {
+        title: 'Meta aún no está habilitado en Ventas IA',
+        detail: 'Este paso depende de una configuración única de la plataforma, no de tu tienda. Cuando esté lista aparecerá “Conectar con Meta” y podrás hacerlo en una ventana guiada, sin copiar códigos ni credenciales.',
+      };
+  const platformPending = !connected && !onboarding.canAutomate;
+  const connectionChecklist = [
+    {
+      title: 'Tu acceso a Facebook o Meta',
+      detail: 'Usa la cuenta que administra el negocio. Si todavía no existe un negocio en Meta, podrás crearlo durante el proceso.',
+    },
+    {
+      title: 'El celular con el número de la tienda',
+      detail: 'Meta enviará un código por SMS o llamada para confirmar que el número es de tu negocio.',
+    },
+    {
+      title: 'El nombre visible de la tienda',
+      detail: 'Meta te pedirá revisar el nombre y la categoría que verán tus clientes en WhatsApp.',
+    },
+  ];
   return (
     <article className="guide-panel whatsapp-wizard">
       <div className="wizard-heading">
         <div>
           <span className="eyebrow">Activación WhatsApp Business</span>
-          <h3>Conexión guiada del canal del cliente</h3>
-          <p>Primero identificamos el punto de partida. Si el alta guiada de Meta está configurada, la microapp abre la conexión; si no, deja una guía operativa paso a paso.</p>
+          <h3>Conecta el WhatsApp de tu tienda</h3>
+          <p>Elige tu punto de partida. Después Meta te pedirá iniciar sesión, confirmar el negocio y verificar el número. Ventas IA completa lo técnico.</p>
         </div>
         <span className={`automation-chip ${onboarding.canAutomate ? 'is-ready' : 'is-manual'}`}>
-          {onboarding.canAutomate ? 'Alta guiada disponible' : 'Guía asistida'}
+          {connected ? 'Canal conectado' : onboarding.canAutomate ? 'Conexión automática' : 'Activación pendiente'}
         </span>
       </div>
 
-      <div className="whatsapp-path-grid">
+      {!platformPending && <div className="whatsapp-path-grid">
         {paths.map((path) => (
           <button
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
             disabled={busyAction === 'whatsapp-intent' || connected}
             key={path.key}
-            onClick={() => onAction('intent', {
-              setupPath: path.key,
-              hasWhatsAppBusiness: path.hasWhatsAppBusiness,
-              businessName: tenant.name,
-              contactPhone: tenant.whatsappNumber,
-            })}
+            onClick={() => {
+              setRegistrationPin('');
+              onAction('intent', {
+                setupPath: path.key,
+                hasWhatsAppBusiness: path.hasWhatsAppBusiness,
+                businessName: tenant.name,
+                contactPhone: tenant.whatsappNumber,
+              });
+            }}
             type="button"
           >
             <span>{path.title}</span>
             <strong>{path.detail}</strong>
           </button>
         ))}
-      </div>
+      </div>}
 
       <div className="wizard-content-grid">
-        <div className="whatsapp-step-list">
-          {onboarding.steps.map((step) => (
-            <div className={`whatsapp-step is-${step.status}`} key={step.key}>
-              <span>{step.status === 'done' ? <Check size={14} /> : step.status === 'locked' ? <Lock size={14} /> : <MessageCircle size={14} />}</span>
+        {platformPending ? (
+          <div className="whatsapp-pending-guide">
+            <span className="eyebrow">Prepárate para conectar tu número</span>
+            <h4>Cuando Ventas IA habilite el botón, esto es lo único que necesitarás.</h4>
+            <p>
+              La conexión se abrirá desde esta misma pantalla. Meta te llevará paso a paso y Ventas IA guardará
+              la conexión de forma segura para tu tienda.
+            </p>
+            <div className="whatsapp-readiness-list">
+              {connectionChecklist.map((item, index) => (
+                <div className="whatsapp-readiness-item" key={item.title}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{item.title}</strong>
+                    <p>{item.detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="whatsapp-no-technical-info">
+              <ShieldCheck size={18} />
+              <p>No tendrás que buscar identificadores, tokens, enlaces de webhook ni códigos técnicos en Meta.</p>
+            </div>
+            <div className="whatsapp-pending-actions">
+              <button className="approve-btn" type="button" onClick={() => onSelectOnboardingTab('google')}>
+                <Database size={16} />
+                Revisar mi catálogo
+              </button>
+              <button className="ghost-btn" type="button" onClick={() => onSelectOnboardingTab('test')}>
+                <Play size={16} />
+                Conocer la prueba guiada
+              </button>
+            </div>
+          </div>
+        ) : (
+        <div className="whatsapp-flow-summary">
+          <div>
+              <span>1</span>
+              <div><strong>Elige cómo usas WhatsApp hoy</strong><p>Cuéntanos si ya tienes WhatsApp Business, una integración oficial o si empiezas desde cero.</p></div>
+          </div>
+          <div>
+              <span>2</span>
+              <div><strong>Confirma el negocio y el número</strong><p>En la ventana de Meta inicia sesión, elige o crea tu negocio y recibe un código por SMS o llamada.</p></div>
+          </div>
+          <div>
+              <span>3</span>
+              <div><strong>Vuelve y prueba tu canal</strong><p>Ventas IA valida la conexión y te acompaña con una conversación de prueba antes de recibir pedidos.</p></div>
+          </div>
+        </div>
+        )}
+        <div className="whatsapp-sidecar">
+          {connected ? (
+            <div className="whatsapp-connected-summary">
+              <CheckCircle2 size={20} />
               <div>
-                <strong>{whatsappStepLabel(step)}</strong>
-                <p>{whatsappStepDetail(step)}</p>
+                <strong>WhatsApp conectado</strong>
+                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
               </div>
             </div>
-          ))}
-        </div>
-        <div className="whatsapp-sidecar">
-          <div className="manual-guide">
-            <strong>{connected ? 'Canal conectado' : onboarding.canAutomate ? 'Listo para alta guiada Meta' : 'Pendiente configuración Meta'}</strong>
-            <p>
-              {connected
-                ? `El identificador ${onboarding.binding.phoneNumberId} ya está asociado a esta tienda.`
-                : onboarding.canAutomate
-                  ? 'El siguiente paso abre Meta para seleccionar negocio, cuenta WhatsApp y número.'
-                  : 'Para automatizar desde la interfaz falta configurar el alta guiada de Meta; mientras tanto la pantalla guía el alta manual.'}
-            </p>
-          </div>
-          <div className="resource-list compact-resource-list">
-            <ResourceRow icon={Store} label="Ruta" value={whatsappPathLabel(currentPath)} />
-            <ResourceRow icon={MessageCircle} label="Número" value={onboarding.binding.displayPhoneNumber ?? 'Pendiente'} />
-            <ResourceRow icon={KeyRound} label="Referencia segura" value={onboarding.binding.accessTokenRef ?? tenant.config?.whatsapp?.accessTokenRef ?? 'Pendiente'} />
-          </div>
-          <div className="button-row">
-            <button
-              className="approve-btn"
-              disabled={!currentPath || Boolean(busyAction) || connected}
-              onClick={() => onAction('start', {})}
-              type="button"
-            >
-              <Send size={16} />
-              {onboarding.canAutomate ? 'Iniciar alta guiada' : 'Preparar guía'}
-            </button>
-            <button className="ghost-btn" type="button" onClick={onOpenConfig}>
-              <Settings2 size={16} />
-              Configuración avanzada
-            </button>
-          </div>
+          ) : onboarding.canAutomate ? (
+            <>
+              <div className="manual-guide">
+                <strong>Listo para conectar</strong>
+                <p>Al continuar se abrirá una ventana segura de Meta. Ten a mano el celular con tu número y el acceso al negocio. No tendrás que copiar tokens ni identificadores.</p>
+              </div>
+              {requiresRegistrationPin && (
+                <label className="whatsapp-pin-field">
+                  <span>Crea un PIN de seguridad de 6 dígitos</span>
+                  <input
+                    autoComplete="new-password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) => setRegistrationPin(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="••••••"
+                    type="password"
+                    value={registrationPin}
+                  />
+                  <small>Meta lo usa para proteger el número. Guárdalo: Ventas IA no lo almacena.</small>
+                </label>
+              )}
+              <button
+                className="approve-btn whatsapp-connect-button"
+                disabled={!canStart || Boolean(busyAction)}
+                onClick={() => onAction('start', { registrationPin })}
+                type="button"
+              >
+                <Send size={16} />
+                Conectar con Meta
+              </button>
+            </>
+          ) : (
+            <div className="whatsapp-unavailable">
+              <AlertTriangle size={20} />
+              <div>
+                <strong>{platformBlock.title}</strong>
+                <p>{platformBlock.detail} Cuando Meta termine este paso, aquí aparecerá “Conectar con Meta”. El número se ingresará en la ventana segura de Meta.</p>
+                {isPlatformAdmin && (
+                  <button className="ghost-btn compact" type="button" onClick={onOpenPlatformControl}>
+                    <Settings2 size={15} />
+                    Revisar configuración de plataforma
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {!connected && !onboarding.canAutomate && (
-        <div className="manual-guide manual-guide-wide">
-          <strong>La conexión manual no activa el canal por sí sola</strong>
-          <p>
-            El administrador debe configurar Meta o validar la conexión después del registro. Así evitamos guardar un número que no pertenezca a esta tienda ni usar credenciales compartidas.
-          </p>
-          <div className="button-row">
-            <a className="ghost-btn" href={onboarding.externalLinks?.businessSuite} target="_blank" rel="noreferrer">
-              <Building2 size={16} />
-              Abrir Meta Business
-            </a>
-            <button className="ghost-btn" type="button" onClick={onOpenConfig}>
-              <Settings2 size={16} />
-              Ver requisitos
-            </button>
-          </div>
-        </div>
-      )}
     </article>
   );
 }
@@ -3775,6 +4326,7 @@ function fallbackWhatsAppOnboarding(tenant) {
     status: phoneNumberId ? 'connected' : 'needs_path',
     automationMode: 'guided_manual',
     canAutomate: false,
+    reason: 'status_unavailable',
     nextAction: phoneNumberId ? 'validate' : 'choose_setup_path',
     binding: {
       phoneNumberId,
@@ -3852,11 +4404,11 @@ function onboardingStepMeta(key) {
 
 function onboardingStepAction(key) {
   const action = {
-    subscription: { key: 'subscription', label: 'Activar prueba local', icon: <CircleDollarSign size={15} /> },
+    subscription: { key: 'subscription', label: 'Iniciar prueba de 7 días', icon: <CircleDollarSign size={15} /> },
     google_oauth: { key: 'google-oauth', label: 'Conectar Google', icon: <UserCheck size={15} /> },
     google_provisioning: { key: 'provision', label: 'Provisionar', icon: <Database size={15} /> },
     llm: { key: 'config-llm', label: 'Configurar', icon: <Bot size={15} /> },
-    whatsapp: { key: 'config-whatsapp', label: 'Configurar', icon: <MessageCircle size={15} /> },
+    whatsapp: { key: 'config-whatsapp', label: 'Ver conexión WhatsApp', icon: <MessageCircle size={15} /> },
   };
   return action[key] ?? { key: 'validate', label: 'Validar', icon: <RotateCcw size={15} /> };
 }
@@ -3864,10 +4416,10 @@ function onboardingStepAction(key) {
 function nextOnboardingAction(status, isPlatformAdmin = false) {
   if (status.readyForOperation) {
     return {
-      action: 'validate',
-      label: 'Revalidar',
+      action: 'open-orders',
+      label: 'Ver pedidos',
       title: 'La tienda ya puede operar',
-      detail: 'Suscripción, Google, DeepSeek y WhatsApp están completos para esta tienda.',
+      detail: 'Ya puedes recibir pedidos por WhatsApp y encontrarlos organizados para preparar.',
     };
   }
   if (status.readyForActivation) {
@@ -3886,13 +4438,29 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
       detail: 'La validación de prerequisitos está completa; falta marcar la tienda como operativa.',
     };
   }
+  if (status.nextStep === 'llm' && !isPlatformAdmin) {
+    return {
+      action: null,
+      label: 'Preparación de plataforma',
+      title: 'Estamos dejando listo el motor de atención',
+      detail: 'Este paso lo administra Ventas IA. No necesitas configurar nada ni compartir una clave.',
+    };
+  }
+  if (status.nextStep === 'subscription' && !isPlatformAdmin) {
+    return {
+      action: 'subscription',
+      label: 'Iniciar prueba de 7 días',
+      title: 'Empieza tu prueba gratuita',
+      detail: 'Tendrás 7 días para conectar Google, cargar productos y conocer la plataforma. Al terminar, te pediremos activar tu plan.',
+    };
+  }
   const stepAction = onboardingStepAction(status.nextStep);
   const titles = {
-    subscription: ['Validar suscripción', 'El acceso depende del pago mensual de la plataforma en Mercado Pago.'],
-    google_oauth: ['Conectar Google', 'La microapp necesita autorización segura para crear y leer los archivos del cliente.'],
-    google_provisioning: ['Crear estructura Google', 'Se deben aprovisionar Drive y Google Sheets con catálogo, clientes y pedidos.'],
+    subscription: ['Empieza tu prueba gratuita', 'Tendrás 7 días para dejar lista la tienda antes de activar tu plan mensual.'],
+    google_oauth: ['Conectar tu cuenta Google', 'Con tu permiso, la tienda podrá consultar productos y guardar pedidos en tus archivos.'],
+    google_provisioning: ['Crear la hoja de tu tienda', 'Aquí estarán tus productos, clientes y pedidos.'],
     llm: ['Revisar Motor IA de la plataforma', 'El motor se administra desde Centro de control y se consume transversalmente.'],
-    whatsapp: ['Separar WhatsApp por tienda', 'La conexión solo debe aceptar mensajes del identificador configurado para esta tienda.'],
+    whatsapp: ['Conectar tu WhatsApp', 'Te guiaremos para conectar el número de tu tienda y probar un mensaje.'],
   };
   const [title, detail] = titles[status.nextStep] ?? ['Completar configuración', 'Hay controles pendientes antes de activar operación.'];
   return {
@@ -3900,11 +4468,11 @@ function nextOnboardingAction(status, isPlatformAdmin = false) {
     label: stepAction.label,
     title,
     detail,
-    secondary: ['llm', 'whatsapp'].includes(status.nextStep) ? { label: 'Abrir configuración', view: 'config' } : null,
+    secondary: status.nextStep === 'llm' && isPlatformAdmin ? { label: 'Abrir configuración', view: 'config' } : null,
   };
 }
 
-function AnalyticsView({ conversations: conversationItems, events, requests: requestItems, tools: toolItems, usage }) {
+function AnalyticsView({ conversations: conversationItems, events, requests: requestItems, tools: toolItems, usage, isPlatformAdmin = false }) {
   const [activeAnalyticsTab, setActiveAnalyticsTab] = useState('usage');
   const stages = ['catalog', 'approval', 'handoff', 'binding', 'payment', 'off_hours'];
   const activeCount = conversationItems.filter((conversation) => conversation.status === 'live').length;
@@ -3985,18 +4553,20 @@ function AnalyticsView({ conversations: conversationItems, events, requests: req
           </div>
           <div className="capacity-ring-grid">
             <CapacityRing label="Domicilios" value={usage.metrics.deliveries_confirmed} limit={usage.limits.includedDeliveries} percent={deliveriesPct} />
-            <CapacityRing label="Interacciones" value={usage.metrics.agent_interactions} limit={usage.limits.includedInteractions} percent={interactionsPct} />
+            {isPlatformAdmin && <CapacityRing label="Mensajes procesados" value={usage.metrics.agent_interactions} limit={usage.limits.includedInteractions} percent={interactionsPct} />}
           </div>
-          <div className="usage-mini-grid">
-            <div>
-              <span>Motor IA</span>
-              <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)} tokens</strong>
+          {isPlatformAdmin && (
+            <div className="usage-mini-grid">
+              <div>
+                <span>Tokens IA</span>
+                <strong>{formatCompactNumber(usage.metrics.llm_total_tokens)}</strong>
+              </div>
+              <div>
+                <span>Herramientas</span>
+                <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
+              </div>
             </div>
-            <div>
-              <span>Herramientas</span>
-              <strong>{formatCompactNumber(usage.metrics.tool_calls)}</strong>
-            </div>
-          </div>
+          )}
         </article>
         )}
         {activeAnalyticsTab === 'flow' && (
@@ -4557,8 +5127,8 @@ function billingPlanDraft(plan) {
     name: plan?.name ?? 'Plan crecimiento',
     description: plan?.description ?? 'Plan mensual para comercios con mayor volumen operativo.',
     amount: plan?.amount ?? 129000,
-    includedDeliveries: plan?.includedDeliveries ?? 1500,
-    includedInteractions: plan?.includedInteractions ?? 7500,
+    includedDeliveries: plan?.includedDeliveries ?? 400,
+    includedInteractions: plan?.includedInteractions ?? 2700,
     trialEnabled: Boolean(plan?.trialEnabled ?? false),
     trialDays: Number(plan?.trialDays ?? 0),
     graceDays: Number(plan?.graceDays ?? 5),
@@ -4833,6 +5403,7 @@ function ObservabilityView({ overview }) {
   const [activeObservabilityTab, setActiveObservabilityTab] = useState('monitor');
   const [webhookFilters, setWebhookFilters] = useState({ tenantId: '', provider: '', status: '', from: '', to: '', q: '' });
   const [webhookData, setWebhookData] = useState({ summary: overview?.platform?.webhookSummary ?? {}, events: overview?.recentWebhooks ?? [] });
+  const [outboxData, setOutboxData] = useState({ summary: overview?.platform?.outboxSummary ?? {}, entries: overview?.recentOutbox ?? [] });
   const [webhookBusy, setWebhookBusy] = useState(false);
   const [selectedWebhookId, setSelectedWebhookId] = useState('');
   const [selectedWebhook, setSelectedWebhook] = useState(null);
@@ -4841,23 +5412,32 @@ function ObservabilityView({ overview }) {
 
   useEffect(() => {
     let cancelled = false;
-    async function loadWebhooks() {
+    async function loadObservability() {
       setWebhookBusy(true);
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(webhookFilters)) {
         if (value) params.set(key, value);
       }
       params.set('limit', '500');
+      const outboxParams = new URLSearchParams({ limit: '100' });
+      if (webhookFilters.tenantId) outboxParams.set('tenantId', webhookFilters.tenantId);
       try {
-        const response = await fetch(`/api/admin/webhooks?${params}`, { credentials: 'include' });
-        const payload = await response.json().catch(() => ({}));
+        const [response, outboxResponse] = await Promise.all([
+          fetch(`/api/admin/webhooks?${params}`, { credentials: 'include' }),
+          fetch(`/api/admin/outbox?${outboxParams}`, { credentials: 'include' }),
+        ]);
+        const [payload, outboxPayload] = await Promise.all([
+          response.json().catch(() => ({})),
+          outboxResponse.json().catch(() => ({})),
+        ]);
         if (!cancelled && response.ok) setWebhookData(payload);
+        if (!cancelled && outboxResponse.ok) setOutboxData(outboxPayload);
       } finally {
         if (!cancelled) setWebhookBusy(false);
       }
     }
-    loadWebhooks();
-    const timer = window.setInterval(loadWebhooks, 7000);
+    loadObservability();
+    const timer = window.setInterval(loadObservability, 7000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -4889,9 +5469,11 @@ function ObservabilityView({ overview }) {
   }
 
   const webhookSummary = webhookData.summary ?? {};
+  const outboxSummary = outboxData.summary ?? {};
   const observabilityTabs = [
     ['monitor', Activity, 'Monitor', `${webhookSummary.total ?? 0} eventos`],
     ['events', ListFilter, 'Eventos', `${(webhookData.events ?? []).length} visibles`],
+    ['queue', Clock3, 'Cola', `${outboxSummary.pending ?? 0} pendientes`],
     ['detail', Eye, 'Detalle', selectedWebhook ? eventStatusLabel(selectedWebhook.status) : 'Sin selección'],
   ];
   function inspectWebhook(id) {
@@ -4994,8 +5576,28 @@ function ObservabilityView({ overview }) {
             <AdminKpi label="Procesados" value={webhookSummary.processed ?? 0} />
             <AdminKpi label="Errores" value={webhookSummary.failed ?? 0} />
             <AdminKpi label="Rechazados" value={webhookSummary.rejected ?? 0} />
-            <AdminKpi label="Promedio" value={`${webhookSummary.avgDurationMs ?? 0} ms`} />
+            <AdminKpi label="Cola pendiente" value={outboxSummary.pending ?? 0} />
           </div>
+        </div>
+        <div className="webhook-table tab-queue">
+          {(outboxData.entries ?? []).map((entry) => (
+            <div className="webhook-row" key={entry.id}>
+              <time>{formatDateTime(entry.createdAt)}</time>
+              <strong>{outboxKindLabel(entry.kind)}</strong>
+              <span>{entry.tenantId ?? 'Plataforma'}</span>
+              <span>{entry.aggregateId ?? 'Sin agregado'}</span>
+              <b className={`webhook-status is-${entry.status}`}>{outboxStatusLabel(entry.status)}</b>
+              <code>{entry.attempts} intento{entry.attempts === 1 ? '' : 's'}</code>
+              <span>{entry.lastError ?? formatDateTime(entry.nextAttemptAt ?? entry.processedAt)}</span>
+            </div>
+          ))}
+          {!(outboxData.entries ?? []).length && (
+            <div className="empty-state">
+              <Clock3 size={24} />
+              <h3>Sin trabajos en cola</h3>
+              <p>Los trabajos de WhatsApp y sincronización aparecerán aquí cuando se encolen.</p>
+            </div>
+          )}
         </div>
         <div className="webhook-investigation-grid">
           <div className="webhook-table tab-events">
@@ -5312,13 +5914,36 @@ function eventStatusLabel(value) {
   return labels[value] ?? value ?? 'Sin estado';
 }
 
+function outboxStatusLabel(value) {
+  const labels = {
+    pending: 'Pendiente',
+    processing: 'Procesando',
+    retrying: 'Reintentando',
+    failed: 'Fallo terminal',
+    processed: 'Completado',
+  };
+  return labels[value] ?? value ?? 'Sin estado';
+}
+
+function outboxKindLabel(value) {
+  const labels = {
+    'whatsapp.inbound_processing': 'Mensaje entrante',
+    'order.sheet_create': 'Pedido a Sheets',
+    'order.sheet_projection': 'Estado a Sheets',
+  };
+  return labels[value] ?? value ?? 'Trabajo externo';
+}
+
 function planLabel(value) {
   const labels = {
     'Production pilot': 'Piloto productivo',
     'Design binding': 'Conexión en curso',
     'Human review': 'Revisión asistida',
-    'ventas ia 1000 domicilios': 'Plan 1.000 domicilios',
-    ventas_ia_1000_domicilios: 'Plan 1.000 domicilios',
+    'ventas ia 400 domicilios': 'Plan Basico',
+    ventas_ia_400_domicilios: 'Plan Basico',
+    'ventas ia 1000 domicilios': 'Plan Basico',
+    ventas_ia_1000_domicilios: 'Plan Basico',
+    'ventas ia basico': 'Plan Basico',
   };
   return labels[value] ?? value;
 }
@@ -5487,8 +6112,23 @@ function formatFullDateTime(value) {
   }).format(new Date(value));
 }
 
-function Configuration({ onSaveConfig, tenant, tools: toolList }) {
+function editablePaymentMethods(methods) {
+  const defaults = [
+    { id: 'cash', label: 'Efectivo', enabled: true },
+    { id: 'card_terminal', label: 'Tarjeta', enabled: true },
+    { id: 'bre_b', label: 'Bre-B', enabled: true },
+  ];
+  if (!Array.isArray(methods) || !methods.length) return defaults;
+  return methods.map((method, index) => ({
+    id: method.id ?? `payment_${index + 1}`,
+    label: method.label ?? method.id ?? `Forma de pago ${index + 1}`,
+    enabled: method.enabled !== false,
+  }));
+}
+
+function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
+  const [paymentMethods, setPaymentMethods] = useState(() => editablePaymentMethods(tenant.config?.orderPolicy?.paymentMethods));
   const [llmDraft, setLlmDraft] = useState(() => ({
     phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
     phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -5496,8 +6136,8 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
     verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
     appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
     spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-    catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
-    tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
+    catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:P1000',
+    tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
     humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
     customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
@@ -5514,8 +6154,8 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
       verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
       appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
       spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-      catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:J1000',
-      tone: tenant.config?.agentPolicy?.tone ?? 'tendero_bogotano',
+      catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:P1000',
+      tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
       humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
       customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
       ordersRange: tenant.config?.googleSheets?.ordersRange ?? 'Pedidos!A1:K500',
@@ -5524,7 +6164,21 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
       filePolicyRef: tenant.config?.googleDrive?.filePolicyRef ?? `${tenant.id.toUpperCase()}_DRIVE_FILE_POLICY_REF`,
       missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
     });
+    setPaymentMethods(editablePaymentMethods(tenant.config?.orderPolicy?.paymentMethods));
   }, [tenant]);
+  const updatePaymentMethod = (index, patch) => {
+    setPaymentMethods((current) => current.map((method, methodIndex) => methodIndex === index ? { ...method, ...patch } : method));
+  };
+  const addPaymentMethod = () => {
+    setPaymentMethods((current) => [...current, { id: `payment_${current.length + 1}`, label: 'Nuevo medio de pago', enabled: true }]);
+  };
+  const removePaymentMethod = (index) => {
+    setPaymentMethods((current) => current.length > 1 ? current.filter((_, methodIndex) => methodIndex !== index) : current);
+  };
+  const saveCustomerReplySettings = () => onSaveConfig({
+    agentPolicy: { tone: llmDraft.tone },
+    orderPolicy: { paymentMethods },
+  });
   const fields = [
     ['Identificador WhatsApp', 'WHATSAPP_PHONE_NUMBER_ID_REF', MessageCircle],
     ['Token de verificación', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', KeyRound],
@@ -5537,16 +6191,16 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
   const connectedTools = toolList.filter((tool) => ['sandbox_ready', 'production_ready', 'approval_required'].includes(tool.status)).length;
   const configTabs = [
     ['store', Store, 'Tienda', 'Datos base'],
-    ['google', Database, 'Google', googleStatusHint],
+    ['google', Database, 'Productos', googleStatusHint],
     ['whatsapp', MessageCircle, 'WhatsApp', llmDraft.phoneNumberId ? 'Conectado' : 'Pendiente'],
-    ['agent', Bot, 'Agente', 'Criterio comercial'],
-    ['tools', PlugZap, 'Conexiones', `${connectedTools}/${toolList.length}`],
+    ['agent', Bot, 'Cómo responde', 'Atención al cliente'],
+    ['tools', PlugZap, 'Estado técnico', `${connectedTools}/${toolList.length}`],
   ];
   return (
     <section className="config-layout">
       <div className="section-title split-title config-titlebar">
         <div>
-          <span className="eyebrow">Configuración sin código</span>
+          <span className="eyebrow">Tu negocio</span>
           <h2>{tenant.name}</h2>
         </div>
         <div className="config-tabs" role="tablist" aria-label="Secciones de configuración">
@@ -5569,7 +6223,16 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
       <div className={`config-tab-panel active-config-${activeConfigTab}`}>
         {activeConfigTab === 'store' && (
         <article className="settings-panel config-focus-panel">
-          <h3>Parámetros de la tienda</h3>
+          <h3>Tu tienda</h3>
+          <p>Revisa cómo está preparada tu tienda. Si necesitas conectar productos o WhatsApp, vuelve a la guía de puesta en marcha.</p>
+          <div className="owner-settings-summary">
+            <span><Store size={18} /> <strong>{tenant.name}</strong></span>
+            <span><ShoppingBag size={18} /> <strong>{planLabel(tenant.plan)}</strong></span>
+            <span><MessageCircle size={18} /> <strong>{tenant.whatsappNumber || 'WhatsApp por conectar'}</strong></span>
+          </div>
+          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>Revisar puesta en marcha <ArrowRight size={16} /></button>
+          <details className="advanced-config">
+            <summary>Ver detalles técnicos</summary>
           {fields.map(([label, value, Icon]) => (
             <label className="config-field" key={label}>
               <span>
@@ -5583,6 +6246,7 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             <ShieldCheck size={18} />
             <span>Los secretos se guardan como referencias por cliente; la app no muestra valores planos.</span>
           </div>
+          </details>
         </article>
         )}
         {activeConfigTab === 'google' && (
@@ -5597,13 +6261,13 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
           <div className="google-config-status">
             <div>
               <Database size={18} />
-              <span>Sheets</span>
-              <strong>{llmDraft.spreadsheetIdRef || 'Pendiente'}</strong>
+              <span>Productos y pedidos</span>
+              <strong>{googleStatusHint}</strong>
             </div>
             <div>
               <FileImage size={18} />
-              <span>Drive</span>
-              <strong>{llmDraft.rootFolderRef || 'Pendiente'}</strong>
+              <span>Archivos de la tienda</span>
+              <strong>{googleStatusHint}</strong>
             </div>
             <div>
               <ShieldCheck size={18} />
@@ -5611,6 +6275,12 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
               <strong>{googleStatusHint}</strong>
             </div>
           </div>
+          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
+            <ShieldCheck size={16} />
+            Revisar productos y archivos
+          </button>
+          <details className="advanced-config">
+            <summary>Ver referencias técnicas</summary>
           <div className="config-field-grid">
             <label className="config-field">
               <span>
@@ -5667,19 +6337,23 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
               </label>
             </div>
           </details>
-          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
-            <ShieldCheck size={16} />
-            Gestionar Google en Onboarding
-          </button>
+          </details>
           <div className="isolation-note">
             <ShieldCheck size={18} />
-            <span>OAuth, aprovisionamiento y reconexion se gestionan en Onboarding. Las referencias tecnicas quedan protegidas.</span>
+            <span>La conexión y los productos se revisan desde la guía de puesta en marcha.</span>
           </div>
         </article>
         )}
         {activeConfigTab === 'whatsapp' && (
         <article className="settings-panel config-focus-panel">
-          <h3>WhatsApp por tienda</h3>
+          <h3>WhatsApp de tu tienda</h3>
+          <p>Desde aquí puedes revisar la conexión del número que recibe los pedidos.</p>
+          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
+            <MessageCircle size={16} />
+            Revisar conexión de WhatsApp
+          </button>
+          <details className="advanced-config">
+            <summary>Ver referencias técnicas</summary>
           <label className="config-field">
             <span>
               <MessageCircle size={16} />
@@ -5715,32 +6389,51 @@ function Configuration({ onSaveConfig, tenant, tools: toolList }) {
             </span>
             <input value={llmDraft.appSecretRef} readOnly />
           </label>
-          <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>
-            <MessageCircle size={16} />
-            Gestionar WhatsApp en Onboarding
-          </button>
+          </details>
           <div className="isolation-note">
             <ShieldCheck size={18} />
-            <span>El cliente autoriza su cuenta en Meta desde Onboarding. Los tokens y la validacion del numero no se editan desde esta pantalla.</span>
+            <span>La conexión del número se completa en la guía de puesta en marcha.</span>
           </div>
         </article>
         )}
         {activeConfigTab === 'agent' && (
         <article className="settings-panel config-focus-panel">
-          <h3>Politica del agente</h3>
+          <h3>Cómo responde a tus clientes</h3>
           <div className="isolation-note">
             <Bot size={18} />
-            <span>Esta politica la administra la plataforma. El cliente no puede cambiar el criterio comercial, el escalamiento humano ni las reglas de pedido.</span>
+            <span>El asistente responde en español de Colombia y te pide ayuda cuando necesita una decisión.</span>
           </div>
           <div className="resource-list compact-resource-list">
-            <ResourceRow icon={Bot} label="Motor IA" value="DeepSeek global de plataforma" />
+            <ResourceRow icon={Bot} label="Asistente" value="Responde mensajes por WhatsApp" />
             <ResourceRow icon={MessageCircle} label="Idioma" value="Español de Colombia" />
-            <ResourceRow icon={UserCheck} label="Escalamiento" value="Activo por defecto" />
-            <ResourceRow icon={ShoppingBag} label="Cierre" value="Pedido confirmado -> preparacion humana" />
+            <ResourceRow icon={UserCheck} label="Ayuda de tu tienda" value="Te avisa cuando debes intervenir" />
+            <ResourceRow icon={ShoppingBag} label="Pedidos" value="Te entrega los pedidos confirmados para prepararlos" />
           </div>
-          <div className="isolation-note">
-            <Bot size={18} />
-            <span>Para solicitar cambios operativos, contacta al administrador de la plataforma.</span>
+          <div className="customer-reply-settings">
+            <label className="config-field">
+              <span><Bot size={16} /> Estilo de atención</span>
+              <select value={llmDraft.tone} onChange={(event) => setLlmDraft((current) => ({ ...current, tone: event.target.value }))}>
+                <option value="tendero_colombiano">Tendero colombiano</option>
+                <option value="formal_neutral">Formal y neutral</option>
+              </select>
+            </label>
+            <div className="payment-method-settings">
+              <div className="payment-method-heading">
+                <div>
+                  <strong>Formas de pago</strong>
+                  <span>El cliente las verá al confirmar su pedido.</span>
+                </div>
+                <button className="icon-btn" type="button" onClick={addPaymentMethod} title="Agregar forma de pago" aria-label="Agregar forma de pago"><Plus size={17} /></button>
+              </div>
+              {paymentMethods.map((method, index) => (
+                <div className="payment-method-row" key={`${method.id}-${index}`}>
+                  <input aria-label={`Nombre de forma de pago ${index + 1}`} value={method.label} onChange={(event) => updatePaymentMethod(index, { label: event.target.value })} />
+                  <label className="payment-method-enabled"><input type="checkbox" checked={method.enabled !== false} onChange={(event) => updatePaymentMethod(index, { enabled: event.target.checked })} /> Activa</label>
+                  <button className="icon-btn" type="button" onClick={() => removePaymentMethod(index)} disabled={paymentMethods.length === 1} title="Eliminar forma de pago" aria-label={`Eliminar ${method.label}`}><Trash2 size={16} /></button>
+                </div>
+              ))}
+            </div>
+            <button className="approve-btn" type="button" onClick={saveCustomerReplySettings}><Check size={16} />Guardar atención y pagos</button>
           </div>
         </article>
         )}

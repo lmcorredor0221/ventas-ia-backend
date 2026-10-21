@@ -1,4 +1,12 @@
 import { appendAuditEvent } from './authService.js';
+import {
+  advanceOrderDraft,
+  catalogSearchTextForItem,
+  isCurrentDraftVersion,
+  nextInteractionMissingFields,
+  requiredCustomerFields,
+  resolveCatalogItem,
+} from '../domain/semanticContracts.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null }) {
@@ -233,10 +241,22 @@ export class AgentRuntime {
           filters: search.filters,
           cache_policy: 'short_ttl',
         });
+        const offeredRows = catalog.rows.slice(0, 2);
+        this.recordCatalogDecision({
+          tenantId,
+          conversationId,
+          traceId: normalized.traceId,
+          query: search.query,
+          rows: catalog.rows,
+          selected: offeredRows[0] ?? null,
+          presentedRows: offeredRows,
+          decision: catalog.rows.length ? 'catalog_option_proposed' : 'catalog_no_match',
+          reason: 'multi_query_catalog_lookup',
+        });
         matches.push({
           query: search.query,
-          selected: catalog.rows[0] ?? null,
-          alternatives: catalog.rows.slice(1, 2),
+          selected: offeredRows[0] ?? null,
+          alternatives: offeredRows.slice(1),
         });
       }
       const selectedRows = matches.map((match) => match.selected).filter(Boolean);
@@ -250,7 +270,7 @@ export class AgentRuntime {
         tenantId,
         conversationId,
         fallbackText: quote,
-        facts: { kind: 'catalog_options', products: selectedRows, requiredTerms: selectedRows.map((item) => item.name) },
+        facts: { kind: 'catalog_options', products: selectedRows, requiredTerms: selectedRows.map(describeCatalogProduct) },
       });
 
       await this.patchConversation(conversationId, {
@@ -273,28 +293,47 @@ export class AgentRuntime {
       return { summary: hasMatches ? 'Catalog guided options sent' : 'Catalog search needs review', plan };
     }
 
-    const search = catalogSearches[0] ?? { query: text, filters: inferCatalogFilter(text) };
+    const search = enrichCatalogSearch(catalogSearches[0] ?? { query: text, filters: inferCatalogFilter(text) }, text);
     const query = search.query;
     const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
       range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
       filters: search.filters,
       cache_policy: 'short_ttl',
     });
-    const selected = catalog.rows[0];
-    const alternatives = catalog.rows.slice(1, 4);
+    const categorySearch = isCategorySearch({ query, filters: search.filters, text });
+    const presentedProducts = categorySearch
+      ? selectCatalogOptions(catalog.rows, 4, { query, text, plan })
+      : catalog.rows.slice(0, 4);
+    const selected = presentedProducts[0] ?? null;
+    const alternatives = presentedProducts.slice(1);
+    this.recordCatalogDecision({
+      tenantId,
+      conversationId,
+      traceId: normalized.traceId,
+      query,
+      rows: catalog.rows,
+      selected,
+      presentedRows: presentedProducts,
+      decision: selected ? 'catalog_option_proposed' : 'catalog_no_match',
+      reason: categorySearch ? 'category_or_occasion_lookup' : 'single_query_catalog_lookup',
+    });
     const drive = await this.tools.call('google_drive_file_picker', tenantId, conversationId, {
       file_ids: selected?.driveFileId ? [selected.driveFileId] : [],
       refresh_mode: 'on_demand',
     });
 
     const quote = selected
-      ? buildCatalogReply({ selected, alternatives, drive, delivery: Boolean(plan.order?.delivery), query })
+      ? buildCatalogReply({ selected, alternatives, drive, delivery: Boolean(plan.order?.delivery), categorySearch })
       : 'No encontre una coincidencia clara en el catalogo. Puedo pedir apoyo humano o buscar con mas detalles.';
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: quote,
-      facts: { kind: 'catalog_quote', products: selected ? [selected] : [], requiredTerms: selected ? [selected.name] : [] },
+      facts: {
+        kind: categorySearch ? 'catalog_options' : 'catalog_quote',
+        products: presentedProducts,
+        requiredTerms: presentedProducts.map(describeCatalogProduct),
+      },
     });
 
     await this.patchConversation(conversationId, {
@@ -320,21 +359,52 @@ export class AgentRuntime {
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
-    const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
+    const customerDelta = plan.semanticFrame?.customerDelta ?? {};
+    const orderCustomer = {
+      ...(customerProfile ?? {}),
+      name: customerDelta.name ?? customerProfile?.name ?? null,
+      defaultAddress: customerDelta.address ?? customerProfile?.defaultAddress ?? null,
+    };
+    const orderItems = [];
+    for (const [index, item] of (plan.order?.items ?? []).entries()) {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         range: tenant?.config?.googleSheets?.range,
         filters: deliveryItemFiltersFromPlan(plan, item, index),
         cache_policy: 'short_ttl',
       });
-      const product = selectAcceptableOrderProduct(catalog.rows, item);
-      return {
+      const rawItemId = item.rawItemId ?? `item-${index + 1}:${normalizeText(item.rawName ?? item.catalogQuery ?? '')}`;
+      const resolution = resolveCatalogItem({ item: { ...item, rawItemId }, rows: catalog.rows });
+      const product = resolution.status === 'resolved' ? resolution.product : null;
+      this.recordCatalogDecision({
+        tenantId,
+        conversationId,
+        traceId: normalized.traceId,
+        rawItemId,
+        query: catalogSearchTextForItem(item),
+        rows: catalog.rows,
+        selected: product,
+        presentedRows: resolution.status === 'needs_selection'
+          ? resolution.options.map((candidate) => candidate.product)
+          : product ? [product] : [],
+        decision: resolution.status,
+        reason: resolution.reason,
+      });
+      orderItems.push({
         ...item,
+        rawItemId,
         product,
-        presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
+        presentationOptions: resolution.status === 'needs_selection'
+          ? resolution.options.map((candidate) => candidate.product)
+          : [],
+        resolution: {
+          status: resolution.status,
+          reason: resolution.reason,
+          candidateCount: resolution.candidateSet.candidates.length,
+        },
         lineTotal: product && item.quantity ? product.price * item.quantity : product && item.budgetAmount ? item.budgetAmount : null,
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
-      };
-    }));
+      });
+    }
 
     const currentConversation = await this.getConversation(conversationId);
     const previousDraft = currentConversation?.orderDraft;
@@ -352,28 +422,43 @@ export class AgentRuntime {
       })
       : { status: 'not_requested', files: [], source_refs: [] };
 
-    const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
+    const missingFields = [
+      ...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
+      ...(plan.missingFields ?? []),
+      ...requiredCustomerFields({
+        requiredFields: tenant?.config?.orderPolicy?.customerRequiredFields,
+        delivery: Boolean(plan.order?.delivery ?? plan.semanticFrame?.delivery),
+        customerProfile,
+        customerDelta,
+      }),
+    ];
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
       if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
-      if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
+      if (!item.product) {
+        if (item.resolution?.status === 'needs_selection') missingFields.push(`presentation:${item.rawItemId}`);
+        else if (item.resolution?.reason === 'insufficient_stock') missingFields.push(`stock:${item.catalogQuery}`);
+        else missingFields.push(`product:${item.catalogQuery}`);
+      }
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
-      if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
+      if (item.product && hasExplicitPresentationMeasure(item.requestedPresentation) && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
         missingFields.push(`presentation:${item.catalogQuery}`);
       }
     }
     const paymentMethod = plan.order?.paymentMethod
       ?? previousDraft?.paymentMethod
-      ?? customerProfile?.preferences?.preferredPaymentMethod
+      ?? orderCustomer.preferences?.preferredPaymentMethod
       ?? null;
     if (!paymentMethod) missingFields.push('payment_method');
+    const normalizedMissingFields = dedupeOrderMissingFields(missingFields);
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
-    const requiresHumanResolution = needsHumanProductResolution(missingFields);
+    const requiresHumanResolution = needsHumanProductResolution(normalizedMissingFields);
+    const replyMissingFields = nextInteractionMissingFields(normalizedMissingFields);
     const reply = requiresHumanResolution
-      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile })
-      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields, customerProfile, subtotal, paymentMethods });
+      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields: normalizedMissingFields, customerProfile: orderCustomer })
+      : buildOrderReply({ orderItems: effectiveOrderItems, missingFields: replyMissingFields, customerProfile: orderCustomer, subtotal, paymentMethods });
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -384,12 +469,26 @@ export class AgentRuntime {
         subtotal,
         paymentMethod,
         paymentMethods,
-        missingFields,
-        requiredTerms: missingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+        missingFields: replyMissingFields,
+        requiredTerms: [
+          ...effectiveOrderItems.map((item) => item.product).filter(Boolean).map(describeCatalogProduct),
+          ...replyMissingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+        ],
       },
     });
-    const canQuote = missingFields.length === 0;
+    const canQuote = normalizedMissingFields.length === 0;
 
+    const nextDraft = advanceOrderDraft(previousDraft, {
+      delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
+      items: effectiveOrderItems,
+      missingFields: normalizedMissingFields,
+      paymentMethod,
+      paymentMethods,
+      customerName: orderCustomer.name,
+      deliveryAddress: orderCustomer.defaultAddress,
+      driveRefs: drive.source_refs ?? [],
+      driveStatus: drive.status,
+    });
     await this.patchConversation(conversationId, {
       stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
       zone: requiresHumanResolution ? 'approval' : canQuote ? 'quote' : 'agent',
@@ -399,16 +498,14 @@ export class AgentRuntime {
       need: normalized.text,
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: 'google_drive_file_picker',
-      orderDraft: {
-        delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
-        items: effectiveOrderItems,
-        missingFields: [...new Set(missingFields)],
-        paymentMethod,
-        paymentMethods,
-        subtotal,
-        driveRefs: drive.source_refs ?? [],
-        driveStatus: drive.status,
-      },
+      orderDraft: nextDraft,
+    });
+    this.recordOrderDraftTransition({
+      tenantId,
+      conversationId,
+      traceId: normalized.traceId,
+      draft: nextDraft,
+      reason: 'catalog_resolution',
     });
 
     if (requiresHumanResolution) {
@@ -417,10 +514,10 @@ export class AgentRuntime {
         urgency: 'Alta',
         assigned_team: 'ventas',
         context_snapshot: {
-          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields, customerProfile, text: normalized.text }),
+          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields: normalizedMissingFields, customerProfile: orderCustomer, text: normalized.text }),
           orderItems: effectiveOrderItems,
-          missingFields: [...new Set(missingFields)],
-          customerProfile,
+          missingFields: normalizedMissingFields,
+          customerProfile: orderCustomer,
           driveStatus: drive.status,
           driveRefs: drive.source_refs ?? [],
           plan,
@@ -428,26 +525,100 @@ export class AgentRuntime {
       });
     }
 
-    if (!customerProfile && canQuote && normalized.profileName) {
+    if (!customerProfile && canQuote && customerDelta.name) {
       await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
         wa_id: normalized.waId,
-        name: normalized.profileName ?? normalized.waId,
-        defaultAddress: customerProfile?.defaultAddress,
+        name: customerDelta.name,
+        defaultAddress: customerDelta.address ?? null,
         preferences: { channel: 'whatsapp', deliveryDefault: Boolean(plan.order?.delivery) },
       });
     }
 
-    const paymentOffer = !requiresHumanResolution && missingFields.includes('payment_method')
-      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+    const selectionItem = effectiveOrderItems.find((item) => item.resolution?.status === 'needs_selection');
+    const productSelectionOffer = !requiresHumanResolution && selectionItem
+      ? await this.createProductSelectionOffer({
+        tenantId,
+        conversationId,
+        item: selectionItem,
+        draftVersion: nextDraft.version,
+        body: customerReply,
+      })
+      : null;
+    const paymentOffer = !requiresHumanResolution && !productSelectionOffer && replyMissingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods, body: customerReply, draftVersion: nextDraft.version })
+      : null;
+    const confirmationOffer = !requiresHumanResolution && !productSelectionOffer && canQuote
+      ? await this.createConfirmationOffer({ tenantId, conversationId, body: customerReply, draftVersion: nextDraft.version })
       : null;
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      ...(paymentOffer ? { interactive: paymentOffer.interactive } : {}),
+      ...((productSelectionOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productSelectionOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
+  }
+
+  recordCatalogDecision({ tenantId, conversationId, traceId = null, rawItemId = null, query, rows = [], presentedRows = [], selected = null, decision, reason }) {
+    const catalogEvidence = (catalogRows) => catalogRows.slice(0, 10).map((row) => ({
+      sku: row.sku ?? null,
+      name: row.name ?? null,
+      presentation: row.presentation ?? null,
+      price: Number(row.price ?? 0),
+      matchScore: row.matchScore ?? null,
+      matchType: row.matchType ?? null,
+      stock: Number(row.stock ?? 0),
+      active: row.active !== false,
+      category: row.category ?? null,
+      productFamily: row.productFamily ?? row.family ?? null,
+      description: row.description ?? null,
+      tags: row.tags ?? [],
+    }));
+    const candidates = catalogEvidence(rows);
+    const presentedCandidates = catalogEvidence(presentedRows);
+    this.events.emit({
+      type: 'catalog.candidates.evaluated',
+      tenantId,
+      conversationId,
+      detail: `${decision}: ${selected?.sku ?? 'none'}`,
+      metadata: {
+        traceId,
+        rawItemId,
+        query: String(query ?? '').slice(0, 240),
+        decision,
+        reason,
+        selectedSku: selected?.sku ?? null,
+        selectedName: selected?.name ?? null,
+        candidateCount: rows.length,
+        candidates,
+        presentedCandidates,
+      },
+    });
+  }
+
+  recordOrderDraftTransition({ tenantId, conversationId, traceId = null, draft, reason }) {
+    const items = (draft?.items ?? []).map((item) => ({
+      rawItemId: item.rawItemId ?? null,
+      sku: item.product?.sku ?? null,
+      quantity: Number(item.quantity ?? 0) || null,
+      lineTotal: Number(item.lineTotal ?? 0) || 0,
+      resolution: item.resolution?.status ?? null,
+    }));
+    this.events.emit({
+      type: 'order.draft.updated',
+      tenantId,
+      conversationId,
+      detail: `${reason}: version ${Number(draft?.version ?? 0)}`,
+      metadata: {
+        traceId,
+        reason,
+        draftVersion: Number(draft?.version ?? 0),
+        subtotal: Number(draft?.subtotal ?? 0),
+        missingFields: draft?.missingFields ?? [],
+        items,
+      },
+    });
   }
 
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
@@ -472,10 +643,12 @@ export class AgentRuntime {
       });
     }
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
+    const customerName = orderDraft.customerName ?? customerProfile?.name ?? normalized.profileName ?? normalized.waId;
+    const deliveryAddress = orderDraft.deliveryAddress ?? customerProfile?.defaultAddress ?? 'Dirección pendiente por confirmar';
     const order = await this.tools.call('google_sheets_order_write', tenantId, conversationId, {
       wa_id: normalized.waId,
-      customer_name: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
-      delivery_address: customerProfile?.defaultAddress,
+      customer_name: customerName,
+      delivery_address: deliveryAddress,
       items: (orderDraft.items ?? []).map((item) => ({
         sku: item.product?.sku ?? item.skuHint,
         name: item.product?.name ?? item.catalogQuery,
@@ -493,7 +666,6 @@ export class AgentRuntime {
       unitPrice: item.product?.price ?? null,
       lineTotal: item.lineTotal ?? null,
     }));
-    const deliveryAddress = customerProfile?.defaultAddress ?? 'Dirección pendiente por confirmar';
     await this.tools.call('human_handoff', tenantId, conversationId, {
       reason: 'Alistar domicilio confirmado',
       urgency: 'Alta',
@@ -503,7 +675,7 @@ export class AgentRuntime {
         orderId: order.order.id,
         subtotal: orderDraft.subtotal,
         action: 'prepare_delivery_order',
-        customerName: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
+        customerName,
         customerWaId: normalized.waId,
         deliveryAddress,
         items: confirmedItems,
@@ -538,23 +710,33 @@ export class AgentRuntime {
   }
 
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
-    const draft = structuredClone(plan.order);
+    const activeConversation = await this.getConversation(conversationId);
+    // El plan de aclaracion describe solo el ultimo mensaje. El pedido ya
+    // resuelto (SKU, precio y cantidad) vive en la conversacion y no puede
+    // sustituirse por la extraccion parcial que entregue el LLM.
+    const draft = mergeClarificationOrderDraft(activeConversation?.orderDraft, plan.order, plan.missingFields);
     const collected = extractClarification(normalized.text);
     let nextProfile = customerProfile;
+    const draftCustomer = {
+      ...(customerProfile ?? {}),
+      name: collected.name ?? draft.customerName ?? customerProfile?.name ?? null,
+      defaultAddress: collected.defaultAddress ?? draft.deliveryAddress ?? customerProfile?.defaultAddress ?? null,
+    };
     if (collected.paymentMethod) {
       draft.paymentMethod = collected.paymentMethod;
     }
 
-    if (!nextProfile && (collected.name || collected.defaultAddress)) {
+    if (!nextProfile && draftCustomer.name && (!draft.delivery || draftCustomer.defaultAddress)) {
       const saved = await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
         wa_id: normalized.waId,
-        name: collected.name ?? normalized.profileName ?? normalized.waId,
-        defaultAddress: collected.defaultAddress,
-        addresses: collected.defaultAddress ? [{ label: 'principal', address: collected.defaultAddress }] : [],
+        name: draftCustomer.name,
+        defaultAddress: draftCustomer.defaultAddress,
+        addresses: draftCustomer.defaultAddress ? [{ label: 'principal', address: draftCustomer.defaultAddress }] : [],
         preferences: { channel: 'whatsapp', deliveryDefault: Boolean(draft.delivery) },
       });
       nextProfile = saved.profile;
     }
+    const profileForDraft = nextProfile ?? draftCustomer;
 
     for (const item of draft.items ?? []) {
       if (!item.quantity && collected.quantity) {
@@ -568,8 +750,8 @@ export class AgentRuntime {
     }
 
     const missingFields = (draft.missingFields ?? []).filter((field) => {
-      if (field === 'customer_name') return !(nextProfile?.name || collected.name);
-      if (field === 'delivery_address') return !(nextProfile?.defaultAddress || collected.defaultAddress);
+      if (field === 'customer_name') return !profileForDraft.name;
+      if (field === 'delivery_address') return !profileForDraft.defaultAddress;
       if (field === 'payment_method') return !draft.paymentMethod;
       if (field.startsWith('quantity:')) {
         const query = field.replace('quantity:', '');
@@ -584,21 +766,33 @@ export class AgentRuntime {
     draft.missingFields = [...new Set(missingFields)];
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
 
-    const canQuote = draft.missingFields.length === 0;
+    const nextDraft = advanceOrderDraft(draft, {
+      items: draft.items,
+      missingFields: draft.missingFields,
+      paymentMethod: draft.paymentMethod,
+      paymentMethods: draft.paymentMethods,
+      customerName: profileForDraft.name,
+      deliveryAddress: profileForDraft.defaultAddress,
+    });
+    const canQuote = nextDraft.missingFields.length === 0;
     const tenant = await this.getTenant(tenantId);
-    const paymentMethods = draft.paymentMethods ?? paymentMethodsForTenant(tenant);
-    draft.paymentMethods = paymentMethods;
-    const reply = buildOrderReply({ orderItems: draft.items ?? [], missingFields: draft.missingFields, customerProfile: nextProfile, subtotal: draft.subtotal, paymentMethods });
+    const paymentMethods = nextDraft.paymentMethods?.length ? nextDraft.paymentMethods : paymentMethodsForTenant(tenant);
+    nextDraft.paymentMethods = paymentMethods;
+    const replyMissingFields = nextInteractionMissingFields(nextDraft.missingFields);
+    const reply = buildOrderReply({ orderItems: nextDraft.items ?? [], missingFields: replyMissingFields, customerProfile: profileForDraft, subtotal: nextDraft.subtotal, paymentMethods });
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
       facts: {
         kind: 'order_clarification',
-        products: (draft.items ?? []).map((item) => item.product).filter(Boolean),
-        subtotal: draft.subtotal,
-        missingFields: draft.missingFields,
-        requiredTerms: draft.missingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+        products: (nextDraft.items ?? []).map((item) => item.product).filter(Boolean),
+        subtotal: nextDraft.subtotal,
+        missingFields: replyMissingFields,
+        requiredTerms: [
+          ...(nextDraft.items ?? []).map((item) => item.product).filter(Boolean).map(describeCatalogProduct),
+          ...replyMissingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
+        ],
       },
     });
 
@@ -606,21 +800,31 @@ export class AgentRuntime {
       stage: canQuote ? 'quote' : 'clarification',
       zone: canQuote ? 'quote' : 'agent',
       status: 'live',
-      value: canQuote ? formatCurrency(draft.subtotal) : 'Pendiente',
+      value: canQuote ? formatCurrency(nextDraft.subtotal) : 'Pendiente',
       progress: canQuote ? 64 : 48,
       nextStep: canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: collected.name || collected.defaultAddress ? 'google_sheets_customer_profile_upsert' : 'llm_core',
-      orderDraft: draft,
+      orderDraft: nextDraft,
+    });
+    this.recordOrderDraftTransition({
+      tenantId,
+      conversationId,
+      traceId: normalized.traceId,
+      draft: nextDraft,
+      reason: 'customer_clarification',
     });
 
-    const paymentOffer = draft.missingFields.includes('payment_method')
-      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
+    const paymentOffer = replyMissingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods, body: customerReply, draftVersion: nextDraft.version })
+      : null;
+    const confirmationOffer = canQuote
+      ? await this.createConfirmationOffer({ tenantId, conversationId, body: customerReply, draftVersion: nextDraft.version })
       : null;
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      ...(paymentOffer ? { interactive: paymentOffer.interactive } : {}),
+      ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
@@ -1016,7 +1220,7 @@ export class AgentRuntime {
     return this.store.getState().conversations.find((item) => item.id === conversationId);
   }
 
-  async createPaymentOffer({ tenantId, conversationId, paymentMethods }) {
+  async createPaymentOffer({ tenantId, conversationId, paymentMethods, body, draftVersion = 0 }) {
     if (!this.store.createInteractionOffer || !paymentMethods.length) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -1030,20 +1234,89 @@ export class AgentRuntime {
       id: offerId,
       tenantId,
       conversationId,
+      version: draftVersion,
       purpose: 'payment_method',
       options,
       expiresAt,
     });
-    const body = '¿Cómo prefieres pagar?';
+    const interactiveBody = String(body ?? '¿Cómo prefieres pagar?').trim().slice(0, 1_024) || '¿Cómo prefieres pagar?';
     return {
       offer,
       interactive: options.length <= 3
-        ? { kind: 'button', body, buttons: options.map(({ id, title }) => ({ id, title })) }
+        ? { kind: 'button', body: interactiveBody, buttons: options.map(({ id, title }) => ({ id, title })) }
         : {
           kind: 'list',
-          body,
+          body: interactiveBody,
           buttonLabel: 'Elegir pago',
           sectionTitle: 'Formas de pago',
+          rows: options.map(({ id, title }) => ({ id, title })),
+        },
+    };
+  }
+
+  async createConfirmationOffer({ tenantId, conversationId, body, draftVersion = 0 }) {
+    if (!this.store.createInteractionOffer) return null;
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const options = [
+      { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order', value: 'confirm' },
+      { id: `vi:${offerId}:2`, title: 'Ajustar pedido', action: 'adjust_order', value: 'adjust' },
+      { id: `vi:${offerId}:3`, title: 'Hablar con la tienda', action: 'human_handoff', value: 'human' },
+    ];
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      version: draftVersion,
+      purpose: 'order_confirmation',
+      options,
+      expiresAt,
+    });
+    return {
+      offer,
+      interactive: {
+        kind: 'button',
+        body: String(body ?? '¿Confirmas el pedido?').trim().slice(0, 1_024) || '¿Confirmas el pedido?',
+        buttons: options.map(({ id, title }) => ({ id, title })),
+      },
+    };
+  }
+
+  async createProductSelectionOffer({ tenantId, conversationId, item, draftVersion, body }) {
+    const products = (item.presentationOptions ?? [])
+      .filter((product) => product?.sku && product.active !== false && Number(product.stock ?? 0) >= Number(item.quantity ?? 1))
+      .slice(0, 10);
+    if (!this.store.createInteractionOffer || !products.length) return null;
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const options = products.map((product, index) => ({
+      id: `vi:${offerId}:${index + 1}`,
+      title: interactiveProductTitle(product),
+      action: 'select_product_variant',
+      value: product.sku,
+      rawItemId: item.rawItemId,
+      product,
+    }));
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      version: Number(draftVersion ?? 0),
+      purpose: 'product_variant',
+      rawItemId: item.rawItemId,
+      options,
+      expiresAt,
+    });
+    const interactiveBody = String(body ?? 'Elige la presentacion que prefieres.').trim().slice(0, 1_024) || 'Elige la presentacion que prefieres.';
+    return {
+      offer,
+      interactive: options.length <= 3
+        ? { kind: 'button', body: interactiveBody, buttons: options.map(({ id, title }) => ({ id, title })) }
+        : {
+          kind: 'list',
+          body: interactiveBody,
+          buttonLabel: 'Ver opciones',
+          sectionTitle: 'Presentaciones disponibles',
           rows: options.map(({ id, title }) => ({ id, title })),
         },
     };
@@ -1067,6 +1340,48 @@ export class AgentRuntime {
       });
     }
     if (result.option?.action !== 'set_payment_method') {
+      if (result.option?.action === 'select_product_variant') {
+        return this.handleProductSelection({ tenantId, conversationId, normalized, result });
+      }
+      if (result.option?.action === 'confirm_order') {
+        const conversation = await this.getConversation(conversationId);
+        const customerProfile = await this.getCustomerProfile(tenantId, normalized.waId);
+        return this.handleOrderConfirmation({
+          tenantId,
+          conversationId,
+          normalized,
+          customerProfile,
+          plan: { intent: 'order_confirmation', order: conversation?.orderDraft ?? {} },
+        });
+      }
+      if (result.option?.action === 'adjust_order') {
+        await this.patchConversation(conversationId, {
+          stage: 'clarification',
+          zone: 'agent',
+          status: 'live',
+          nextStep: 'Esperar el ajuste que indique el cliente.',
+        });
+        await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+          action: 'send_session_message',
+          wa_id: normalized.waId,
+          text: 'Claro, dime qué producto, cantidad, dirección o forma de pago quieres ajustar.',
+        });
+        return { summary: 'Interactive order adjustment requested', interaction: result.option };
+      }
+      if (result.option?.action === 'human_handoff') {
+        await this.tools.call('human_handoff', tenantId, conversationId, {
+          reason: 'Cliente solicita hablar con la tienda antes de confirmar el pedido',
+          urgency: 'Media',
+          assigned_team: 'ventas',
+          context_snapshot: { action: 'order_confirmation_support', interaction: result.option },
+        });
+        await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+          action: 'send_session_message',
+          wa_id: normalized.waId,
+          text: 'Listo, te conecto con la tienda para revisar el pedido contigo.',
+        });
+        return { summary: 'Interactive human handoff requested', interaction: result.option };
+      }
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
     }
     const conversation = await this.getConversation(conversationId);
@@ -1075,11 +1390,22 @@ export class AgentRuntime {
     draft.missingFields = (draft.missingFields ?? []).filter((field) => field !== 'payment_method');
     const paymentLabel = paymentMethodLabel(result.option.value, draft.paymentMethods);
     const fallbackText = `Listo, queda ${paymentLabel} como forma de pago. ${draft.missingFields.length ? 'Aún necesito completar los datos pendientes para continuar.' : `El subtotal es ${formatCurrency(draft.subtotal ?? 0)}. ¿Confirmas el pedido?`}`;
+    const nextDraft = advanceOrderDraft(draft, {
+      paymentMethod: draft.paymentMethod,
+      missingFields: draft.missingFields,
+    });
     await this.patchConversation(conversationId, {
-      orderDraft: draft,
+      orderDraft: nextDraft,
       stage: draft.missingFields.length ? 'clarification' : 'quote',
       zone: draft.missingFields.length ? 'agent' : 'quote',
       nextStep: draft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
+    });
+    this.recordOrderDraftTransition({
+      tenantId,
+      conversationId,
+      traceId: normalized.traceId,
+      draft: nextDraft,
+      reason: 'payment_selection',
     });
     const text = await this.composeCustomerReply({
       tenantId,
@@ -1087,12 +1413,106 @@ export class AgentRuntime {
       fallbackText,
       facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [paymentLabel] },
     });
+    const confirmationOffer = nextDraft.missingFields.length
+      ? null
+      : await this.createConfirmationOffer({ tenantId, conversationId, body: text, draftVersion: nextDraft.version });
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text,
+      ...(confirmationOffer ? { interactive: confirmationOffer.interactive } : {}),
     });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async handleProductSelection({ tenantId, conversationId, normalized, result }) {
+    const conversation = await this.getConversation(conversationId);
+    const draft = structuredClone(conversation?.orderDraft ?? {});
+    if (!isCurrentDraftVersion(draft, result.offer?.version)) {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: 'Esa opcion corresponde a una version anterior del pedido. Te envio las opciones vigentes.',
+      });
+    }
+    const rawItemId = result.option?.rawItemId;
+    const selectedProduct = result.option?.product;
+    const currentItem = (draft.items ?? []).find((item) => item.rawItemId === rawItemId);
+    if (!rawItemId || !selectedProduct?.sku || !currentItem || Number(selectedProduct.stock ?? 0) < Number(currentItem.quantity ?? 1)) {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: 'Esa presentacion ya no esta disponible para este pedido. La tienda la revisara contigo.',
+      });
+    }
+    const items = (draft.items ?? []).map((item) => item.rawItemId === rawItemId
+      ? {
+        ...item,
+        product: selectedProduct,
+        presentationOptions: [],
+        resolution: { status: 'resolved', reason: 'interactive_customer_selection', candidateCount: 1 },
+        lineTotal: selectedProduct.price * Number(item.quantity ?? 1),
+        available: true,
+      }
+      : item);
+    const missingFields = (draft.missingFields ?? []).filter((field) => field !== `presentation:${rawItemId}`);
+    const nextDraft = advanceOrderDraft(draft, { items, missingFields });
+    const tenant = await this.getTenant(tenantId);
+    const paymentMethods = nextDraft.paymentMethods ?? paymentMethodsForTenant(tenant);
+    nextDraft.paymentMethods = paymentMethods;
+    const canQuote = nextDraft.missingFields.length === 0;
+    const replyMissingFields = nextInteractionMissingFields(nextDraft.missingFields);
+    const fallbackText = buildOrderReply({
+      orderItems: nextDraft.items,
+      missingFields: replyMissingFields,
+      customerProfile: await this.getCustomerProfile(tenantId, normalized.waId),
+      subtotal: nextDraft.subtotal,
+      paymentMethods,
+    });
+    const text = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText,
+      facts: {
+        kind: 'product_variant_selection',
+        products: nextDraft.items.map((item) => item.product).filter(Boolean),
+        subtotal: nextDraft.subtotal,
+        missingFields: replyMissingFields,
+        requiredTerms: nextDraft.items.map((item) => item.product).filter(Boolean).map(describeCatalogProduct),
+      },
+    });
+    await this.patchConversation(conversationId, {
+      orderDraft: nextDraft,
+      stage: canQuote ? 'quote' : 'clarification',
+      zone: canQuote ? 'quote' : 'agent',
+      status: 'live',
+      value: canQuote ? formatCurrency(nextDraft.subtotal) : 'Pendiente',
+      progress: canQuote ? 64 : 48,
+      nextStep: canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
+      lastTool: 'catalog_variant_selection',
+    });
+    this.recordOrderDraftTransition({
+      tenantId,
+      conversationId,
+      traceId: normalized.traceId,
+      draft: nextDraft,
+      reason: 'product_variant_selection',
+    });
+    const paymentOffer = !canQuote && replyMissingFields.includes('payment_method')
+      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods, body: text, draftVersion: nextDraft.version })
+      : null;
+    const confirmationOffer = canQuote
+      ? await this.createConfirmationOffer({ tenantId, conversationId, body: text, draftVersion: nextDraft.version })
+      : null;
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+      ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
+    });
+    return { summary: 'Interactive product variant selected', interaction: result.option };
   }
 
   async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {
@@ -1106,6 +1526,13 @@ export class AgentRuntime {
 
   async composeCustomerReply({ tenantId, conversationId, fallbackText, facts }) {
     if (!this.planner?.composeReply) return fallbackText;
+    this.events.emit({
+      type: 'reply.facts.prepared',
+      tenantId,
+      conversationId,
+      detail: facts?.kind ?? 'customer_reply',
+      metadata: { replyFacts: sanitizeReplyFacts(facts) },
+    });
     const composed = await this.planner.composeReply({ tenantId, conversationId, facts, fallbackText });
     return composed.text ?? fallbackText;
   }
@@ -1113,6 +1540,11 @@ export class AgentRuntime {
   async getTenant(tenantId) {
     if (this.store.getTenant) return this.store.getTenant(tenantId);
     return this.store.getState().tenants.find((item) => item.id === tenantId);
+  }
+
+  async getCustomerProfile(tenantId, waId) {
+    if (this.store.getCustomerProfile) return this.store.getCustomerProfile(tenantId, waId);
+    return this.store.getState().customerProfilesByTenant?.[tenantId]?.[waId] ?? null;
   }
 
   async isDuplicate(messageId) {
@@ -1170,33 +1602,213 @@ function containsAny(text, words) {
 }
 
 function catalogSearchesFromPlan(plan, catalogItems, text) {
+  const requestedQueries = uniqueCatalogQueries(catalogItems, text);
   const plannedSearches = (plan.toolPlan ?? [])
     .filter((step) => step.tool === 'google_sheets_read_table')
     .map((step, index) => ({
       query: step.candidate ?? step.query ?? step.filters?.query ?? step.filters?.category ?? text,
+      plannerQuery: step.filters?.query ?? step.query ?? null,
       filters: step.filters,
       candidateIndex: step.candidateIndex ?? index,
     }))
-    .filter((step) => step.filters && Object.keys(step.filters).length);
-  if (plannedSearches.length) return plannedSearches;
+    .filter((step) => step.filters && Object.keys(step.filters).length)
+    .filter((step) => {
+      // Una categoria es una restriccion, no otro producto. Tambien evitamos
+      // que el modelo busque sustitutos que el cliente no pidio (p. ej.
+      // "salmon" -> "saltin").
+      // `candidate` can merely repeat "algo pa la sed" while the filter is
+      // category-only. Treat it as a concrete lookup only when the planner
+      // deliberately supplied a query filter.
+      const explicitQuery = step.plannerQuery;
+      const skuCandidate = step.candidate ?? step.query;
+      if (step.filters?.sku) {
+        return skuCandidate && isGroundedCatalogQuery(skuCandidate, requestedQueries);
+      }
+      return explicitQuery && isGroundedCatalogQuery(explicitQuery, requestedQueries);
+    })
+    .map((step) => ({
+      ...step,
+      filters: step.filters?.sku
+        ? { ...(step.filters ?? {}) }
+        : { ...(step.filters ?? {}), query: step.plannerQuery },
+    }));
+  if (plannedSearches.length) return dedupeCatalogSearches(plannedSearches);
   const fallbackItems = catalogItems.length ? catalogItems : [{ catalogQuery: text, rawName: text }];
   return fallbackItems.map((item, index) => {
-    const query = item.catalogQuery ?? item.rawName ?? text;
+    // La hipotesis del LLM orienta el significado, pero no puede reemplazar
+    // las palabras del cliente al recuperar el catalogo. Asi "Savital" sigue
+    // buscando Savital aunque el modelo lo clasifique equivocadamente.
+    const query = catalogSearchTextForItem(item) || item.catalogQuery || item.rawName || text;
+    const inferred = item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(query);
     return {
       query,
-      filters: item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(query),
+      filters: inferred.query || item.skuHint || isCategoryQuery(query) ? inferred : { ...inferred, query },
       candidateIndex: index,
     };
   });
 }
 
+function uniqueCatalogQueries(catalogItems = [], text = '') {
+  return [...new Set([
+    ...catalogItems.flatMap((item) => [item?.catalogQuery, item?.rawName]),
+    text,
+  ].map((value) => String(value ?? '').trim()).filter(Boolean))];
+}
+
+function dedupeCatalogSearches(searches = []) {
+  const seen = new Set();
+  return searches.filter((search) => {
+    const key = `${normalizeText(search.filters?.query ?? search.query)}:${normalizeText(search.filters?.category)}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isGroundedCatalogQuery(query, requestedQueries = []) {
+  const queryTokens = catalogQueryTokens(query);
+  if (!queryTokens.length) return false;
+  const requestTokens = requestedQueries.flatMap(catalogQueryTokens);
+  return queryTokens.some((token) => requestTokens.some((requested) =>
+    token === requested ||
+    token.startsWith(requested) ||
+    requested.startsWith(token) ||
+    (token.length >= 6 && requested.length >= 6 && levenshtein(token, requested) <= 1),
+  ));
+}
+
+function catalogQueryTokens(value) {
+  return normalizeText(value)
+    .split(/\s+/)
+    .map((token) => token.replace(/(?:es|s)$/u, ''))
+    .filter((token) => token.length >= 3 && !CATALOG_QUERY_STOPWORDS.has(token));
+}
+
+function enrichCatalogSearch(search, text) {
+  const filters = { ...(search?.filters ?? {}) };
+  // Category labels narrow the inventory, while the customer's full wording
+  // ranks the useful references inside that category. A planner may return
+  // only "aseo" even when the buyer explicitly said "papel y jabon".
+  if (filters.category && !filters.query && !isCategoryQuery(search?.query ?? text)) filters.query = text;
+  return {
+    ...search,
+    query: search?.query ?? filters.query ?? text,
+    filters,
+  };
+}
+
+function isCategorySearch({ query, filters = {}, text }) {
+  // El LLM suele adjuntar una categoria para acotar una consulta concreta.
+  // Eso no convierte "jabon para ropa" en una navegacion generica: la
+  // respuesta debe priorizar su coincidencia, no opciones alfabeticas.
+  return isCategoryQuery(query) || (isCategoryQuery(text) && catalogQueryTokens(query).length <= 2);
+}
+
+function selectCatalogOptions(rows = [], limit = 4, context = {}) {
+  const budget = catalogRecommendationBudget(context);
+  const eligibleRows = budget === null
+    ? rows
+    : rows.filter((row) => Number(row.price ?? 0) > 0 && Number(row.price) <= budget);
+  const rankedRows = eligibleRows
+    .map((row, index) => ({
+      row,
+      index,
+      relevance: catalogOptionRelevance(row, context, budget),
+    }))
+    .sort((left, right) => (
+      right.relevance - left.relevance ||
+      Number(right.row.matchScore ?? 0) - Number(left.row.matchScore ?? 0) ||
+      left.index - right.index
+    ))
+    .map(({ row }) => row);
+  const selected = [];
+  const seenBrands = new Set();
+  const seenProducts = new Set();
+
+  for (const row of rankedRows) {
+    const productKey = normalizeText([row.name, row.presentation].filter(Boolean).join(' '));
+    if (!productKey || seenProducts.has(productKey)) continue;
+    const brandKey = normalizeText(row.brand);
+    if (brandKey && seenBrands.has(brandKey) && selected.length < Math.min(3, limit)) continue;
+    selected.push(row);
+    seenProducts.add(productKey);
+    if (brandKey) seenBrands.add(brandKey);
+    if (selected.length >= limit) return selected;
+  }
+
+  for (const row of rankedRows) {
+    const productKey = normalizeText([row.name, row.presentation].filter(Boolean).join(' '));
+    if (!productKey || seenProducts.has(productKey)) continue;
+    selected.push(row);
+    seenProducts.add(productKey);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+function catalogRecommendationBudget({ plan, text } = {}) {
+  const explicitBudget = (plan?.order?.items ?? [])
+    .map((item) => Number(item?.budgetAmount ?? 0))
+    .find((value) => Number.isFinite(value) && value > 0);
+  if (explicitBudget) return explicitBudget;
+
+  const normalized = normalizeText(text);
+  const numeric = normalized.match(/(?:tengo|presupuesto|hasta|por)\s+(\d{1,3}(?:\s?\d{3})+|\d{4,7})\b/u);
+  if (numeric) return Number(numeric[1].replace(/\s/g, ''));
+  const words = normalized.match(/\b(un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+mil\b/u);
+  if (!words) return null;
+  const thousands = {
+    un: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5,
+    seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10,
+  };
+  return (thousands[words[1]] ?? 0) * 1000 || null;
+}
+
+function catalogOptionRelevance(row, { query, text } = {}, budget = null) {
+  const normalizedText = normalizeText([query, text].filter(Boolean).join(' '));
+  const productTerms = normalizeText([
+    row.name,
+    row.brand,
+    ...(row.aliases ?? []),
+    row.productFamily,
+  ].filter(Boolean).join(' '));
+  const supportingTerms = normalizeText([
+    row.category,
+    row.presentation,
+    row.normalizedPresentation,
+    row.description,
+    ...(row.tags ?? []),
+  ].filter(Boolean).join(' '));
+  let score = Number(row.matchScore ?? 0) * 2;
+
+  for (const token of catalogQueryTokens(normalizedText)) {
+    if (productTerms.split(' ').includes(token)) score += 9;
+    else if (supportingTerms.split(' ').includes(token)) score += 4;
+  }
+
+  const has = (terms) => containsAny(normalizedText, terms);
+  const productHas = (terms) => containsAny(`${productTerms} ${supportingTerms}`, terms);
+  if (has(['sed', 'calor', 'frio', 'fria', 'tomar']) && productHas(['bebida', 'gaseosa', 'jugo', 'agua', 'hidratante', 'malta', 'te'])) score += 12;
+  if (has(['once', 'lonchera', 'refrigerio']) && productHas(['galleta', 'ponque', 'chocolate', 'jugo', 'fruta', 'pan', 'arepa'])) score += 12;
+  if (has(['antojo', 'dulce', 'mecato', 'snack', 'picar']) && productHas(['galleta', 'ponque', 'chocolate', 'dulce', 'pasaboca', 'papas', 'snack'])) score += 12;
+  if (has(['desayuno']) && productHas(['pan', 'arepa', 'leche', 'cereal', 'avena', 'huevo', 'queso'])) score += 12;
+  if (has(['aseo', 'limpieza', 'papel', 'jabon', 'lavar']) && productHas(['papel', 'jabon', 'detergente', 'lavaloza', 'limpieza', 'shampoo'])) score += 10;
+  if (has(['mercado', 'despensa']) && productHas(['arroz', 'aceite', 'huevo', 'pasta', 'grano', 'harina'])) score += 10;
+  if (!has(['mascota', 'perro', 'gato']) && productHas(['mascota', 'perro', 'gato', 'concentrado', 'arena'])) score -= 100;
+  if (budget !== null && Number(row.price ?? 0) > budget) score -= 100;
+  return score;
+}
+
 function deliveryItemFiltersFromPlan(plan, item, index) {
-  const planned = (plan.toolPlan ?? []).find((step) =>
-    step.tool === 'google_sheets_read_table' &&
-    (step.candidateIndex === index || step.candidate === item.catalogQuery || step.candidate === item.rawName)
-  );
-  if (planned?.filters && Object.keys(planned.filters).length) return planned.filters;
-  return item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(item.catalogQuery ?? item.rawName);
+  // El interprete solo propone significado. La consulta real no hereda SKU ni
+  // filtros de una respuesta LLM: se arma desde el item semantico y se limita
+  // al catalogo del tenant dentro de la herramienta.
+  const query = catalogSearchTextForItem(item);
+  if (item.categoryHint && (!query || isCategoryQuery(query) || normalizeText(query) === normalizeText(item.categoryHint))) {
+    return { category: item.categoryHint };
+  }
+  const inferred = inferCatalogFilter(query);
+  return inferred.query || !query || isCategoryQuery(query) ? inferred : { ...inferred, query };
 }
 
 function isAdditiveOrderText(text) {
@@ -1243,6 +1855,81 @@ function mergeOrderItems(previousItems = [], nextItems = []) {
   return [...byKey.values()];
 }
 
+function dedupeOrderMissingFields(missingFields = []) {
+  const result = [];
+  for (const field of missingFields.filter(Boolean)) {
+    const value = String(field);
+    const [kind, ...rest] = value.split(':');
+    const subject = rest.join(':');
+    const duplicate = result.some((existing) => {
+      const [existingKind, ...existingRest] = String(existing).split(':');
+      if (existingKind !== kind) return false;
+      const existingSubject = existingRest.join(':');
+      if (!subject || !existingSubject) return value === existing;
+      return orderMissingSubjectsMatch(subject, existingSubject);
+    });
+    if (!duplicate) result.push(value);
+  }
+  return result;
+}
+
+function orderMissingSubjectsMatch(left, right) {
+  const leftTokens = catalogQueryTokens(left);
+  const rightTokens = catalogQueryTokens(right);
+  if (!leftTokens.length || !rightTokens.length) return normalizeText(left) === normalizeText(right);
+  const shared = leftTokens.filter((token) => rightTokens.some((other) => (
+    token === other ||
+    (token.length >= 6 && other.length >= 6 && levenshtein(token, other) <= 1)
+  )));
+  return shared.length >= (leftTokens.length === 1 || rightTokens.length === 1 ? 1 : 2);
+}
+
+function mergeClarificationOrderDraft(previousDraft, nextOrder = {}, planMissingFields = []) {
+  const previous = structuredClone(previousDraft ?? {});
+  const proposedItems = structuredClone(nextOrder?.items ?? []);
+  const previousItems = previous.items ?? [];
+  const mergedItems = previousItems.length
+    ? previousItems.map((savedItem) => {
+      const proposed = proposedItems.find((candidate) => orderItemsReferToSameProduct(savedItem, candidate));
+      if (!proposed) return savedItem;
+      return {
+        ...proposed,
+        ...savedItem,
+        rawName: proposed.rawName ?? savedItem.rawName,
+        catalogQuery: proposed.catalogQuery ?? savedItem.catalogQuery,
+        quantity: proposed.quantity ?? savedItem.quantity,
+        product: savedItem.product ?? proposed.product ?? null,
+        presentationOptions: savedItem.presentationOptions ?? proposed.presentationOptions ?? [],
+        lineTotal: savedItem.lineTotal ?? proposed.lineTotal ?? null,
+        available: savedItem.available ?? proposed.available ?? false,
+      };
+    })
+    : proposedItems;
+  const missingFields = [...new Set([
+    ...(previous.missingFields ?? []),
+    ...(nextOrder?.missingFields ?? []),
+    ...(planMissingFields ?? []),
+  ])];
+  const subtotal = mergedItems.reduce((sum, item) => sum + Number(item.lineTotal ?? 0), 0);
+  return {
+    ...nextOrder,
+    ...previous,
+    items: mergedItems,
+    missingFields,
+    paymentMethod: nextOrder?.paymentMethod ?? previous.paymentMethod ?? null,
+    paymentMethods: previous.paymentMethods ?? nextOrder?.paymentMethods ?? [],
+    subtotal,
+  };
+}
+
+function orderItemsReferToSameProduct(left = {}, right = {}) {
+  const leftTokens = uniqueCatalogQueries([left], '').flatMap(catalogQueryTokens);
+  const rightTokens = uniqueCatalogQueries([right], '').flatMap(catalogQueryTokens);
+  return leftTokens.some((token) => rightTokens.some((other) =>
+    token === other || token.startsWith(other) || other.startsWith(token),
+  ));
+}
+
 function resolveHumanReplyWaId(state, request, conversation) {
   if (conversation?.waId) return conversation.waId;
   if (request?.contextSnapshot?.customerWaId) return request.contextSnapshot.customerWaId;
@@ -1260,20 +1947,9 @@ function orderItemKey(item) {
 
 function inferCatalogFilter(text) {
   const normalized = normalizeText(text);
-  if (normalized.includes('chocoramo') || normalized.includes('chocorramo')) return { query: 'chocoramo' };
-  if (normalized.includes('cifrut') || normalized.includes('granadilla')) return { query: 'cifrut granadilla' };
-  if (normalized.includes('gaseosa') || normalized.includes('coca')) return { query: 'gaseosa' };
-  if (normalized.includes('savital')) return { query: 'savital' };
-  if (normalized === 'queso' || normalized.includes('queso campesino')) return { query: 'queso' };
-  if (normalized === 'pan' || normalized.includes('pan tajado')) return { query: 'pan' };
-  if (normalized === 'jamon' || normalized.includes('jamon')) return { query: 'jamon' };
-  if (containsAny(normalized, ['salchichon'])) return { query: 'salchichon carnes frias' };
-  if (containsAny(normalized, ['salchicha'])) return { query: 'salchicha carnes frias' };
-  if (containsAny(normalized, ['carnes frias', 'mortadela'])) return { category: 'Carnes frias' };
-  if (containsAny(normalized, ['cerveza', 'club colombia', 'sixpack', 'six pack'])) return { query: normalized };
-  if (containsAny(normalized, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return { query: normalized };
-  if (containsAny(normalized, ['jugo', 'jugos'])) return { query: 'jugo' };
-  if (containsAny(normalized, ['bebida', 'bebidas', 'sed', 'tomar', 'gaseosa', 'coca', 'frio', 'fria'])) return { category: 'bebidas' };
+  // Las marcas, aliases y typos viven en datos del catalogo del tenant. Aqui
+  // solo queda la taxonomia generica para solicitudes por categoria u ocasion.
+  if (containsAny(normalized, ['bebida', 'bebidas', 'sed', 'tomar', 'gaseosa', 'frio', 'fria'])) return { category: 'bebidas' };
   if (containsAny(normalized, ['mecato', 'snack', 'snacks', 'dulce', 'antojo', 'galleta', 'papas', 'barato', 'economico', 'economica', 'lonchera', 'refrigerio', 'picar'])) return { category: 'snacks' };
   if (containsAny(normalized, ['cafe', 'cafes', 'tinto', 'tintico'])) return { category: 'cafe' };
   if (containsAny(normalized, ['aseo', 'limpieza', 'jabon', 'shampoo', 'papel'])) return { category: 'aseo' };
@@ -1326,10 +2002,24 @@ function removeResolvedBudgetMissingFields(missingFields, item) {
 function selectAcceptableOrderProduct(rows = [], item = {}) {
   const candidates = rows.filter((row) => isAcceptableOrderProduct(row, item));
   if (!candidates.length) return null;
-  if (item.requestedPresentation) {
-    return candidates.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? candidates[0];
+  if (hasExplicitPresentationMeasure(item.requestedPresentation)) {
+    return candidates.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? null;
   }
+  const contextualIntent = contextualPresentationIntent(item.requestedPresentation);
+  if (contextualIntent) return selectRelativePresentationCandidate(candidates, contextualIntent);
   return candidates[0];
+}
+
+export function selectDistinctOrderProduct(rows = [], item = {}, resolvedItems = []) {
+  const selectedSkusForOtherRequests = new Set(
+    resolvedItems
+      .filter((resolved) => resolved?.product?.sku && !sameRequestedProduct(resolved, item))
+      .map((resolved) => resolved.product.sku),
+  );
+  return selectAcceptableOrderProduct(
+    rows.filter((row) => !selectedSkusForOtherRequests.has(row?.sku)),
+    item,
+  );
 }
 
 function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null) {
@@ -1350,13 +2040,36 @@ function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null
     .slice(0, 4);
 }
 
+function hasUnresolvedPresentationForItem(missingFields = [], item = {}, rows = [], selectedProduct = null) {
+  const references = [item.rawName, item.catalogQuery]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+  const plannerRequestedClarification = (missingFields ?? [])
+    .filter((field) => String(field).startsWith('presentation:'))
+    .map((field) => normalizeText(String(field).replace('presentation:', '')))
+    .filter(Boolean)
+    .some((missing) => references.some((reference) => (
+      reference === missing || reference.includes(missing) || missing.includes(reference)
+    )));
+  if (!plannerRequestedClarification) return false;
+  // La duda del planner no debe bloquear una referencia que el catálogo
+  // resuelve de manera única, ni una medida que el comprador ya indicó.
+  if (hasExplicitPresentationMeasure(item.requestedPresentation)) return false;
+  const options = presentationOptionsForItem(rows, item, selectedProduct);
+  const distinctPresentations = new Set(options.map((option) => normalizeText(option.presentation ?? option.normalizedPresentation ?? option.name)));
+  return distinctPresentations.size > 1;
+}
+
 function productFamilyTokens(item = {}, product = {}) {
   const ignored = new Set(['gaseosa', 'bebida', 'bebidas', 'producto', 'presentacion', 'litro', 'litros', 'mililitro', 'mililitros', 'original']);
   return [...new Set(normalizeText([
     item.rawName,
     item.catalogQuery,
+    product?.productFamily,
     product?.name,
     product?.brand,
+    product?.description,
+    ...(product?.tags ?? []),
     ...(product?.aliases ?? []),
   ].filter(Boolean).join(' ')).split(/\s+/).filter((token) => token.length >= 4 && !ignored.has(token)))];
 }
@@ -1364,10 +2077,31 @@ function productFamilyTokens(item = {}, product = {}) {
 function isAcceptableOrderProduct(product, item = {}) {
   if (!product) return false;
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
-  const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  const productText = normalizeText([
+    product.name,
+    product.brand,
+    product.category,
+    product.presentation,
+    product.normalizedPresentation,
+    product.productFamily,
+    product.description,
+    ...(product.tags ?? []),
+    ...(product.aliases ?? []),
+  ].filter(Boolean).join(' '));
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
   if (containsAny(query, ['salchichon', 'salchicha']) && !containsAny(productText, ['salchicha', 'salchichon', 'carnes frias'])) return false;
+  const requestedTokens = productRequestTokens(query);
+  if (requestedTokens.length) {
+    const productTokens = productText.split(/[^a-z0-9]+/).filter(Boolean);
+    const matchedTokens = requestedTokens.filter((token) => productTokens.some((candidate) => (
+      candidate === token || maybeRelatedProductToken(token, candidate)
+    )));
+    const requiredMatches = requestedTokens.length === 1
+      ? 1
+      : Math.min(requestedTokens.length, Math.max(2, Math.ceil(requestedTokens.length * 0.75)));
+    if (matchedTokens.length < requiredMatches) return false;
+  }
   if (product.matchType === 'similar' && Number(product.matchScore ?? 0) <= 2) {
     const productTokens = new Set(productText.split(/\s+/).filter((token) => token.length >= 4));
     const queryTokens = query.split(/\s+/).filter((token) => token.length >= 4);
@@ -1376,23 +2110,95 @@ function isAcceptableOrderProduct(product, item = {}) {
   return true;
 }
 
-function buildCatalogReply({ selected, alternatives, drive, delivery, query }) {
+function sameRequestedProduct(left = {}, right = {}) {
+  const leftSku = normalizeText(left.skuHint);
+  const rightSku = normalizeText(right.skuHint);
+  if (leftSku && rightSku) return leftSku === rightSku;
+  const leftTerms = requestTerms(left);
+  const rightTerms = requestTerms(right);
+  return leftTerms.some((leftTerm) => rightTerms.some((rightTerm) => (
+    leftTerm === rightTerm || leftTerm.includes(rightTerm) || rightTerm.includes(leftTerm)
+  )));
+}
+
+function requestTerms(item = {}) {
+  return [...new Set([
+    item.rawName,
+    item.catalogQuery,
+    item.skuHint,
+    item.product?.name,
+    ...(item.product?.aliases ?? []),
+  ].map((value) => normalizeText(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim())
+    .filter((value) => value.length >= 3))];
+}
+
+function productRequestTokens(query) {
+  const ignored = new Set([
+    'para', 'domicilio', 'quiero', 'quieres', 'regalas', 'regalame', 'mandame', 'manda', 'llevar', 'entrega',
+    'grande', 'familiar', 'personal', 'individual', 'compartir', 'casa', 'medio', 'media', 'kilo', 'litro',
+    'unidad', 'unidades', 'botella', 'paquete', 'producto', 'favor', 'por', 'con', 'sin', 'del', 'una', 'uno',
+  ]);
+  return [...new Set(normalizeText(query)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !ignored.has(token) && !/^\d/.test(token)))];
+}
+
+function maybeRelatedProductToken(requested, candidate) {
+  if (requested === candidate) return true;
+  if (requested.length < 5 || candidate.length < 5) return false;
+  if (requested.startsWith(candidate.slice(0, 5)) || candidate.startsWith(requested.slice(0, 5))) return true;
+  return requested[0] === candidate[0] && editDistanceAtMostTwo(requested, candidate);
+}
+
+function editDistanceAtMostTwo(left, right) {
+  if (Math.abs(left.length - right.length) > 2) return false;
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    let diagonal = previous[0];
+    previous[0] = row;
+    let minimum = previous[0];
+    for (let column = 1; column <= right.length; column += 1) {
+      const current = previous[column];
+      previous[column] = Math.min(
+        previous[column] + 1,
+        previous[column - 1] + 1,
+        diagonal + Number(left[row - 1] !== right[column - 1]),
+      );
+      diagonal = current;
+      minimum = Math.min(minimum, previous[column]);
+    }
+    if (minimum > 2) return false;
+  }
+  return previous[right.length] <= 2;
+}
+
+function describeCatalogProduct(product = {}) {
+  const name = String(product.name ?? '').trim();
+  const presentation = String(product.presentation ?? '').trim();
+  if (!presentation || normalizeText(name).includes(normalizeText(presentation))) return name;
+  return `${name} (${presentation})`;
+}
+
+function buildCatalogReply({ selected, alternatives, drive, delivery, categorySearch = false }) {
   const categoryOptions = [selected, ...alternatives];
-  if (categoryOptions.length > 1 && isCategoryQuery(query)) {
+  if (categoryOptions.length > 1 && categorySearch) {
     const options = categoryOptions
-      .map((item) => `${item.name} (${formatCurrency(item.price)}, stock ${item.stock})`)
+      .map((item) => `${describeCatalogProduct(item)} (${formatCurrency(item.price)}, stock ${item.stock})`)
       .join('; ');
     const deliveryAsk = delivery ? ' ¿Cual quieres y cuantas unidades para el domicilio?' : ' ¿Cual quieres que te cotice?';
     return `Tenemos estas opciones: ${options}.${deliveryAsk}`;
   }
   const matchIntro = selected.matchType === 'similar'
-    ? `No encontre exacto "${query}", pero el mas cercano es ${selected.name}`
-    : `Tengo disponible ${selected.name}`;
+    ? `No encontre exacto, pero el mas cercano es ${describeCatalogProduct(selected)}`
+    : `Tengo disponible ${describeCatalogProduct(selected)}`;
   const deliveryAsk = delivery ? ' ¿Cuantas unidades quieres para el domicilio?' : ' ¿Quieres que te cotice una cantidad?';
   const alternativeText = alternatives.length
-    ? ` Tambien podria ofrecerte: ${alternatives.map((item) => item.name).join(', ')}.`
+    ? ` Tambien podria ofrecerte: ${alternatives.map(describeCatalogProduct).join(', ')}.`
     : '';
-  return `${matchIntro} por ${formatCurrency(selected.price)}. Stock actual: ${selected.stock}. ${drive.files[0]?.summary ?? ''}${alternativeText}${deliveryAsk}`;
+  return `${matchIntro} por ${formatCurrency(selected.price)}. Stock actual: ${selected.stock}.${alternativeText}${deliveryAsk}`;
 }
 
 function buildMultiCatalogReply({ matches, delivery }) {
@@ -1405,12 +2211,12 @@ function buildMultiCatalogReply({ matches, delivery }) {
       seen.add(match.selected.sku);
       return true;
     })
-    .map((match) => `${match.selected.name} (${formatCurrency(match.selected.price)}, stock ${match.selected.stock})`);
+    .map((match) => `${describeCatalogProduct(match.selected)} (${formatCurrency(match.selected.price)}, stock ${match.selected.stock})`);
   const alternatives = found
     .flatMap((match) => match.alternatives ?? [])
     .filter((item) => item && !seen.has(item.sku))
     .slice(0, 2)
-    .map((item) => item.name);
+    .map(describeCatalogProduct);
 
   const parts = [];
   if (foundLines.length) parts.push(`Encontre estas coincidencias: ${foundLines.join('; ')}.`);
@@ -1466,7 +2272,7 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
       const presentationMissing = uniqueMissing.find((missing) =>
         missing.startsWith('presentation:') && matchesMissingPresentation(item, missing.replace('presentation:', ''))
       );
-      const name = presentationMissing ? item.rawName : item.product.name;
+      const name = presentationMissing ? item.rawName : describeCatalogProduct(item.product);
       if (item.budgetAmount) return `${formatCurrency(item.budgetAmount)} de ${name}`;
       return `${item.quantity ?? 'cantidad pendiente'} x ${name}`;
     });
@@ -1523,12 +2329,61 @@ function needsHumanProductResolution(missingFields) {
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {
   const requestedVolume = presentationVolumeInMilliliters(requestedPresentation);
-  const productVolume = presentationVolumeInMilliliters([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  const productVolume = presentationVolumeInMilliliters([product.name, product.presentation, product.normalizedPresentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   if (requestedVolume && productVolume) return requestedVolume === productVolume;
   const requestedNumber = normalizeText(requestedPresentation).match(/\d{2,4}/)?.[0];
   if (!requestedNumber) return true;
   const fields = normalizeText([product.name, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   return fields.includes(requestedNumber);
+}
+
+function hasExplicitPresentationMeasure(value) {
+  return Boolean(presentationMeasure(value));
+}
+
+function contextualPresentationIntent(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return null;
+  if (containsAny(normalized, ['familiar', 'compartir', 'para la casa', 'hogar'])) return 'larger';
+  if (containsAny(normalized, ['personal', 'individual', 'para mi', 'para mí', 'lonchera', 'para llevar'])) return 'smaller';
+  if (containsAny(normalized, ['grande', 'grandecito', 'grandeza'])) return 'larger';
+  if (containsAny(normalized, ['pequeno', 'pequeño', 'pequena', 'pequeña', 'mini'])) return 'smaller';
+  return null;
+}
+
+function selectRelativePresentationCandidate(candidates = [], intent) {
+  const measured = candidates
+    .map((product) => ({ product, measure: presentationMeasure(product.normalizedPresentation ?? product.presentation ?? product.name) }))
+    .filter((candidate) => candidate.measure);
+  if (measured.length !== candidates.length || measured.length < 2) return measured.length === 1 && candidates.length === 1 ? measured[0].product : null;
+  const dimensions = new Set(measured.map((candidate) => candidate.measure.dimension));
+  if (dimensions.size !== 1) return null;
+  const sorted = [...measured].sort((left, right) => intent === 'larger'
+    ? right.measure.value - left.measure.value
+    : left.measure.value - right.measure.value);
+  if (sorted[0].measure.value === sorted[1].measure.value) return null;
+  return sorted[0].product;
+}
+
+function presentationMeasure(value) {
+  const normalized = normalizeText(value)
+    .replace(/\b(?:un|una)\s+litro y medio\b/g, '1 5 l')
+    .replace(/\bmedio kilo\b/g, '500 g')
+    .replace(/\bmedio litro\b/g, '0 5 l');
+  const countMatch = normalized.match(/\bx\s*(\d{1,3})\b/);
+  if (countMatch) return { dimension: 'count', value: Number(countMatch[1]) };
+  const match = normalized.match(/(\d+(?:\s+\d+)?(?:[.,]\d+)?)\s*(ml|mililitros?|l|litros?|g|gr|gramos?|kg|kilogramos?|und|unidades?|rollos?)\b/);
+  if (!match) return null;
+  const unit = match[2];
+  const raw = Number(match[1].replace(',', '.').replace(/\s+/, '.'));
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  if (/^(ml|mililitros?|l|litros?)$/.test(unit)) {
+    return { dimension: 'volume', value: Math.round(/^(l|litros?)$/.test(unit) ? raw * 1000 : raw) };
+  }
+  if (/^(g|gr|gramos?|kg|kilogramos?)$/.test(unit)) {
+    return { dimension: 'weight', value: Math.round(/^(kg|kilogramos?)$/.test(unit) ? raw * 1000 : raw) };
+  }
+  return { dimension: 'count', value: raw };
 }
 
 function presentationVolumeInMilliliters(value) {
@@ -1628,7 +2483,8 @@ function buildHumanResolutionSummary({ orderItems, missingFields, customerProfil
 
 function matchesMissingPresentation(item, query) {
   const normalizedQuery = normalizeText(query);
-  return normalizeText(item.rawName) === normalizedQuery ||
+  return item.rawItemId === query ||
+    normalizeText(item.rawName) === normalizedQuery ||
     normalizeText(item.catalogQuery) === normalizedQuery ||
     normalizeText(item.product?.name).includes(normalizedQuery);
 }
@@ -1685,12 +2541,36 @@ function confirmsPresentation(text, productName) {
   const size = normalizeText(productName).match(/\b\d+\s*(ml|l|litro|litros|g|gr|kg)\b/)?.[0];
   return Boolean(size && normalized.includes(size));
 }
+function sanitizeReplyFacts(facts = {}) {
+  return {
+    kind: facts.kind ?? null,
+    products: (facts.products ?? facts.items ?? []).slice(0, 10).map((item) => ({
+      sku: item?.sku ?? item?.product?.sku ?? null,
+      name: item?.name ?? item?.product?.name ?? null,
+      presentation: item?.presentation ?? item?.product?.presentation ?? null,
+      price: Number(item?.price ?? item?.product?.price ?? 0) || null,
+    })),
+    subtotal: facts.subtotal ?? null,
+    paymentMethod: facts.paymentMethod ?? null,
+    paymentMethods: (facts.paymentMethods ?? []).map((method) => ({ id: method?.id ?? null, label: method?.label ?? null })),
+    missingFields: facts.missingFields ?? [],
+    requiredTerms: facts.requiredTerms ?? [],
+  };
+}
 
 function formatCurrency(value) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value);
 }
 
-function paymentMethodsForTenant(tenant) {
+function interactiveProductTitle(product) {
+  const name = String(product?.name ?? 'Producto').trim();
+  const presentation = String(product?.presentation ?? product?.normalizedPresentation ?? '').trim();
+  const price = Number(product?.price ?? 0);
+  const detail = [presentation, price > 0 ? formatCurrency(price) : null].filter(Boolean).join(' - ');
+  return detail ? `${name} ${detail}`.slice(0, 72) : name.slice(0, 72);
+}
+
+export function paymentMethodsForTenant(tenant) {
   const configured = tenant?.config?.paymentMethods
     ?? tenant?.config?.orderPolicy?.paymentMethods
     ?? [];
@@ -1701,7 +2581,12 @@ function paymentMethodsForTenant(tenant) {
       ? { id: normalizePaymentMethodId(method), label: paymentMethodLabel(method) }
       : { id: normalizePaymentMethodId(method.id ?? method.key ?? method.label), label: method.label ?? paymentMethodLabel(method.id ?? method.key) })
     .filter((method) => method.id && method.label);
-  return normalized.length ? normalized : [
+  const unique = new Map();
+  for (const method of normalized) {
+    if (!unique.has(method.id)) unique.set(method.id, method);
+  }
+  const configuredMethods = [...unique.values()];
+  return configuredMethods.length ? configuredMethods : [
     { id: 'cash', label: 'Efectivo' },
     { id: 'card_terminal', label: 'Tarjeta' },
     { id: 'bre_b', label: 'Bre-B' },
@@ -1751,3 +2636,25 @@ function normalizeText(value) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 }
+
+function levenshtein(a, b) {
+  const matrix = Array.from({ length: a.length + 1 }, (_, index) => [index]);
+  for (let column = 1; column <= b.length; column += 1) matrix[0][column] = column;
+  for (let row = 1; row <= a.length; row += 1) {
+    for (let column = 1; column <= b.length; column += 1) {
+      matrix[row][column] = Math.min(
+        matrix[row - 1][column] + 1,
+        matrix[row][column - 1] + 1,
+        matrix[row - 1][column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1),
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+}
+
+const CATALOG_QUERY_STOPWORDS = new Set([
+  'para', 'con', 'sin', 'que', 'una', 'uno', 'unos', 'unas', 'por', 'favor',
+  'regala', 'regalame', 'manda', 'mandame', 'quiero', 'necesito', 'tengo',
+  'domicilio', 'pedido', 'producto', 'productos', 'algo', 'ayuda',
+  'marca', 'sabor', 'tipo',
+]);

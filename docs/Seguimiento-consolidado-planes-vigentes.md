@@ -1,6 +1,8 @@
 # Seguimiento consolidado de planes vigentes
 
-Actualizado: 2026-10-11.
+> Documento maestro relacionado: `docs/Plan-maestro-autogestion-y-landing.md`. Las decisiones de capacidad, promesa comercial y autoservicio deben mantenerse alineadas con ese documento.
+
+Actualizado: 2026-10-15.
 
 ## Fuentes revisadas
 
@@ -12,6 +14,7 @@ Actualizado: 2026-10-11.
 - `docs/Plan-implementacion-Mercado-Pago-SaaS.md`
 - Prompt maestro: auditoria y optimizacion de gemelo digital gamificado
 - Chat real de WhatsApp con SuperMarket analizado localmente como evidencia conversacional de tienda de barrio
+- `docs/Decisiones-landing-y-prueba-gratuita.md`
 
 Este documento no reemplaza los planes originales. Los organiza como tablero maestro para saber que esta cerrado, que esta parcial y que falta antes de publicar.
 
@@ -245,7 +248,8 @@ Implementar Mercado Pago como motor de suscripcion automatica mensual del SaaS, 
 - Reactivacion autoservicio segun causa y antiguedad.
 - Notificaciones por microapp, Centro de control y WhatsApp configurable; sin email.
 - Cobro y ciclo de consumo por aniversario de suscripcion.
-- Plan inicial con 1.000 domicilios y 5.000 interacciones por ciclo.
+- Plan Basico en alineacion: hasta 400 domicilios comerciales, aproximadamente 2.700 llamadas IA como objetivo de costo interno y hasta 5.000 interacciones tecnicas solo como proteccion.
+- Propuesta pendiente de aprobacion: revisar el plan inicial con base en el consumo conversacional real, el cupo de WhatsApp Platform y el costo global de DeepSeek. Ver `docs/Calculo-consumo-conversacional-landing.md`.
 - Sin excedentes automaticos; upgrade o excepcion admin.
 - Descuentos manuales por cliente, sin cupones publicos.
 - Historial de pagos con referencia/comprobante Mercado Pago; sin factura fiscal propia inicial.
@@ -265,7 +269,7 @@ Implementar Mercado Pago como motor de suscripcion automatica mensual del SaaS, 
 | MP-04 Webhooks | Webhook idempotente, validacion y consulta al proveedor | Credenciales MP sandbox; URL publica para prueba real | Parcial: firma/idempotencia base; falta prueba real |
 | MP-05 Sincronizacion | Boton admin de sync por cliente con auditoria | MP-03 | Ejecutado contract-first; falta consulta real proveedor |
 | MP-06 Pagos/historial | Historial owner/admin y comprobantes/referencias | MP-04/MP-05 | Ejecutado local |
-| MP-07 Ciclos/limites | Ciclo por aniversario, 1.000 domicilios, 5.000 interacciones, avisos 80/90/100 | MP-01 | Parcial: ciclo/modelo local listo; falta enforcement completo UI/operacion |
+| MP-07 Ciclos/limites | Ciclo por aniversario, 400 domicilios comerciales, aproximadamente 2.700 llamadas IA objetivo y hasta 5.000 como proteccion tecnica, avisos 70/85/100 | MP-01 | Ejecutado local: plan persistido y ciclos alineados por migracion/runtime, enforcement base, UI owner/admin y calculadora; falta medicion real de costo |
 | MP-08 Gracia/suspension | 5 dias de gracia, avisos y suspension automatica | MP-07 | Parcial local: job inicia gracia y suspende al vencimiento; faltan avisos progresivos |
 | MP-09 Cancelacion/reactivacion | Cancelar, solo lectura 30 dias y reactivar segun antiguedad | MP-08 | Pendiente |
 | MP-10 Descuentos/excepciones | Descuentos manuales y excepciones temporales auditadas | MP-01 | Ejecutado local backend/UI admin rapida |
@@ -409,6 +413,14 @@ Las pruebas reales de webhook Mercado Pago quedan para la etapa de URL publica.
 | P1-40 | Reforzar pruebas de pago, fotos y reclamos | Cerrado local: preferencia de pago, comprobante, imagen y reclamo cubiertos |
 | P1-41 | Probar agente end-to-end contra Google Sheets live sin publicar | Cerrado local 2026-10-11: `npm run test:agent-google-live` paso con `codex_simulated_deepseek`, leyo `Catalogo`, guardo `Clientes`, escribio `Pedidos` y creo handoff humano |
 | P1-42 | Clarificar onboarding Google Drive/Sheets | Cerrado local 2026-10-13: pestaña Google convertida en guia de 3 pasos con autorizacion OAuth, provisioning Drive/Sheets, apertura de Google Sheets y acceso a configuracion editable |
+| P1-43 | Separar cliente persistente de casos/pedidos y cerrar atencion manual por inactividad | Cerrado local 2026-10-15: cada caso conserva su `waId`, pero un caso cerrado no reutiliza `orderDraft`; la atencion manual por WhatsApp queda pausada por conversacion, vence a los 5 minutos como `closed_no_confirmation`, sale de la bandeja activa y el siguiente mensaje crea un caso nuevo. Reapertura solo por instruccion explicita de continuidad dentro de 30 minutos |
+| P1-44 | Ajustar limites y promesa comercial por costo conversacional | Cerrado local 2026-10-15: Plan Basico `COP 89.000`, hasta `400` domicilios y referencia interna de `2.700` interacciones; migracion, enforcement base, UI, calculadora y copy alineados. Los `1.000` mensajes de servicio gratuitos de Meta siguen siendo externos. Falta medicion real con proveedor y validacion publica |
+| P1-45 | Persistir tokens reales por caso DeepSeek | Parcial: el runner ahora copia `prompt_tokens`, `completion_tokens`, `total_tokens` y totales agregados desde `providerMetadata.usage` a `test-results-deepseek-real-scenarios.json`. Falta ejecutar una nueva corrida real controlada y validar cache/razonamiento antes de cerrar el costo comercial |
+| P1-46 | Dividir chat real SuperMarket y estimar llamadas por respuesta | Cerrado en analisis local 2026-10-15: `docs/Analisis-pedidos-y-llamadas-deepseek-supermarket.md`, `scripts/analyze-supermarket-orders.mjs` y exportes por bloque/respuesta. Resultado: 1.731 respuestas de la tienda, 1.731 llamadas hipoteticas; promedio 4,89 por bloque con pedido/consulta y p75 6. Sigue pendiente P1-45 para sustituir el baseline por `usage` real de cada llamada |
+| P1-47 | Alinear plan Basico comercial con limites tecnicos | Cerrado local 2026-10-15: `includedDeliveries=400`, `includedInteractions=2700`, alertas 70/85/100, migracion de plan, UI de owner/admin y calculadora. El costo real de DeepSeek y Mercado Pago recurrente requieren proveedor/sandbox/publicacion |
+| P1-48 | Consolidar documentacion de autoservicio y landing | Cerrado local 2026-10-15: `docs/Plan-maestro-autogestion-y-landing.md` fija decisiones vigentes, recorrido cliente/admin, copy simple, calculadora, limites, criterios de aceptacion y orden de ejecucion. Los documentos anteriores con 1.000 domicilios quedan como historicos o referenciados |
+| P1-49 | Evitar pistas de catalogo local en el planner productivo | Cerrado local 2026-10-15: `llmPlanner` no carga `productsByTenant` cuando `allowLocalCatalogFallback=false`; el catalogo productivo debe resolverse en Google Sheets/Drive y, si no esta disponible, el runtime escala a humano |
+| P1-50 | Habilitar carga guiada de catalogo para onboarding | Cerrado local 2026-10-15: validacion CSV con columnas obligatorias, duplicados, precio/stock y advertencias; importacion a `Catalogo` live o fixture explicito local mediante `server/tests/catalog-import.mjs` |
 
 ### P2 - Requiere URL publica o callbacks externos
 
@@ -481,7 +493,7 @@ Las pruebas reales de webhook Mercado Pago quedan para la etapa de URL publica.
 - Notificaciones de facturacion: microapp y Centro de control obligatorios; WhatsApp al owner configurable; email excluido en primera version.
 - Fecha de cobro: aniversario de suscripcion de cada cliente, sin corte fijo global inicial.
 - Ciclo de consumo: limites del plan se reinician con el ciclo de facturacion por aniversario, no por mes calendario.
-- Limite de consumo: plan inicial con 1.000 domicilios y 5.000 interacciones por ciclo; domicilios como limite comercial y interacciones como uso justo.
+- Limite de consumo: hasta 400 domicilios como promesa comercial y objetivo interno cercano a US$3 de DeepSeek, equivalente a aproximadamente 2.700 llamadas reales. El enforcement base, la migracion y la UI ya estan alineados localmente; 5.000 queda solo como referencia historica/proteccion pendiente de una medicion real.
 - Excedentes: no hay cobro automatico en primera version; se resuelve con upgrade o excepcion administrativa auditada.
 - Descuentos: manuales por cliente desde administracion, con vencimiento, motivo y auditoria; sin cupones publicos inicialmente.
 - Comprobantes: historial de pagos y referencia/comprobante Mercado Pago si existe; factura fiscal propia fuera del alcance inicial.
@@ -499,7 +511,10 @@ Las pruebas reales de webhook Mercado Pago quedan para la etapa de URL publica.
 - Motivos de abandono/bloqueo: automaticos y nota manual admin opcional para entender fricciones del onboarding.
 - WhatsApp Business: propio y pagado por cada cliente.
 - LLM: DeepSeek global administrado por la plataforma.
+- Costos: Meta/WhatsApp Platform es un costo separado pagado por cada tenant; DeepSeek es un costo operativo global de la plataforma y debe medirse por tenant, tokens y modelo.
 - Intervencion humana: toda decision humana debe poder resolverse desde la plataforma y, cuando aplique, responder al cliente por WhatsApp desde la misma interfaz.
+- Identidad y casos: el `waId` identifica al cliente, pero no representa un pedido eterno. Cada solicitud opera como un caso independiente; despues de un cierre por inactividad, un nuevo mensaje abre otro caso por defecto y no hereda la canasta anterior.
+- Atencion manual: abrir WhatsApp Web/Desktop activa la atencion manual solo para esa conversacion, deja una nota interna, pausa el agente sin consumir una interaccion y cierra el caso tras 5 minutos de inactividad como `No confirmado`. El historial permanece consultable fuera de la bandeja activa.
 - Pedido confirmado: el agente debe registrar el pedido y subirlo a humano para preparacion y entrega; el humano no solo aprueba, tambien opera el cumplimiento.
 - Tienda viva: debe evolucionar como gemelo digital gamificado. Los movimientos visuales deben representar eventos reales o diferenciarse como ambientacion; la experiencia movil debe ser adaptativa, no una miniatura del escritorio.
 - Publicacion: al final, despues de cerrar pruebas locales que no requieren callbacks externos.

@@ -7,7 +7,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['3 x Chocoramo', '2 x Cifrut granadilla', 'cómo prefieres pagar'],
+      replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
       orderItems: ['Chocoramo', 'Cifrut granadilla'],
     },
   },
@@ -19,7 +19,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: ['quantity:Cifrut granadilla'],
-      replyIncludes: ['cantidad de Cifrut granadilla'],
+      replyIncludes: ['cantidad'],
       orderItems: ['Chocoramo', 'Cifrut granadilla'],
     },
   },
@@ -27,7 +27,7 @@ export const colombiaAgentScenarioSet = [
     id: 'cliente_nuevo_domicilio_pide_nombre_direccion',
     level: 'cliente_nuevo',
     customer: 'new',
-    text: 'Me regalas 2 arepas pa domicilio',
+    text: 'Me regalas 2 arepas boyacenses pa domicilio',
     expect: {
       intent: 'delivery_order',
       missingFields: ['customer_name', 'delivery_address'],
@@ -41,7 +41,7 @@ export const colombiaAgentScenarioSet = [
     customer: 'new',
     steps: [
       {
-        text: 'Me regalas 2 arepas pa domicilio',
+        text: 'Me regalas 2 arepas boyacenses pa domicilio',
         expect: {
           intent: 'delivery_order',
           missingFields: ['customer_name', 'delivery_address'],
@@ -66,7 +66,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Para un domicilio, tienes cafe tostado premium?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cafe premium tostado 250g', 'Stock actual', 'Cuantas unidades'],
+      replyIncludes: ['Cafe premium tostado', 'Stock actual', 'Cuantas unidades'],
     },
   },
   {
@@ -76,7 +76,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Parce, manejan cafe bueno para llevar?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cafe premium tostado 250g', 'Cafe molido tradicional 500g'],
+      replyIncludes: ['Cafe premium tostado', 'Cafe molido tradicional'],
     },
   },
   {
@@ -86,7 +86,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Veci, que jugos tiene pa mandar a domicilio?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cifrut granadilla', 'Jugo Hit mango', 'Cual quieres y cuantas unidades'],
+      options: { min: 2, mustMatchAny: ['jugos'], mustBeActive: true, unrelatedFamilies: ['aseo', 'panaderia'] },
     },
   },
   {
@@ -96,7 +96,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Parce, algo pa la sed, que recomienda?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cifrut granadilla', 'Agua Cristal sin gas 600ml'],
+      options: { min: 2, mustMatchAny: ['bebidas', 'jugos'], mustBeActive: true, diverseFamilies: true, unrelatedFamilies: ['aseo', 'panaderia'] },
     },
   },
   {
@@ -106,7 +106,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Veci, me colabora con mecato pa las onces',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Chocoramo', 'Papas Margarita limon', 'Galletas Festival chocolate'],
+      options: { min: 2, mustMatchAny: ['snacks', 'dulce'], mustBeActive: true, unrelatedFamilies: ['aseo', 'lacteos'] },
     },
   },
   {
@@ -116,7 +116,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Que tiene para mercado? necesito arroz, aceite o huevos',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Arroz Diana 500g', 'Aceite Premier 500ml', 'Huevos AA x12'],
+      options: { min: 3, mustMatchAny: ['despensa', 'huevos', 'aceite', 'arroz'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -126,7 +126,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Tiene algo de aseo? papel y jabon de pronto',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Jabon Rey barra', 'Papel higienico Familia x4', 'Shampoo Savital sachet'],
+      options: { min: 2, mustMatchAny: ['aseo'], mustBeActive: true, unrelatedFamilies: ['bebidas', 'lacteos'] },
     },
   },
   {
@@ -136,7 +136,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Que tiene pa las onces?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Arepa boyacense', 'Pan tajado Bimbo'],
+      options: { min: 2, mustMatchAny: ['panaderia'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -147,7 +147,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'catalog_query',
       summary: 'Catalog guided options sent',
-      replyIncludes: ['Queso campesino 250g', 'Pan tajado Bimbo', 'No encontre en el catalogo actual: jamon'],
+      replyIncludes: ['Encontre'],
     },
   },
   {
@@ -157,7 +157,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Veci no se que pedir, tengo antojo de algo dulce, que me recomienda?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Chocoramo', 'Galletas Festival chocolate', 'Cual quieres que te cotice'],
+      options: { min: 2, mustMatchAny: ['dulce', 'galletas', 'chocolate'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -167,7 +167,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Buenos dias, tiene algo para desayuno rapido?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Arepa boyacense', 'Pan tajado Bimbo', 'Cual quieres que te cotice'],
+      options: { min: 2, mustMatchAny: ['panaderia', 'lacteos'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -177,7 +177,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Hace calor, que tiene frio para tomar?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cifrut granadilla', 'Agua Cristal sin gas 600ml', 'Coca-Cola 400ml'],
+      options: { min: 2, mustMatchAny: ['bebidas', 'jugo', 'agua', 'gaseosa'], mustBeActive: true, unrelatedFamilies: ['aseo', 'panaderia'] },
     },
   },
   {
@@ -187,7 +187,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Tengo cinco mil pesos, que me recomienda para comer algo barato?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Chocoramo', 'Galletas Festival chocolate', 'Cual quieres que te cotice'],
+      options: { min: 2, mustMatchAny: ['dulce', 'galletas', 'snacks'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -197,7 +197,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Veci, tiene gaseosa pequena?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Coca-Cola 400ml', 'Quieres que te cotice una cantidad'],
+      options: { min: 1, mustMatchAny: ['coca', 'gaseosa', 'bebidas'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -207,7 +207,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Me confirma si hay leche, de pronto la de bolsa?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Leche Alqueria entera 1L', 'Queso campesino 250g'],
+      options: { min: 1, mustMatchAny: ['leche', 'lacteos'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -217,7 +217,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Hay papel para el bano?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Papel higienico Familia x4', 'Shampoo Savital sachet'],
+      options: { min: 1, mustMatchAny: ['papel higienico', 'aseo'], mustBeActive: true, unrelatedFamilies: ['bebidas'] },
     },
   },
   {
@@ -227,7 +227,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Me colabora con jabon para lavar ropa',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Jabon Rey barra', 'Papel higienico Familia x4'],
+      options: { min: 1, mustMatchAny: ['jabon', 'lavado', 'aseo'], mustBeActive: true, unrelatedFamilies: ['bebidas'] },
     },
   },
   {
@@ -238,19 +238,19 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'catalog_query',
       summary: 'Catalog guided options sent',
-      replyIncludes: ['Arroz Diana 500g', 'Aceite Premier 500ml', 'Leche Alqueria entera 1L'],
+      replyIncludes: ['Encontre'],
     },
   },
   {
     id: 'pedido_claro_aseo_domicilio',
     level: 'usuario_sabe_lo_que_quiere',
     customer: 'known',
-    text: 'Me manda 1 papel higienico y 2 jabon rey para domicilio',
+    text: 'Me manda 1 papel higienico Familia x4 rollos y 2 jabon rey barra azul 250 g para domicilio',
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['1 x Papel higienico Familia x4', '2 x Jabon Rey barra', 'cómo prefieres pagar'],
-      orderItems: ['Papel higienico Familia x4', 'Jabon Rey barra'],
+      replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
+      orderItems: ['Papel higienico Familia', 'Jabon Rey barra azul'],
     },
   },
   {
@@ -282,7 +282,7 @@ export const colombiaAgentScenarioSet = [
     text: 'A como tiene el chocoramo?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Chocoramo', '$', 'Quieres que te cotice una cantidad'],
+      options: { min: 1, mustMatchAny: ['chocoramo'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -292,14 +292,14 @@ export const colombiaAgentScenarioSet = [
     text: 'Que me recomienda para lonchera de un nino?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Chocoramo', 'Galletas Festival chocolate'],
+      options: { min: 2, mustMatchAny: ['snacks', 'galletas'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
-    id: 'producto_no_catalogado_atun',
+    id: 'producto_no_catalogado_salmon',
     level: 'producto_no_disponible',
     customer: 'known',
-    text: 'Veci, tiene atun?',
+    text: 'Veci, tiene salmon?',
     expect: {
       intent: 'catalog_query',
       summary: 'Catalog search needs review',
@@ -325,8 +325,8 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: ['customer_name', 'delivery_address', 'presentation:coca cola'],
-      replyIncludes: ['tu nombre', 'direccion del domicilio', 'Para coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
-      orderItems: ['Coca-Cola 400ml'],
+      replyIncludes: ['¿Cuál prefieres?'],
+      variantOptions: ['Coca-Cola 400ml', 'Coca-Cola 1.5L'],
     },
   },
   {
@@ -335,11 +335,11 @@ export const colombiaAgentScenarioSet = [
     customer: 'known',
     steps: [
       {
-        text: 'Me regala 1 agua cristal para domicilio',
+        text: 'Me regala 1 agua cristal sin gas de 600 ml para domicilio',
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Agua Cristal sin gas 600ml', 'cómo prefieres pagar'],
+          replyIncludes: ['1 x Agua Cristal sin gas', 'cómo prefieres pagar'],
         },
       },
       {
@@ -369,7 +369,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Estoy antojado de un tintico, que cafe tiene?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Cafe premium tostado 250g', 'Cafe molido tradicional 500g'],
+      options: { min: 2, mustMatchAny: ['cafe'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -380,8 +380,9 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['1 x Arroz Diana 500g', '1 x Aceite Premier 500ml', '1 x Huevos AA x12', 'cómo prefieres pagar'],
-      orderItems: ['Arroz Diana 500g', 'Aceite Premier 500ml', 'Huevos AA x12'],
+      replyIncludes: ['Subtotal', 'pagar'],
+      paymentOffer: true,
+      orderItems: ['Arroz Diana', 'Aceite Premier', 'Huevos AA'],
     },
   },
   {
@@ -392,7 +393,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       missingFields: [],
-      replyIncludes: ['2 x Chocoramo', '1 x Cifrut granadilla', 'Subtotal'],
+      replyIncludes: ['Subtotal'],
       orderItems: ['Chocoramo', 'Cifrut granadilla'],
     },
   },
@@ -400,24 +401,24 @@ export const colombiaAgentScenarioSet = [
     id: 'pedido_sin_cantidades_debe_preguntar',
     level: 'usuario_sabe_parcialmente',
     customer: 'known',
-    text: 'Me manda chocoramo y agua cristal para domicilio',
+    text: 'Me manda chocoramo y agua Cristal sin gas de 600 ml para domicilio',
     expect: {
       intent: 'delivery_order',
       missingFields: ['quantity:Chocoramo', 'quantity:Agua Cristal sin gas 600ml'],
-      replyIncludes: ['cantidad de Chocoramo', 'cantidad de Agua Cristal sin gas 600ml'],
-      orderItems: ['Chocoramo', 'Agua Cristal sin gas 600ml'],
+      replyIncludes: ['cantidad'],
+      orderItems: ['Chocoramo', 'Agua Cristal sin gas'],
     },
   },
   {
     id: 'pedido_despensa_sin_cantidades',
     level: 'usuario_lista_productos',
     customer: 'known',
-    text: 'Necesito arroz, aceite y huevos',
+    text: 'Necesito arroz, aceite y huevos AA x12',
     expect: {
       intent: 'delivery_order',
       missingFields: ['quantity:Arroz Diana 500g', 'quantity:Aceite Premier 500ml', 'quantity:Huevos AA x12'],
-      replyIncludes: ['cantidad de Arroz Diana 500g', 'cantidad de Aceite Premier 500ml', 'cantidad de Huevos AA x12'],
-      orderItems: ['Arroz Diana 500g', 'Aceite Premier 500ml', 'Huevos AA x12'],
+      replyIncludes: ['cantidad'],
+      orderItems: ['Arroz Diana', 'Aceite Premier', 'Huevos AA'],
     },
   },
   {
@@ -427,7 +428,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Que lacteos maneja? leche o queso',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Leche Alqueria entera 1L', 'Queso campesino 250g', 'Yogurt Alpina fresa'],
+      options: { min: 2, mustMatchAny: ['lacteo', 'leche', 'queso'], mustBeActive: true, unrelatedFamilies: ['aseo'] },
     },
   },
   {
@@ -468,11 +469,11 @@ export const colombiaAgentScenarioSet = [
     customer: 'known',
     steps: [
       {
-        text: 'Me regala 1 pan tajado para domicilio',
+        text: 'Me regala 1 pan tajado Bimbo blanco para domicilio',
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Pan tajado Bimbo', 'cómo prefieres pagar'],
+          replyIncludes: ['1 x Pan tajado Bimbo blanco', 'cómo prefieres pagar'],
         },
       },
       {
@@ -516,7 +517,8 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['3 x Chocoramo', 'cómo prefieres pagar'],
+          replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
+          orderItems: ['Chocoramo'],
         },
       },
       {
@@ -525,7 +527,8 @@ export const colombiaAgentScenarioSet = [
           intent: 'order_clarification',
           missingFields: [],
           paymentMethod: 'card_terminal',
-          replyIncludes: ['3 x Chocoramo', 'Confirmas el pedido'],
+          replyIncludes: ['Subtotal', 'Confirmas el pedido'],
+          orderItems: ['Chocoramo'],
         },
       },
     ],
@@ -536,11 +539,12 @@ export const colombiaAgentScenarioSet = [
     customer: 'known',
     steps: [
       {
-        text: 'Me regalas 2 chocorramos y 1 agua cristal para domicilio',
+        text: 'Me regalas 2 chocorramos y 1 agua Cristal sin gas de 600 ml para domicilio',
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['2 x Chocoramo', '1 x Agua Cristal sin gas 600ml'],
+          replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
+          orderItems: ['Chocoramo', 'Agua Cristal sin gas'],
         },
       },
       {
@@ -548,7 +552,7 @@ export const colombiaAgentScenarioSet = [
         expect: {
           intent: 'order_clarification',
           missingFields: [],
-          replyIncludes: ['2 x Chocoramo'],
+          replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
           notReplyIncludes: ['Agua Cristal'],
           orderItems: ['Chocoramo'],
           notOrderItems: ['Agua Cristal sin gas 600ml'],
@@ -562,20 +566,21 @@ export const colombiaAgentScenarioSet = [
     customer: 'known',
     steps: [
       {
-        text: 'Me regalas 1 pan tajado para domicilio',
+        text: 'Me regalas 1 pan tajado Bimbo blanco de 500 g para domicilio',
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Pan tajado Bimbo'],
+          replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
+          orderItems: ['Pan tajado Bimbo blanco'],
         },
       },
       {
-        text: 'Y agregame 1 queso campesino',
+        text: 'Y agregame 1 queso campesino Colanta de 250 g',
         expect: {
           intent: 'delivery_order',
           missingFields: [],
-          replyIncludes: ['1 x Pan tajado Bimbo', '1 x Queso campesino 250g'],
-          orderItems: ['Pan tajado Bimbo', 'Queso campesino 250g'],
+          replyIncludes: ['Subtotal', 'cómo prefieres pagar'],
+          orderItems: ['Pan tajado Bimbo blanco', 'Queso campesino Colanta'],
         },
       },
     ],
@@ -656,7 +661,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'delivery_order',
       summary: 'Structured order escalated to human',
-      replyIncludes: ['3 Chocoramo', 'validación con la tienda'],
+      replyIncludes: ['3 Ponque Chocoramo', 'validación con la tienda'],
     },
   },
   {

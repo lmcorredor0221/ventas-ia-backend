@@ -68,9 +68,9 @@ try {
   }, { cookie, csrfToken, expectedStatus: 403 });
 
   const ownerConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
-    googleSheets: { catalogRange: 'Catalogo!A1:J1000' },
+    googleSheets: { catalogRange: 'Catalogo!A1:P1000' },
   }, { cookie, csrfToken });
-  assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:J1000');
+  assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:P1000');
 
   const ownerConversationConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
     agentPolicy: { tone: 'formal_neutral' },

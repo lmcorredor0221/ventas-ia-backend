@@ -35,13 +35,17 @@ try {
   globalThis.fetch = async (url, options) => {
     capturedUrl = url;
     capturedOptions = options;
+    const request = JSON.parse(options.body);
+    const isReplyComposition = request.messages?.some((message) => message.content?.includes('Redacta la respuesta final'));
     return new Response(JSON.stringify({
       id: 'chatcmpl-test',
       choices: [
         {
           message: {
             role: 'assistant',
-            content: JSON.stringify({
+            content: JSON.stringify(isReplyComposition ? {
+              reply: 'Claro, veci. Tengo Chocoramo por $ 2.800.',
+            } : {
               intent: 'catalog_query',
               reasoningMode: 'shopkeeper_guided_sale',
               customerUnderstanding: {
@@ -76,7 +80,7 @@ try {
   const planner = new LLMPlanner({
     store,
     events: { emit: (event) => events.push(event) },
-    config: { llmRequestTimeoutMs: 5000, llmMaxTokens: 900 },
+    config: { llmRequestTimeoutMs: 5000, llmMaxTokens: 900, llmResponseComposerEnabled: true },
   });
 
   const plan = await planner.plan({
@@ -101,7 +105,8 @@ try {
   assert.equal(body.temperature, 0);
   assert.equal(body.max_tokens, 900);
   assert.deepEqual(body.response_format, { type: 'json_object' });
-  assert.ok(body.messages[1].content.includes('ventas-ia-llm-plan.v2') || body.messages[1].content.includes('toolPlan'));
+  assert.ok(body.messages[1].content.includes('semantic-frame.v1'));
+  assert.equal(body.messages[1].content.includes('catalogHints'), false);
 
   assert.equal(plan.executionMode, 'provider_api');
   assert.equal(plan.provider, 'deepseek');
@@ -112,6 +117,20 @@ try {
   assert.ok(createdEvent);
   assert.equal(createdEvent.metadata.providerMetadata.usage.total_tokens, 200);
   assert.equal(createdEvent.metadata.providerMetadata.endpoint, 'https://api.deepseek.com/chat/completions');
+
+  const composed = await planner.composeReply({
+    tenantId: 'andina',
+    conversationId: 'conv-llm-reply-test',
+    facts: {
+      kind: 'catalog_quote',
+      products: [{ name: 'Chocoramo' }],
+      subtotal: 2800,
+    },
+    fallbackText: 'Tengo Chocoramo por $ 2.800.',
+  });
+  assert.equal(composed.executionMode, 'provider_api');
+  assert.equal(composed.text, 'Claro, veci. Tengo Chocoramo por $ 2.800.');
+  assert.ok(events.some((event) => event.type === 'llm.reply.composed'));
 
   delete process.env.TEST_DEEPSEEK_API_KEY;
   store.mutate((state) => {
@@ -166,11 +185,11 @@ try {
   assert.ok(unknownProductPlan.order.items.some((item) => item.catalogQuery === 'six pack club colombia'));
   assert.ok(unknownProductPlan.order.items.some((item) => item.catalogQuery === 'malboro sandia'));
   assert.equal(unknownProductPlan.missingFields.includes('order_items'), false);
-  assert.equal(
-    unknownProductPlan.toolPlan.filter((step) => step.tool === 'google_sheets_read_table').length,
-    2,
+  assert.deepEqual(
+    unknownProductPlan.toolPlan,
+    [],
+    'El interprete no decide herramientas ni filtros para productos desconocidos.',
   );
-  assert.ok(unknownProductPlan.toolPlan.some((step) => step.tool === 'google_drive_file_picker'));
 
   const mixedKnownUnknownPlan = await planner.plan({
     tenantId: 'andina',
@@ -187,7 +206,11 @@ try {
   assert.equal(mixedKnownUnknownPlan.intent, 'delivery_order');
   assert.ok(mixedKnownUnknownPlan.order.items.some((item) => item.catalogQuery === 'calchichon' && item.budgetAmount === 5000));
   assert.ok(mixedKnownUnknownPlan.order.items.some((item) => item.catalogQuery.includes('coca') && item.requestedPresentation));
-  assert.ok(mixedKnownUnknownPlan.toolPlan.some((step) => step.filters?.query === 'calchichon'));
+  assert.deepEqual(
+    mixedKnownUnknownPlan.toolPlan,
+    [],
+    'La correccion linguistica no puede convertirse en un filtro de catalogo decidido por el LLM.',
+  );
 
   console.log('LLM provider contract tests passed');
 } finally {

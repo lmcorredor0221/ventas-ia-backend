@@ -250,8 +250,9 @@ try {
   });
   const unavailablePresentationReply = unavailablePresentationRun.conversation.messages.at(-1).text;
   assert.equal(unavailablePresentationRun.result.plan.intent, 'delivery_order');
-  assert.ok(unavailablePresentationReply.includes('Coca-Cola 400ml'));
-  assert.match(unavailablePresentationReply, /\$[\s\u00a0]*3\.200/);
+  assert.equal(unavailablePresentationRun.conversation.status, 'blocked');
+  assert.equal(unavailablePresentationRun.conversation.orderDraft.items[0].resolution.status, 'unavailable');
+  assert.equal(unavailablePresentationReply.includes('Coca-Cola 400ml'), false);
 
   const quantityRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',

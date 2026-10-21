@@ -1,10 +1,16 @@
+import {
+  DEFAULT_BILLING_PLAN_ID,
+  DEFAULT_INCLUDED_DELIVERIES,
+  DEFAULT_INCLUDED_INTERACTIONS,
+} from './billingService.js';
+
 const DEFAULT_LIMITS = {
-  includedDeliveries: 1000,
-  includedInteractions: 5000,
+  includedDeliveries: DEFAULT_INCLUDED_DELIVERIES,
+  includedInteractions: DEFAULT_INCLUDED_INTERACTIONS,
   includedLlmTokens: null,
 };
 
-const THRESHOLDS = [0.8, 0.9, 1];
+const THRESHOLDS = [0.7, 0.85, 1];
 
 export class UsageService {
   constructor({ store, events }) {
@@ -52,7 +58,7 @@ export class UsageService {
     return this.incrementMetric(tenantId, `tool_calls.${toolName}`, 1, metadata);
   }
 
-  recordLlmPlan(tenantId, { providerMetadata, inputText, outputPlan, executionMode, conversationId } = {}) {
+  recordLlmPlan(tenantId, { providerMetadata, inputText, outputPlan, executionMode, conversationId, stage = 'planner', durationMs = null } = {}) {
     if (!tenantId) return null;
     const usage = normalizeProviderUsage(providerMetadata?.usage);
     const promptTokens = usage.promptTokens ?? estimateTokens(inputText);
@@ -63,11 +69,20 @@ export class UsageService {
       model: providerMetadata?.model ?? outputPlan?.model,
       executionMode,
       conversationId,
+      stage,
+      durationMs: Number.isFinite(Number(durationMs)) ? Number(durationMs) : null,
       estimated: !providerMetadata?.usage,
     };
     this.incrementMetric(tenantId, 'llm_calls', 1, metadata);
+    this.incrementMetric(tenantId, `llm_calls.${stage}`, 1, metadata);
     this.incrementMetric(tenantId, 'llm_prompt_tokens', promptTokens, metadata);
+    this.incrementMetric(tenantId, `llm_prompt_tokens.${stage}`, promptTokens, metadata);
     this.incrementMetric(tenantId, 'llm_completion_tokens', completionTokens, metadata);
+    this.incrementMetric(tenantId, `llm_completion_tokens.${stage}`, completionTokens, metadata);
+    if (metadata.durationMs !== null) {
+      this.incrementMetric(tenantId, `llm_duration_ms.${stage}`, metadata.durationMs, metadata);
+    }
+    this.incrementMetric(tenantId, `llm_total_tokens.${stage}`, totalTokens, metadata);
     return this.incrementMetric(tenantId, 'llm_total_tokens', totalTokens, metadata);
   }
 
@@ -84,11 +99,17 @@ export class UsageService {
       llm_prompt_tokens: Number(counters.llm_prompt_tokens ?? 0),
       llm_completion_tokens: Number(counters.llm_completion_tokens ?? 0),
       llm_total_tokens: Number(counters.llm_total_tokens ?? 0),
+      llm_planner_calls: Number(counters['llm_calls.planner'] ?? 0),
+      llm_composer_calls: Number(counters['llm_calls.composer'] ?? 0),
+      llm_planner_tokens: Number(counters['llm_total_tokens.planner'] ?? 0),
+      llm_composer_tokens: Number(counters['llm_total_tokens.composer'] ?? 0),
+      llm_planner_duration_ms: Number(counters['llm_duration_ms.planner'] ?? 0),
+      llm_composer_duration_ms: Number(counters['llm_duration_ms.composer'] ?? 0),
     };
     return {
       tenantId,
       period: resolvedPeriod,
-      planCode: tenant?.config?.saas?.planCode ?? 'ventas_ia_1000_domicilios',
+      planCode: tenant?.config?.saas?.planCode ?? DEFAULT_BILLING_PLAN_ID,
       limits,
       metrics,
       percentages: {

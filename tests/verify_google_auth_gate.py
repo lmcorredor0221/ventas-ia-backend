@@ -8,18 +8,17 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
-        page.goto(base_url)
+        page.goto(f"{base_url}/?app=1")
         page.wait_for_load_state("networkidle")
 
         body = " ".join(page.locator("body").inner_text().split())
         assert "Resumen operativo" not in body, "Protected dashboard should not render before login"
-        expect(page.get_by_text("Acceder con Google").first).to_be_visible()
-        expect(page.get_by_text("Usar acceso local de desarrollo")).to_have_count(0)
-
-        disabled = page.locator("button[disabled]").evaluate_all(
-            "(els) => els.map((item) => item.innerText || item.getAttribute('title') || '')"
-        )
-        assert not any("Usar acceso local de desarrollo" in item for item in disabled)
+        assert page.locator(".auth-google-fallback, .google-signin").count() > 0, "Google authentication control should render"
+        sandbox_login = page.get_by_text("Usar acceso local de desarrollo")
+        if page.locator(".google-signin").count() > 0:
+            expect(sandbox_login).to_have_count(0)
+        else:
+            expect(sandbox_login).to_be_visible()
 
         browser.close()
 

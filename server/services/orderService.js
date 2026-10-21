@@ -93,6 +93,9 @@ export class OrderService {
     // mirror it. This keeps the tendero's queue usable during a Sheets outage.
     const sheetSync = { provider: 'google_sheets', status: this.outbox ? 'queued' : 'not_queued' };
     const sheetProjectionEntry = this.createSheetProjectionEntry({ order, nextStatus, now, traceId });
+    const dispatchNotificationEntry = nextStatus === ORDER_STATUSES.DISPATCHED
+      ? this.createDispatchNotificationEntry({ order, now, traceId })
+      : null;
     let updatedOrder;
     this.store.mutate((state) => {
       updatedOrder = (state.ordersByTenant?.[order.tenantId] ?? []).find((item) => item.id === order.id);
@@ -113,14 +116,32 @@ export class OrderService {
         conversation.nextStep = 'Pedido tomado por la tienda para alistar.';
         conversation.updatedAt = now;
       }
+      if (conversation && nextStatus === ORDER_STATUSES.DISPATCHED) {
+        conversation.status = 'completed';
+        conversation.caseStatus = 'completed';
+        conversation.stage = 'closed';
+        conversation.zone = 'completed';
+        conversation.nextStep = 'Pedido en camino; el siguiente mensaje iniciara una conversacion nueva.';
+        conversation.updatedAt = now;
+        updatedOrder.dispatchNotification = {
+          ...(updatedOrder.dispatchNotification ?? {}),
+          status: 'queued',
+          queuedAt: now,
+        };
+      }
     });
     if (this.store.persistOrderWithOutbox) {
-      await this.store.persistOrderWithOutbox(order.tenantId, order.id, sheetProjectionEntry ? [sheetProjectionEntry] : []);
+      await this.store.persistOrderWithOutbox(
+        order.tenantId,
+        order.id,
+        [sheetProjectionEntry, dispatchNotificationEntry].filter(Boolean),
+      );
     } else {
       await this.store.persistOrder?.(order.tenantId, order.id);
       if (sheetProjectionEntry) await this.store.enqueueOutbox?.(sheetProjectionEntry);
+      if (dispatchNotificationEntry) await this.store.enqueueOutbox?.(dispatchNotificationEntry);
     }
-    if (previousStatus === ORDER_STATUSES.PENDING_HUMAN_PREPARATION) {
+    if (previousStatus === ORDER_STATUSES.PENDING_HUMAN_PREPARATION || nextStatus === ORDER_STATUSES.DISPATCHED) {
       await this.store.persistConversation?.(order.conversationId);
     }
     const event = this.events?.emitAndWait
@@ -143,6 +164,7 @@ export class OrderService {
       previousStatus,
       status: nextStatus,
       projection: { provider: 'google_sheets', status: sheetSync.status },
+      notification: dispatchNotificationEntry ? { provider: 'whatsapp', status: 'queued' } : null,
       eventId: event?.id ?? null,
     };
   }
@@ -161,6 +183,25 @@ export class OrderService {
         conversationId: order.conversationId,
         status: nextStatus,
         updatedAt: now,
+        traceId,
+      },
+    });
+  }
+
+  createDispatchNotificationEntry({ order, now, traceId }) {
+    if (!this.outbox) return null;
+    return this.outbox.createEntry({
+      tenantId: order.tenantId,
+      kind: 'order.dispatch_notification',
+      aggregateType: 'order',
+      aggregateId: order.id,
+      idempotencyKey: `order-dispatch-notification:${order.id}`,
+      payload: {
+        tenantId: order.tenantId,
+        orderId: order.id,
+        conversationId: order.conversationId,
+        waId: order.waId,
+        queuedAt: now,
         traceId,
       },
     });

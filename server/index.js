@@ -109,6 +109,34 @@ function createExpressRuntime({ config, store }) {
         await store.persistOrder?.(entry.payload.tenantId, entry.payload.orderId);
         return result;
       },
+      'order.dispatch_notification': async (entry) => {
+        const order = Object.values(store.getState().ordersByTenant ?? {})
+          .flat()
+          .find((item) => item.id === entry.payload.orderId && item.tenantId === entry.payload.tenantId);
+        if (!order) throw new Error(`Order ${entry.payload.orderId} not found for dispatch notification`);
+        if (order.dispatchNotification?.sentAt) return { status: 'already_sent', sentAt: order.dispatchNotification.sentAt };
+        const conversation = store.getState().conversations.find((item) => item.id === order.conversationId);
+        const waId = order.waId ?? conversation?.waId ?? entry.payload.waId;
+        if (!waId) throw new Error(`Order ${order.id} has no WhatsApp recipient for dispatch notification`);
+        const delivery = await tools.call('whatsapp_business_messaging', order.tenantId, order.conversationId, {
+          action: 'send_session_message',
+          wa_id: waId,
+          text: `Tu pedido ${order.id} ya va en camino. Gracias por comprar con nosotros.`,
+        });
+        const sentAt = new Date().toISOString();
+        store.mutate((state) => {
+          const current = (state.ordersByTenant?.[order.tenantId] ?? []).find((item) => item.id === order.id);
+          if (!current) return;
+          current.dispatchNotification = {
+            ...(current.dispatchNotification ?? {}),
+            status: 'sent',
+            sentAt,
+            providerMessageId: delivery?.message_id ?? null,
+          };
+        });
+        await store.persistOrder?.(order.tenantId, order.id);
+        return { status: 'sent', sentAt, providerMessageId: delivery?.message_id ?? null };
+      },
       'whatsapp.inbound_processing': async (entry) => {
         if (!runtime) throw new Error('Inbound worker started before agent runtime initialization');
         return runtime.processQueuedInbound(entry.payload.messageId);

@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bogotaCatalogSeed } from '../server/data/bogotaCatalogSeed.js';
+import { enrichCatalogReference } from '../server/data/catalogReference.js';
+import { colombiaCatalogTestSeed300 } from '../server/data/colombiaCatalogExpansion.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -9,6 +11,13 @@ const rootDir = path.resolve(__dirname, '..');
 loadEnvFile(path.join(rootDir, '.env.google.local'));
 
 const tenantId = process.argv[2] ?? 'tienda-piloto-google';
+const catalogMode = process.argv.find((argument) => argument.startsWith('--catalog='))?.split('=', 2)[1] ?? 'bogota100';
+if (!['bogota100', 'colombia300'].includes(catalogMode)) {
+  throw new Error('Use --catalog=bogota100 o --catalog=colombia300.');
+}
+const products = catalogMode === 'colombia300'
+  ? colombiaCatalogTestSeed300
+  : bogotaCatalogSeed.map((product) => enrichCatalogReference(product));
 const { createAppAsync } = await import('../server/index.js');
 
 const runtime = await createAppAsync();
@@ -28,14 +37,15 @@ try {
   if (!refreshToken) throw new Error(`Tenant ${tenantId} has no readable Google refresh token`);
 
   const accessToken = await googleWorkspace.refreshAccessToken(refreshToken);
-  await writeCatalogToSheet({ accessToken, spreadsheetId, products: bogotaCatalogSeed });
-  await writeCatalogMirror({ store, tenantId, products: bogotaCatalogSeed });
+  await writeCatalogToSheet({ accessToken, spreadsheetId, products });
+  await writeCatalogMirror({ store, tenantId, products });
   await store.flush?.();
 
   console.log(JSON.stringify({
     tenantId,
     spreadsheetId,
-    products: bogotaCatalogSeed.length,
+    products: products.length,
+    catalogMode,
     sheetUrl: workspace.spreadsheet.url,
   }, null, 2));
 } finally {
@@ -44,7 +54,7 @@ try {
 
 async function writeCatalogToSheet({ accessToken, spreadsheetId, products }) {
   const values = [
-    ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id'],
+    ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id', 'descripcion', 'etiquetas', 'familia_producto', 'presentacion_normalizada', 'atributos_json', 'origen_catalogo'],
     ...products.map((product) => [
       product.sku,
       product.name,
@@ -56,9 +66,15 @@ async function writeCatalogToSheet({ accessToken, spreadsheetId, products }) {
       product.aliases.join('|'),
       product.active ? 'TRUE' : 'FALSE',
       product.driveFileId,
+      product.description ?? '',
+      (product.tags ?? []).join('|'),
+      product.productFamily ?? '',
+      product.normalizedPresentation ?? '',
+      JSON.stringify(product.attributes ?? {}),
+      product.catalogOrigin ?? '',
     ]),
   ];
-  const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/Catalogo!A1:J${values.length}?valueInputOption=RAW`, {
+  const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/Catalogo!A1:P${values.length}?valueInputOption=RAW`, {
     method: 'PUT',
     headers: {
       authorization: `Bearer ${accessToken}`,
@@ -86,6 +102,12 @@ async function writeCatalogMirror({ store, tenantId, products }) {
         aliases: product.aliases,
         brand: product.brand,
         presentation: product.presentation,
+        normalizedPresentation: product.normalizedPresentation ?? '',
+        description: product.description ?? '',
+        tags: product.tags ?? [],
+        productFamily: product.productFamily ?? '',
+        attributes: product.attributes ?? {},
+        catalogOrigin: product.catalogOrigin ?? '',
         active: product.active,
         updatedAt: new Date().toISOString(),
       });
@@ -95,7 +117,7 @@ async function writeCatalogMirror({ store, tenantId, products }) {
       fileId: product.driveFileId,
       name: `${product.name} - ficha comercial`,
       mimeType: 'application/vnd.google-apps.document',
-      summary: `${product.name}. Categoria: ${product.category}. Marca: ${product.brand}. Presentacion: ${product.presentation}. Precio base: ${product.price} COP. Alias: ${product.aliases.join(', ')}.`,
+      summary: `${product.name}. Categoria: ${product.category}. Marca: ${product.brand}. Presentacion: ${product.presentation}. Precio base: ${product.price} COP. Alias: ${product.aliases.join(', ')}. ${product.description ?? ''}`,
       productSku: product.sku,
       updatedAt: new Date().toISOString(),
     }));

@@ -1,8 +1,10 @@
+import { SHEET_ORDER_STATUSES } from '../domain/orderStatus.js';
+
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const SHEETS_API = 'https://sheets.googleapis.com/v4';
 
 export const GOOGLE_WORKSPACE_SHEETS = [
-  { name: 'Catalogo', range: 'Catalogo!A1:J1000', columns: ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id'] },
+  { name: 'Catalogo', range: 'Catalogo!A1:P1000', columns: ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id', 'descripcion', 'etiquetas', 'familia_producto', 'presentacion_normalizada', 'atributos_json', 'origen_catalogo'] },
   { name: 'Clientes', range: 'Clientes!A1:H1000', columns: ['telefono_whatsapp', 'nombre', 'direccion_principal', 'barrio', 'notas', 'preferencias', 'creado_en', 'actualizado_en'] },
   { name: 'Pedidos', range: 'Pedidos!A1:M1000', columns: ['pedido_id', 'telefono_whatsapp', 'cliente', 'direccion', 'items_json', 'subtotal', 'estado', 'handoff_id', 'creado_en', 'actualizado_en', 'origen', 'llm_modelo', 'traza'] },
   { name: 'Configuracion', range: 'Configuracion!A1:D200', columns: ['clave', 'valor', 'descripcion', 'actualizado_en'] },
@@ -150,7 +152,7 @@ export class GoogleWorkspaceService {
               rule: {
                 condition: {
                   type: 'ONE_OF_LIST',
-                  values: ['draft', 'confirmado', 'preparando', 'entregado', 'cancelado'].map((userEnteredValue) => ({ userEnteredValue })),
+                  values: SHEET_ORDER_STATUSES.map((userEnteredValue) => ({ userEnteredValue })),
                 },
                 inputMessage: 'Estado valido del pedido',
                 strict: true,
@@ -180,6 +182,14 @@ export class GoogleWorkspaceService {
         majorDimension: 'ROWS',
         values,
       },
+    });
+  }
+
+  async clearValues({ accessToken, spreadsheetId, range }) {
+    return googleFetch(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:clear`, {
+      method: 'POST',
+      accessToken,
+      body: {},
     });
   }
 
@@ -226,7 +236,7 @@ function validationRules() {
     'Catalogo.precio numerico mayor o igual a cero',
     'Catalogo.stock numerico mayor o igual a cero',
     'Clientes.telefono_whatsapp requerido',
-    'Pedidos.estado limitado a draft, confirmado, preparando, entregado, cancelado',
+    `Pedidos.estado limitado a ${SHEET_ORDER_STATUSES.join(', ')}`,
   ];
 }
 

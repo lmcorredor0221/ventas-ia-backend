@@ -1,21 +1,24 @@
 import crypto from 'node:crypto';
 
-export const DEFAULT_BILLING_PLAN_ID = 'ventas_ia_1000_domicilios';
+export const LEGACY_BILLING_PLAN_ID = 'ventas_ia_1000_domicilios';
+export const DEFAULT_BILLING_PLAN_ID = 'ventas_ia_400_domicilios';
+export const DEFAULT_INCLUDED_DELIVERIES = 400;
+export const DEFAULT_INCLUDED_INTERACTIONS = 2700;
 export const BILLING_GRACE_DAYS = 5;
 export const CHECKOUT_RECOVERY_DAYS = 7;
 
 export function defaultBillingPlan(now = new Date().toISOString()) {
   return {
     id: DEFAULT_BILLING_PLAN_ID,
-    name: 'Ventas IA 1.000 domicilios',
-    description: 'Plan mensual base para tiendas con hasta 1.000 domicilios y 5.000 interacciones por ciclo.',
+    name: 'Ventas IA Basico',
+    description: 'Plan mensual base para tiendas con hasta 400 domicilios por ciclo.',
     currency: 'COP',
     amount: 89000,
     billingFrequency: 'monthly',
-    includedDeliveries: 1000,
-    includedInteractions: 5000,
-    trialEnabled: false,
-    trialDays: 0,
+    includedDeliveries: DEFAULT_INCLUDED_DELIVERIES,
+    includedInteractions: DEFAULT_INCLUDED_INTERACTIONS,
+    trialEnabled: true,
+    trialDays: 7,
     graceDays: BILLING_GRACE_DAYS,
     isActive: true,
     isDefault: true,
@@ -28,6 +31,7 @@ export function defaultBillingPlan(now = new Date().toISOString()) {
 export function ensureBillingState(state) {
   const now = new Date().toISOString();
   state.billingPlans ??= [defaultBillingPlan(now)];
+  migrateLegacyPlanReferences(state, now);
   if (!state.billingPlans.some((plan) => plan.id === DEFAULT_BILLING_PLAN_ID)) {
     state.billingPlans.unshift(defaultBillingPlan(now));
   }
@@ -44,14 +48,22 @@ export function ensureBillingState(state) {
   state.billingFunnelEvents ??= [];
   for (const tenant of state.tenants ?? []) {
     const subscription = state.subscriptionsByTenant?.[tenant.id];
-    if (subscription) normalizeSubscription(subscription, defaultPlan(state), now);
+    if (subscription) {
+      const plan = planById(state, subscription.planId) ?? defaultPlan(state);
+      normalizeSubscription(subscription, plan, now);
+    }
     state.subscriptionPaymentsByTenant[tenant.id] ??= [];
     state.billingUsageCyclesByTenant[tenant.id] ??= [];
+    const cyclePlan = planById(state, subscription?.planId) ?? defaultPlan(state);
+    for (const cycle of state.billingUsageCyclesByTenant[tenant.id]) {
+      cycle.includedDeliveries = cyclePlan.includedDeliveries;
+      cycle.includedInteractions = cyclePlan.includedInteractions;
+    }
     if (!state.billingUsageCyclesByTenant[tenant.id].length && subscription) {
       state.billingUsageCyclesByTenant[tenant.id].push(createUsageCycle({
         tenantId: tenant.id,
         subscription,
-        plan: planById(state, subscription.planId) ?? defaultPlan(state),
+        plan: cyclePlan,
         now,
       }));
     }
@@ -66,8 +78,8 @@ export function normalizePlan(plan, now = new Date().toISOString()) {
     currency: String(plan.currency ?? 'COP'),
     amount: Number(plan.amount ?? 0),
     billingFrequency: String(plan.billingFrequency ?? plan.billing_frequency ?? 'monthly'),
-    includedDeliveries: Number(plan.includedDeliveries ?? plan.included_deliveries ?? 1000),
-    includedInteractions: Number(plan.includedInteractions ?? plan.included_interactions ?? 5000),
+    includedDeliveries: Number(plan.includedDeliveries ?? plan.included_deliveries ?? DEFAULT_INCLUDED_DELIVERIES),
+    includedInteractions: Number(plan.includedInteractions ?? plan.included_interactions ?? DEFAULT_INCLUDED_INTERACTIONS),
     trialEnabled: Boolean(plan.trialEnabled ?? plan.trial_enabled ?? false),
     trialDays: Number(plan.trialDays ?? plan.trial_days ?? 0),
     graceDays: Number(plan.graceDays ?? plan.grace_days ?? BILLING_GRACE_DAYS),
@@ -77,6 +89,36 @@ export function normalizePlan(plan, now = new Date().toISOString()) {
     createdAt: plan.createdAt ?? plan.created_at ?? now,
     updatedAt: now,
   };
+}
+
+function migrateLegacyPlanReferences(state, now) {
+  const legacy = state.billingPlans.find((plan) => plan.id === LEGACY_BILLING_PLAN_ID);
+  const current = state.billingPlans.find((plan) => plan.id === DEFAULT_BILLING_PLAN_ID);
+  if (legacy && !current) {
+    legacy.id = DEFAULT_BILLING_PLAN_ID;
+    legacy.name = 'Ventas IA Basico';
+    legacy.description = 'Plan mensual base para tiendas con hasta 400 domicilios por ciclo.';
+    legacy.includedDeliveries = DEFAULT_INCLUDED_DELIVERIES;
+    legacy.includedInteractions = DEFAULT_INCLUDED_INTERACTIONS;
+    legacy.updatedAt = now;
+  } else if (legacy) {
+    legacy.isActive = false;
+    legacy.isDefault = false;
+  }
+
+  for (const tenant of state.tenants ?? []) {
+    if (tenant.config?.saas?.planCode !== LEGACY_BILLING_PLAN_ID) continue;
+    tenant.config.saas.planCode = DEFAULT_BILLING_PLAN_ID;
+    tenant.config.saas.includedDeliveries = DEFAULT_INCLUDED_DELIVERIES;
+    tenant.config.saas.includedInteractions = DEFAULT_INCLUDED_INTERACTIONS;
+  }
+  for (const subscription of Object.values(state.subscriptionsByTenant ?? {})) {
+    if (subscription.planId !== LEGACY_BILLING_PLAN_ID) continue;
+    subscription.planId = DEFAULT_BILLING_PLAN_ID;
+    subscription.includedDeliveries = DEFAULT_INCLUDED_DELIVERIES;
+    subscription.includedInteractions = DEFAULT_INCLUDED_INTERACTIONS;
+    subscription.updatedAt = now;
+  }
 }
 
 export function defaultPlan(state) {

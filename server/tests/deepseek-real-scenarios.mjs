@@ -80,9 +80,7 @@ try {
       }
       const llmUsage = latestLlmUsage(store, run.conversation.id);
       addUsageTotals(usageTotals, llmUsage);
-      if (['catalog_query', 'delivery_order'].includes(plan.intent) && (plan.candidateItems?.length ?? 0) > 0) {
-        assert.ok(plan.toolPlan.some((toolStep) => toolStep.tool === 'google_sheets_read_table'), `${scenario.id}: debe consultar catalogo`);
-      }
+      assert.deepEqual(plan.toolPlan, [], `${scenario.id}: el interprete no debe emitir herramientas ni filtros de catalogo`);
       traces.push({
         scenarioId: scenario.id,
         step: stepIndex + 1,

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { platformLlmConfig } from './platformService.js';
+import { semanticFrameFromPlan, semanticFrameToLegacyPlan } from '../domain/semanticContracts.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -77,6 +78,7 @@ export class LLMPlanner {
   }
 
   async plan({ tenantId, conversationId, normalized, customerProfile, conversation }) {
+    const startedAt = Date.now();
     const tenant = await this.getTenant(tenantId);
     const platformConfig = platformLlmConfig(this.store.getState());
     const config = {
@@ -125,7 +127,16 @@ export class LLMPlanner {
         metadata: { provider, model: config.model, simulator: config.simulator },
       });
     }
-    const coerced = coercePlanWithConversation(parsed, { text, conversation });
+    // El modelo interpreta lenguaje y conserva la incertidumbre. La ruta que
+    // decide catalogo, precio, stock y herramientas recibe un adaptador sin
+    // SKU ni filtros sugeridos por el modelo.
+    const semanticFrame = semanticFrameFromPlan(parsed, {
+      text,
+      messageId: normalized.messageId,
+      conversation,
+    });
+    const compatiblePlan = semanticFrameToLegacyPlan(semanticFrame, { sourcePlan: parsed });
+    const coerced = coercePlanWithConversation(compatiblePlan, { text, conversation });
     const enriched = enrichPlannerOutput(coerced, text);
     const plan = {
       schemaVersion: 'ventas-ia-llm-plan.v2',
@@ -135,6 +146,11 @@ export class LLMPlanner {
       executionMode,
       confidence: enriched.confidence,
       ...enriched,
+      semanticFrame: {
+        ...semanticFrame,
+        intent: enriched.intent,
+        delivery: Boolean(enriched.order?.delivery),
+      },
     };
     this.events.emit({
       type: 'llm.plan.created',
@@ -145,7 +161,9 @@ export class LLMPlanner {
         mode: plan.mode,
         recommendedTools: plan.recommendedTools,
         missingFields: plan.missingFields,
+        semanticFrameVersion: plan.semanticFrame?.schemaVersion,
         providerMetadata,
+        durationMs: Date.now() - startedAt,
       },
     });
     this.usage?.recordLlmPlan(tenantId, {
@@ -154,6 +172,8 @@ export class LLMPlanner {
       outputPlan: plan,
       executionMode,
       conversationId,
+      stage: 'planner',
+      durationMs: Date.now() - startedAt,
     });
     return plan;
   }
@@ -164,11 +184,12 @@ export class LLMPlanner {
     if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(config.provider).join('/')}`);
     const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, config });
 
-    if (config.provider === 'google') return callGemini({ config, apiKey, prompt });
-    return callChatCompletions({ config, apiKey, prompt });
+    if (config.provider === 'google') return retryTransientProviderCall(() => callGemini({ config, apiKey, prompt }));
+    return retryTransientProviderCall(() => callChatCompletions({ config, apiKey, prompt }));
   }
 
   async composeReply({ tenantId, conversationId, facts, fallbackText }) {
+    const startedAt = Date.now();
     const tenant = await this.getTenant(tenantId);
     const platformConfig = platformLlmConfig(this.store.getState());
     const config = {
@@ -191,15 +212,24 @@ export class LLMPlanner {
       if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(provider).join('/')}`);
       const prompt = buildReplyPrompt({ facts, fallbackText, config });
       const result = provider === 'google'
-        ? await callGeminiReply({ config, apiKey, prompt })
-        : await callChatReply({ config, apiKey, prompt });
+        ? await retryTransientProviderCall(() => callGeminiReply({ config, apiKey, prompt }))
+        : await retryTransientProviderCall(() => callChatReply({ config, apiKey, prompt }));
       const text = validateComposedReply(result.text, { facts, fallbackText });
       this.events.emit({
         type: 'llm.reply.composed',
         tenantId,
         conversationId,
         detail: `Customer reply composed via ${result.providerMetadata.provider}/${result.providerMetadata.model}`,
-        metadata: { providerMetadata: result.providerMetadata, voice: normalizeVoiceProfile(config.tone) },
+        metadata: { providerMetadata: result.providerMetadata, voice: normalizeVoiceProfile(config.tone), durationMs: Date.now() - startedAt },
+      });
+      this.usage?.recordLlmPlan(tenantId, {
+        providerMetadata: result.providerMetadata,
+        inputText: prompt,
+        outputPlan: { reply: text },
+        executionMode: 'provider_api',
+        conversationId,
+        stage: 'composer',
+        durationMs: Date.now() - startedAt,
       });
       return { text, executionMode: 'provider_api', providerMetadata: result.providerMetadata };
     } catch (error) {
@@ -382,34 +412,59 @@ export class LLMPlanner {
 }
 
 function extractItems(text, products) {
+  const normalizedText = normalize(text);
   const matches = products
     .map((product) => {
       const aliases = [product.name, product.sku, ...(product.aliases ?? [])].filter(Boolean);
       const match = aliases
-        .map((alias) => ({ alias, index: findAliasIndex(normalize(text), normalize(alias)) }))
+        .map((alias) => ({ alias, index: findAliasIndex(normalizedText, normalize(alias)) }))
         .filter((item) => item.index >= 0)
         .sort((a, b) => a.index - b.index)[0];
       if (!match) return null;
-      const before = text.slice(Math.max(0, match.index - 28), match.index).trim();
+      const before = normalizedText.slice(Math.max(0, match.index - 28), match.index).trim();
+      const budgetAmount = inferBudgetAmount(before);
       return {
         rawName: match.alias,
-        quantity: inferQuantity(before),
-        budgetAmount: inferBudgetAmount(before),
+        // "5000 de salchichon" expresa un valor objetivo, no cinco mil
+        // unidades. El resolutor tratara el presupuesto como tal y validara
+        // disponibilidad sin convertirlo en una cantidad de inventario.
+        quantity: budgetAmount ? null : inferQuantityForMatch(normalizedText, match.index) ?? inferQuantity(before),
+        budgetAmount,
         catalogQuery: product.name,
         skuHint: product.sku,
         confidence: 0.92,
-        ...presentationFromNearbyText(text, match.index, match.alias, product),
+        matchIndex: match.index,
+        matchLength: match.alias.length,
+        ...presentationFromNearbyText(normalizedText, match.index, match.alias),
       };
     })
     .filter(Boolean);
+  // Distintas filas del catalogo pueden compartir aliases. Una sola frase del
+  // cliente debe generar un unico item semantico; la competencia entre SKU se
+  // resuelve despues, con CandidateSet/ResolutionSet, no en el interprete.
+  const nonOverlappingMatches = [...matches]
+    .sort((left, right) => left.matchIndex - right.matchIndex || right.matchLength - left.matchLength)
+    .filter((match, index, all) => !all.slice(0, index).some((selected) => (
+      match.matchIndex < selected.matchIndex + selected.matchLength
+      && selected.matchIndex < match.matchIndex + match.matchLength
+    )));
   const byGenericRequest = new Map();
-  for (const match of matches) {
+  for (const match of nonOverlappingMatches) {
     const key = mentionsPresentation(normalize(match.rawName))
       ? `${normalize(match.rawName)}:${match.skuHint}`
       : normalize(match.rawName);
     if (!byGenericRequest.has(key)) byGenericRequest.set(key, match);
   }
-  return [...byGenericRequest.values()];
+  return [...byGenericRequest.values()].map(({ matchIndex, matchLength, ...item }) => item);
+}
+
+function inferQuantityForMatch(text, matchIndex) {
+  const prefix = String(text ?? '').slice(0, Math.max(0, matchIndex));
+  const fragment = prefix.split(/\s+(?:y|tambien|también|ademas|además)\s+|,/).at(-1) ?? '';
+  const quantities = [...fragment.matchAll(/\b(\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/g)]
+    .map((match) => NUMBER_WORDS[match[1]] ?? Number(match[1]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return quantities.at(-1) ?? null;
 }
 
 function mergePlannerItems(...groups) {
@@ -537,16 +592,28 @@ function sameSimpleWord(a, b) {
   return false;
 }
 
-function presentationFromNearbyText(text, matchIndex, alias, product) {
-  const window = normalize(text.slice(matchIndex, matchIndex + alias.length + 18));
+function presentationFromNearbyText(text, matchIndex, alias) {
+  // Una presentacion debe pertenecer a la misma clausula del producto. Sin
+  // este limite, en "arroz, aceite y huevos AA x12" el x12 se atribuía a
+  // aceite. Conservamos "litro y medio" como una sola expresion valida.
+  const suffix = String(text ?? '').slice(matchIndex + alias.length);
+  const clause = suffix
+    .split(/[,.!?;]/, 1)[0]
+    .split(/\s+(?:y|tambien|también|ademas|además)\s+(?!medio\b)/, 1)[0];
+  const window = normalize(`${alias} ${clause.slice(0, 18)}`);
   const requestedPresentation = nearbyPresentation(window);
   if (!requestedPresentation) return {};
-  const fields = [product.name, product.presentation, ...(product.aliases ?? [])].map(normalize).join(' ');
-  const requestedNumber = requestedPresentation.match(/\d{2,4}/)?.[0];
-  if (requestedNumber && fields.includes(requestedNumber)) return {};
+  const aliasTerms = normalize(alias).split(/\s+/).filter(Boolean);
+  const presentationTerms = normalize(requestedPresentation).split(/\s+/).filter(Boolean);
+  const aliasAlreadyIncludesPresentation = presentationTerms.length && presentationTerms.every((term) => (
+    aliasTerms.some((aliasTerm) => sameSimpleWord(aliasTerm, term))
+  ));
+  const requestedName = aliasAlreadyIncludesPresentation
+    ? alias
+    : `${alias} ${requestedPresentation}`.trim();
   return {
-    rawName: `${alias} ${requestedPresentation}`.trim(),
-    catalogQuery: `${alias} ${requestedPresentation}`.trim(),
+    rawName: requestedName,
+    catalogQuery: requestedName,
     skuHint: null,
     requestedPresentation,
     confidence: 0.7,
@@ -557,6 +624,8 @@ function presentationFromNearbyText(text, matchIndex, alias, product) {
 function nearbyPresentation(value) {
   if (/\b(?:(?:un|una)\s+)?litro\s+y\s+medio\b/.test(value)) return '1.5 L';
   if (/\bmedio\s+litro\b/.test(value)) return '500 ml';
+  const count = value.match(/\bx\s*(\d{1,3})\b/);
+  if (count) return `x${count[1]}`;
   return value.match(/\b(\d{2,4})\s*(ml|mililitros?|cc)?\b/)?.[0] ?? null;
 }
 
@@ -717,45 +786,48 @@ function looksLikeNewOrder(text) {
   ]);
 }
 
-function buildPlannerPrompt({ text, customerProfile, conversation, products, config = {} }) {
-  const catalog = (products ?? []).map(({ sku, name, aliases, category, stock }) => ({
-    sku,
-    name,
-    aliases,
-    category,
-    stock,
-  }));
+function buildPlannerPrompt({ text, customerProfile, conversation, config = {} }) {
   return [
-    'Eres el planner estructurado de un agente comercial por WhatsApp.',
-    'Devuelve solo JSON valido con: intent, reasoningMode, customerUnderstanding, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
+    'Eres el interprete semantico de un agente comercial por WhatsApp.',
+    'Devuelve solo JSON valido con el contrato semantic-frame.v1: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, confidence.',
     'No incluyas markdown, explicaciones ni texto fuera del JSON.',
     'Intents permitidos: delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
-    'reasoningMode debe ser shopkeeper_guided_sale para ventas de tienda de barrio.',
-    'customerUnderstanding debe incluir rawNeed, certainty, occasion y delivery.',
-    `Perfil de voz de la tienda: ${normalizeVoiceProfile(config.tone)}. Debes actuar como tendero colombiano razonando la canasta antes de validar disponibilidad: interpreta modismos, errores de escritura, marcas incompletas, presentaciones, sabores, cantidades y pedidos por valor.`,
-    'No hagas parsing deterministico por alias exacto. Primero extrae hipotesis de producto desde el lenguaje del cliente; luego decide como validarlas con herramientas.',
-    'candidateItems conserva cada producto, ingrediente o categoria candidata con rawName, catalogQuery, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
-    'toolPlan debe declarar las herramientas que quieres usar y sus filtros. Para catalogo usa google_sheets_read_table con filters {sku}, {query} o {category}.',
-    'responseStrategy permitidos: guide, quote, ask_clarification, partial_availability, approval, handoff, transactional_write.',
-    'Reglas: si falta cantidad de un producto, agrega quantity:<nombre>. Si cliente nuevo pide domicilio, pide customer_name y delivery_address.',
-    'Si el cliente pide una marca generica y el catalogo aterriza en una presentacion especifica no mencionada, agrega presentation:<nombre> para confirmar tamano/variedad.',
-    'No tomes como cierta la afirmacion del cliente sobre disponibilidad, precios o stock; siempre tratalo como candidato y valida con herramientas.',
-    'Si el cliente pregunta "tiene", "hay", "maneja" o expresa duda, usa catalog_query aunque mencione productos concretos.',
-    'Si el cliente menciona varios productos o ingredientes, conserva cada candidato en order.items; no reduzcas la consulta al primero.',
-    'Si parte de la lista no aparece en catalogo, conserva el termino crudo para que el runtime pueda responder disponibilidad parcial o escalar.',
-    'Si un termino parece mal escrito, conserva rawName original y usa catalogQuery con la mejor hipotesis razonada; si no estas seguro, marca confidence bajo y ambiguityReason.',
-    'Si el cliente pide "5000 de X", no lo trates como 5000 unidades: usa budgetAmount 5000 y quantity null o 1 segun contexto.',
-    'Si el cliente indica forma de pago ("tarjeta debito", "datafono", "efectivo", "Nequi"), registralo como preferencia de pago; no lo clasifiques como pago confirmado sin comprobante.',
-    'Si el cliente reclama un faltante, entrega equivocada, demora, producto danado o pregunta por que llego incompleto, usa human_handoff con contexto operativo.',
-    'El identificador del cliente es wa_id; no inventes nombre ni direccion.',
-    'Para pedido confirmado completo recomienda google_sheets_order_write, human_handoff y whatsapp_business_messaging.',
+    `Contexto cultural de interpretacion: ${normalizeVoiceProfile(config.tone)}. Interpreta modismos colombianos, errores de escritura probables, marcas incompletas, cantidades, sabores, ocasiones y senales como personal, familiar, grande o para compartir.`,
+    'Cada items[] debe contener rawText literal, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. No elimines ningun producto mencionado.',
+    'rawText conserva exactamente lo solicitado. productHypothesis es una hipotesis, nunca un SKU. presentationSignal puede ser una medida explicita o una senal contextual, nunca una referencia comercial definitiva.',
+    'customerDelta solo puede incluir name, address y paymentPreference expresamente comunicados por el cliente. No inventes datos.',
+    'No incluyas SKU, precio, stock, subtotal, candidatos de catalogo, aliases, toolPlan, filtros, herramientas, recommendedTools ni una eleccion final de producto.',
+    'No asumas disponibilidad. Si el termino es incierto, conserva rawText, plantea la mejor hipotesis y baja confidence o explica ambiguity.',
+    'Si el cliente pregunta "tiene", "hay" o "maneja", usa catalog_query aunque mencione productos concretos. Si reclama un faltante, entrega equivocada, demora o dano, usa human_handoff.',
+    'Sin domicilio, cantidad, presupuesto ni una accion directa de compra (por ejemplo "me manda" o "me regala"), una consulta abierta como "me colabora con mecato" o "jabon para lavar ropa" usa catalog_query; no pidas pago para una consulta.',
+    'Si el cliente pide "5000 de X", usa budgetAmount 5000; no lo conviertas en 5000 unidades.',
     JSON.stringify({
       text,
-      customerProfile,
-      existingOrderDraft: conversation?.orderDraft ?? null,
-      products: catalog,
+      customerProfile: customerProfile ? {
+        name: customerProfile.name ?? null,
+        defaultAddress: customerProfile.defaultAddress ?? null,
+        preferredPaymentMethod: customerProfile.preferences?.preferredPaymentMethod ?? null,
+      } : null,
+      existingOrder: semanticOrderContext(conversation?.orderDraft),
     }),
   ].join('\n');
+}
+
+function semanticOrderContext(draft) {
+  if (!draft) return null;
+  return {
+    version: Number(draft.version ?? 0),
+    delivery: Boolean(draft.delivery),
+    paymentMethod: draft.paymentMethod ?? null,
+    missingFields: Array.isArray(draft.missingFields) ? draft.missingFields : [],
+    items: (draft.items ?? []).map((item) => ({
+      rawItemId: item.rawItemId ?? null,
+      rawText: item.rawName ?? item.catalogQuery ?? null,
+      productName: item.product?.name ?? null,
+      quantity: item.quantity ?? null,
+      presentation: item.product?.presentation ?? item.requestedPresentation ?? null,
+    })),
+  };
 }
 
 function buildReplyPrompt({ facts, fallbackText, config }) {
@@ -779,7 +851,7 @@ function validateComposedReply(text, { facts, fallbackText }) {
   if (requiredTerms.some((term) => !normalizedReply.includes(normalize(term)))) return fallbackText;
   const allowedMoney = extractMoneyTokens(JSON.stringify(facts ?? {}).concat(` ${fallbackText}`));
   const replyMoney = extractMoneyTokens(reply);
-  if (replyMoney.some((value) => !allowedMoney.has(value))) return fallbackText;
+  if ([...replyMoney].some((value) => !allowedMoney.has(value))) return fallbackText;
   return reply;
 }
 
@@ -814,25 +886,21 @@ function normalizeVoiceProfile(value) {
 }
 
 function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) {
-  const catalog = compactCatalogHints(products, text);
   return [
     'Responde solo JSON valido, sin markdown.',
     'Eres un planner de pedidos por WhatsApp para una tienda de barrio en Colombia.',
     'Tu tarea es inferir heurísticamente la canasta: corrige errores ortográficos probables, modismos, marcas incompletas, presentaciones, cantidades y pedidos por valor.',
-    'No confirmes disponibilidad: solo propone candidatos y herramientas para validar en Google Sheets/Drive.',
-    'Contrato JSON: intent, reasoningMode, customerUnderstanding, candidateItems, toolPlan, missingInfo, responseStrategy, order, recommendedTools, missingFields, confidence.',
-    'Para cada item usa rawName original, catalogQuery inferido, quantity, budgetAmount, requestedPresentation, confidence, ambiguityReason y skuHint si aplica.',
+    'No confirmes disponibilidad ni propongas herramientas: solo interpreta lenguaje.',
+    'Contrato JSON semantic-frame.v1: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, confidence.',
+    'Para cada item usa rawText original, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. Trata familiar, personal y grande como hipotesis contextuales, no como medidas fijas.',
     'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
     'Si el cliente reclama entrega incompleta, producto equivocado, demora o faltante, escala a humano con human_handoff.',
-    'Usa google_sheets_read_table para validar cada item; usa query generica razonada cuando haya duda.',
-    'Si hay producto ambiguo o presentacion no confirmada, responde con estrategia ask_clarification o handoff: reconoce lo que entendiste, explica la duda sin afirmar disponibilidad y pide nombre/direccion si faltan.',
-    'El tono esperado para respuesta al cliente es tendero colombiano amable: claro, breve, cercano, tipo "Claro, veci. Te entiendo..." sin exagerar confianza ni inventar stock.',
+    'No incluyas SKU, precio, stock, subtotal, candidatos de catalogo, aliases, toolPlan ni una respuesta dirigida al cliente.',
     JSON.stringify({
       text,
       customerProfile,
-      existingOrderDraft: conversation?.orderDraft ?? null,
-      catalogHints: catalog,
+      existingOrder: semanticOrderContext(conversation?.orderDraft),
     }),
   ].join('\n');
 }
@@ -842,7 +910,17 @@ function compactCatalogHints(products = [], text = '') {
   const tokens = splitCatalogWords(normalizedText).filter((token) => token.length >= 4);
   const selected = [];
   for (const product of products) {
-    const fields = [product.name, product.category, ...(product.aliases ?? [])].join(' ');
+    const fields = [
+      product.name,
+      product.brand,
+      product.category,
+      product.presentation,
+      product.normalizedPresentation,
+      product.description,
+      product.productFamily,
+      ...(product.tags ?? []),
+      ...(product.aliases ?? []),
+    ].join(' ');
     const normalizedFields = normalize(fields);
     const productTokens = splitCatalogWords(fields);
     const direct = tokens.some((token) => normalizedFields.includes(token) || productTokens.some((candidate) => maybeRelatedToken(token, candidate)));
@@ -855,11 +933,17 @@ function compactCatalogHints(products = [], text = '') {
     );
     if (direct || domainHint) selected.push(product);
   }
-  return selected.slice(0, 12).map(({ sku, name, aliases, category, stock }) => ({
+  return selected.slice(0, 12).map(({ sku, name, aliases, category, brand, presentation, normalizedPresentation, description, tags, productFamily, stock }) => ({
     sku,
     name,
     aliases,
     category,
+    brand,
+    presentation,
+    normalizedPresentation,
+    description,
+    tags,
+    productFamily,
     stock,
   }));
 }
@@ -1075,6 +1159,7 @@ async function callGeminiReply({ config, apiKey, prompt }) {
 }
 
 function normalizeProviderPlan(plan) {
+  if (plan?.schemaVersion === 'semantic-frame.v1' || Array.isArray(plan?.items)) return plan;
   const customerUnderstanding = normalizeCustomerUnderstanding(plan.customerUnderstanding);
   const intent = normalizeProviderIntent(plan.intent);
   return enrichPlannerOutput({
@@ -1128,6 +1213,14 @@ function coercePlanWithConversation(plan, { text, conversation }) {
       ...plan,
       intent: 'catalog_query',
       responseStrategy: plan.responseStrategy ?? 'guide',
+      missingFields: [],
+    };
+  }
+  if (intent === 'delivery_order' && !conversation?.orderDraft && !plan.order?.delivery && !planHasConcreteQuantity(plan) && !looksLikePurchaseRequest(normalized)) {
+    return {
+      ...plan,
+      intent: 'catalog_query',
+      responseStrategy: 'guide',
       missingFields: [],
     };
   }
@@ -1219,9 +1312,10 @@ function enrichPlannerOutput(plan, text) {
     reasoningMode: normalizeReasoningMode(plan.reasoningMode),
     customerUnderstanding,
     candidateItems: enrichedCandidateItems,
-    toolPlan: Array.isArray(plan.toolPlan) && plan.toolPlan.length
-      ? plan.toolPlan
-      : buildToolPlan({ intent: plan.intent, items: enrichedCandidateItems, order, responseStrategy }),
+    // La seleccion y los filtros de herramientas son responsabilidad del
+    // runtime/resolutor. El interprete no conserva ni reconstruye un plan de
+    // herramientas que pueda contaminar la evidencia comercial.
+    toolPlan: [],
     missingInfo: Array.isArray(plan.missingInfo) ? plan.missingInfo : missingFields,
     responseStrategy,
     order,
@@ -1279,75 +1373,6 @@ function normalizeResponseStrategy(strategy) {
   if (containsAny(normalized, ['clarification', 'preguntar', 'aclarar'])) return 'ask_clarification';
   if (containsAny(normalized, ['quote', 'cotizar'])) return 'quote';
   return null;
-}
-
-function buildToolPlan({ intent, items, order, responseStrategy }) {
-  const plan = [];
-  if (intent === 'catalog_query' || intent === 'delivery_order') {
-    for (const [index, item] of items.entries()) {
-      plan.push({
-        tool: 'google_sheets_read_table',
-        purpose: intent === 'delivery_order' ? 'validate_order_item' : 'catalog_search',
-        candidateIndex: index,
-        candidate: item.catalogQuery ?? item.rawName,
-        filters: item.skuHint ? { sku: item.skuHint } : inferPlannerFilters(item.catalogQuery ?? item.rawName),
-      });
-    }
-    if (intent === 'catalog_query' || intent === 'delivery_order') {
-      plan.push({
-        tool: 'google_drive_file_picker',
-        purpose: intent === 'delivery_order' ? 'fetch_product_files_for_order_validation' : 'fetch_product_files_for_reply',
-        fileIdsFromPreviousResults: true,
-      });
-    }
-    plan.push({
-      tool: 'whatsapp_business_messaging',
-      purpose: responseStrategy === 'ask_clarification' ? 'ask_missing_info' : 'send_customer_reply',
-    });
-  }
-  if (intent === 'order_confirmation') {
-    plan.push(
-      { tool: 'google_sheets_order_write', purpose: 'persist_confirmed_order' },
-      { tool: 'human_handoff', purpose: 'prepare_and_deliver_order' },
-      { tool: 'whatsapp_business_messaging', purpose: 'send_confirmation_receipt' },
-    );
-  }
-  if (intent === 'discount_request') {
-    plan.push(
-      { tool: 'approval_gate', purpose: 'request_discount_approval' },
-      { tool: 'whatsapp_business_messaging', purpose: 'tell_customer_discount_is_under_review' },
-    );
-  }
-  if (intent === 'payment_confirmation') {
-    plan.push({ tool: 'approval_gate', purpose: 'request_payment_write_approval' });
-  }
-  if (intent === 'human_handoff') {
-    plan.push(
-      { tool: 'human_handoff', purpose: 'handoff_to_sales_team' },
-      { tool: 'whatsapp_business_messaging', purpose: 'tell_customer_human_will_continue' },
-    );
-  }
-  return plan;
-}
-
-function inferPlannerFilters(query) {
-  const normalized = normalize(query);
-  if (normalized.includes('chocoramo') || normalized.includes('chocorramo')) return { query: 'chocoramo' };
-  if (normalized.includes('cifrut') || normalized.includes('granadilla')) return { query: 'cifrut granadilla' };
-  if (normalized.includes('gaseosa') || normalized.includes('coca')) return { query: 'gaseosa' };
-  if (normalized.includes('savital')) return { query: 'savital' };
-  if (normalized === 'queso' || normalized.includes('queso campesino')) return { query: 'queso' };
-  if (normalized === 'pan' || normalized.includes('pan tajado')) return { query: 'pan' };
-  if (normalized.includes('jamon')) return { query: 'jamon' };
-  if (containsAny(normalized, ['jugo', 'jugos'])) return { query: 'jugo' };
-  if (containsAny(normalized, ['bebida', 'bebidas', 'sed', 'tomar', 'frio', 'fria'])) return { category: 'bebidas' };
-  if (containsAny(normalized, ['mecato', 'snack', 'snacks', 'dulce', 'antojo', 'galleta', 'papas', 'barato', 'economico', 'economica', 'lonchera', 'refrigerio', 'picar'])) return { category: 'snacks' };
-  if (containsAny(normalized, ['cafe', 'cafes', 'tinto', 'tintico'])) return { category: 'cafe' };
-  if (containsAny(normalized, ['aseo', 'limpieza', 'jabon', 'shampoo', 'papel'])) return { category: 'aseo' };
-  if (containsAny(normalized, ['panaderia', 'panaderia', 'onces', 'arepa', 'desayuno'])) return { category: 'panaderia' };
-  if (containsAny(normalized, ['leche', 'queso', 'yogur', 'yogurt', 'lacteo', 'lacteos'])) return { category: 'lacteos' };
-  if (containsAny(normalized, ['arroz', 'aceite', 'huevos', 'despensa', 'mercado'])) return { category: 'despensa' };
-  return { query };
 }
 
 function inferResponseStrategy({ intent, items, missingFields }) {
@@ -1455,6 +1480,33 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Tres intentos acotados absorben cortes breves de red o respuestas temporales
+// del proveedor sin convertir una degradacion real en una espera indefinida.
+async function retryTransientProviderCall(action, { attempts = 3, delayMs = 250 } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isTransientProviderError(error)) throw error;
+      await sleep(delayMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function isTransientProviderError(error) {
+  const message = String(error?.message ?? '').toLowerCase();
+  return message.includes('fetch failed')
+    || message.includes('timeout')
+    || /api\s+(429|5\d\d)\b/.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function shorten(value, max = 500) {

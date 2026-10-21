@@ -374,6 +374,15 @@ Google exige coincidencia exacta del redirect URI; un cambio de dominio, path, e
 - [Supabase: conexion a PostgreSQL](https://supabase.com/docs/guides/database/connecting-to-postgres)
 - [Google: OAuth 2.0 para aplicaciones web](https://developers.google.com/identity/protocols/oauth2/web-server)
 
-## 10. Siguiente accion recomendada
+## 10. Registro de ejecución 2026-10-15
+
+- Backend `ventas-ia-backend` publicado en `main` con commit `71f2e3e`; Render deployment `dep-db8ifi0u01pc738arm9g` quedó `live`.
+- Frontend `ventas-ia-frontend` publicado en `main` con commits `63a9b70` y `a121816`; Vercel deployment `dpl_6z8yg2SsdwdU5RxGySz3UAhNeJr8` quedó `READY` y asociado a `via.leanagentbuilder.com`.
+- Se agregó fallback SPA de Vercel para que `/landing` responda `200` en navegación directa.
+- `https://ventas-ia-backend-free.onrender.com/health` y `https://via.leanagentbuilder.com/api/health` respondieron `200`; las rutas protegidas sin sesión respondieron `401`.
+- La implementación no modificó `www.leanagentbuilder.com`, el proyecto Vercel anterior, el servicio Render anterior ni sus bases asociadas.
+- El conector Supabase de esta sesión no tiene permisos sobre el ref independiente `mmcxphpstxjugxjrdffb`; por eso no se ejecutó SQL manual. Render sí inició usando el PostgreSQL configurado y queda una verificación directa pendiente de reautenticación.
+
+## 11. Siguiente accion recomendada
 
 Completar la verificacion final del proxy Vercel y el callback de login Google. Como la API key de DeepSeek fue compartida en la conversacion, debe rotarse antes de usarla en produccion. Despues completar OAuth Drive-Sheets, WhatsApp y Mercado Pago; la publicación real de webhooks y la configuración de `api.via.leanagentbuilder.com` quedan para el cierre.

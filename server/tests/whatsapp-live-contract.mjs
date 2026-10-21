@@ -24,7 +24,7 @@ global.fetch = async (url, options = {}) => {
   } else {
     assert.equal(body.type, 'interactive');
     assert.equal(body.interactive.type, 'button');
-    assert.equal(body.interactive.body.text, '¿Cómo prefieres pagar?');
+    assert.equal(body.interactive.body.text, 'Claro, veci. Chocoramo por $ 2.800. ¿Cómo prefieres pagar?');
     assert.deepEqual(body.interactive.action.buttons.map((button) => button.reply), [
       { id: 'vi:offer:1', title: 'Efectivo' },
       { id: 'vi:offer:2', title: 'Tarjeta' },
@@ -61,10 +61,10 @@ try {
   const interactiveResult = await tools.call('whatsapp_business_messaging', 'andina', 'whatsapp-live-contract', {
     action: 'send_session_message',
     wa_id: '573001110002',
-    text: '¿Cómo prefieres pagar?',
+    text: 'Claro, veci. Chocoramo por $ 2.800. ¿Cómo prefieres pagar?',
     interactive: {
       kind: 'button',
-      body: '¿Cómo prefieres pagar?',
+      body: 'Claro, veci. Chocoramo por $ 2.800. ¿Cómo prefieres pagar?',
       buttons: [
         { id: 'vi:offer:1', title: 'Efectivo' },
         { id: 'vi:offer:2', title: 'Tarjeta' },

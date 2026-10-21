@@ -107,7 +107,7 @@ export class ToolRegistry {
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
     return {
       status: rows.length ? 'success' : 'error',
-      columns: ['sku', 'name', 'price', 'stock', 'category', 'driveFileId'],
+      columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'driveFileId'],
       rows: filterRows(rows, payload.filters),
       source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
@@ -304,7 +304,7 @@ export class ToolRegistry {
   }
 
   async readLiveCatalogRows({ tenantId, tenant, live, range }) {
-    const sheetRange = range ?? 'Catalogo!A1:J1000';
+    const sheetRange = range ?? 'Catalogo!A1:P1000';
     const cacheKey = `${tenantId}:${live.spreadsheetId}:${sheetRange}`;
     const cached = this.liveCatalogCache.get(cacheKey);
     if (cached?.rows && cached.expiresAt > Date.now()) return cached.rows;
@@ -654,18 +654,17 @@ function filterRows(rows, filters = {}) {
   const entries = Object.entries(filters ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== '');
   if (!entries.length) return rows;
   const query = entries.find(([key]) => key === 'query')?.[1];
-  if (query) return rankRowsByQuery(rows, query);
-  return rows.filter((row) =>
-    entries.every(([key, value]) => {
-      if (key === 'query') {
-        return rankRowsByQuery([row], value).length > 0;
-      }
+  const scopedRows = rows.filter((row) =>
+    entries
+      .filter(([key]) => key !== 'query')
+      .every(([key, value]) => {
       if (key === 'category') {
         return categoryMatches(row.category, value);
       }
       return normalizeText(row[key]).includes(normalizeText(value));
-    }),
+      }),
   );
+  return query ? rankRowsByQuery(scopedRows, query) : scopedRows;
 }
 
 function categoryMatches(actual, expected) {
@@ -674,7 +673,22 @@ function categoryMatches(actual, expected) {
   if (!normalizedExpected) return true;
   if (normalizedActual.includes(normalizedExpected)) return true;
   if (normalizedExpected === 'bebidas') {
-    return ['jugos', 'gaseosas', 'aguas'].some((alias) => normalizedActual.includes(alias));
+    return ['jugos', 'gaseosas', 'aguas', 'hidratantes', 'maltas', 'te listo'].some((alias) => normalizedActual.includes(alias));
+  }
+  if (normalizedExpected === 'snacks') {
+    return ['snack', 'galletas', 'dulces', 'pasabocas'].some((alias) => normalizedActual.includes(alias));
+  }
+  if (normalizedExpected === 'aseo') {
+    return ['aseo', 'limpieza', 'cuidado personal', 'higiene'].some((alias) => normalizedActual.includes(alias));
+  }
+  if (normalizedExpected === 'lacteos') {
+    return ['lacteo', 'leche', 'queso', 'yogur'].some((alias) => normalizedActual.includes(alias));
+  }
+  if (normalizedExpected === 'despensa') {
+    return ['granos', 'basicos', 'aceite', 'cocina', 'harina', 'pasta', 'enlatado', 'condimento', 'cereal', 'huevo'].some((alias) => normalizedActual.includes(alias));
+  }
+  if (normalizedExpected === 'cafe') {
+    return normalizedActual.includes('cafe');
   }
   return false;
 }
@@ -698,6 +712,12 @@ function parseCatalogRows(values = []) {
         aliases: splitAliases(cell(row, headerMap, 'aliases', 'alias')),
         active: booleanValue(cell(row, headerMap, 'activo', 'active'), true),
         driveFileId: cell(row, headerMap, 'drive_file_id', 'driveFileId', 'drive_file'),
+        description: cell(row, headerMap, 'descripcion', 'description'),
+        tags: splitAliases(cell(row, headerMap, 'etiquetas', 'tags', 'tag')),
+        productFamily: cell(row, headerMap, 'familia_producto', 'familia', 'product_family'),
+        normalizedPresentation: cell(row, headerMap, 'presentacion_normalizada', 'presentation_normalized') || normalizePresentation(cell(row, headerMap, 'presentacion', 'presentation')),
+        attributes: parseJsonCell(cell(row, headerMap, 'atributos_json', 'attributes_json', 'atributos'), {}),
+        catalogOrigin: cell(row, headerMap, 'origen_catalogo', 'catalog_origin', 'origen'),
       };
     })
     .filter((row) => row?.sku && row.name && row.active !== false);
@@ -851,6 +871,15 @@ function splitAliases(value) {
     .filter(Boolean);
 }
 
+function normalizePresentation(value) {
+  return normalizeText(value)
+    .replace(/mililitros?/g, 'ml')
+    .replace(/litros?/g, 'l')
+    .replace(/gramos?/g, 'g')
+    .replace(/kilogramos?/g, 'kg')
+    .replace(/unidades?/g, 'und');
+}
+
 function numberValue(value) {
   const normalized = String(value ?? '').replace(/[^\d.,-]/g, '').replace(/\./g, '').replace(',', '.');
   const number = Number(normalized);
@@ -888,25 +917,69 @@ function rankRowsByQuery(rows, query) {
   if (!queryTokens.length) return rows;
   return rows
     .map((row) => {
-      const fields = [row.sku, row.name, row.category, ...(row.aliases ?? [])];
-      const haystack = normalizeText(fields.join(' '));
-      const rowTokens = tokenize(fields.join(' '));
+      const nameTokens = tokenize([row.name, row.brand].filter(Boolean).join(' '));
+      const aliasTokens = tokenize([row.sku, row.productFamily, ...(row.aliases ?? [])].filter(Boolean).join(' '));
+      const supportingTokens = tokenize([
+        row.category,
+        row.presentation,
+        row.normalizedPresentation,
+        row.description,
+        ...(row.tags ?? []),
+      ].filter(Boolean).join(' '));
+      const nameFirstToken = nameTokens[0] ?? '';
       let score = 0;
+      let matched = 0;
+      let strongMatches = 0;
       for (const token of queryTokens) {
-        if (haystack.includes(token)) score += 4;
-        if (rowTokens.includes(token)) score += 5;
-        if (rowTokens.some((candidate) => candidate.startsWith(token) || token.startsWith(candidate))) score += 2;
-        if (rowTokens.some((candidate) => levenshtein(candidate, token) <= 2 && Math.min(candidate.length, token.length) >= 6)) score += 2;
+        let tokenScore = 0;
+        if (nameTokens.includes(token)) {
+          tokenScore = token === nameFirstToken ? 20 : 12;
+          strongMatches += 1;
+        } else if (aliasTokens.includes(token)) {
+          tokenScore = 11;
+          strongMatches += 1;
+        } else if (hasCompatiblePrefix(nameTokens, token)) {
+          tokenScore = 8;
+          strongMatches += 1;
+        } else if (hasCompatiblePrefix(aliasTokens, token)) {
+          tokenScore = 7;
+          strongMatches += 1;
+        } else if (supportingTokens.includes(token)) {
+          tokenScore = 4;
+        } else if (hasCompatiblePrefix(supportingTokens, token)) {
+          tokenScore = 3;
+        } else if (hasCloseTypo([...nameTokens, ...aliasTokens], token)) {
+          tokenScore = 6;
+          strongMatches += 1;
+        }
+        if (tokenScore) {
+          score += tokenScore;
+          matched += 1;
+        }
       }
-      const coverage = score / Math.max(queryTokens.length, 1);
+      const coverage = matched / queryTokens.length;
       return {
         ...row,
-        matchScore: Number(coverage.toFixed(2)),
-        matchType: coverage >= 4 ? 'exact_or_alias' : coverage >= 2 ? 'similar' : 'weak',
+        matchScore: Number((score / queryTokens.length).toFixed(2)),
+        matchType: strongMatches > 0 && coverage >= 0.5 ? 'exact_or_alias' : 'similar',
       };
     })
-    .filter((row) => row.matchScore >= 2)
+    .filter((row) => row.matchScore >= 3)
     .sort((a, b) => b.matchScore - a.matchScore || b.stock - a.stock);
+}
+
+function hasCompatiblePrefix(tokens, queryToken) {
+  return tokens.some((candidate) => (
+    candidate.length >= 4 && queryToken.length >= 4 &&
+    (candidate.startsWith(queryToken) || queryToken.startsWith(candidate))
+  ));
+}
+
+function hasCloseTypo(tokens, queryToken) {
+  return tokens.some((candidate) => (
+    candidate.length >= 6 && queryToken.length >= 6 &&
+    levenshtein(candidate, queryToken) <= (candidate.length >= 8 && queryToken.length >= 8 ? 2 : 1)
+  ));
 }
 
 function tokenize(value) {
@@ -939,7 +1012,11 @@ function levenshtein(a, b) {
   return matrix[a.length][b.length];
 }
 
-const CATALOG_STOPWORDS = new Set(['para', 'domicilio', 'tienes', 'tiene', 'hay', 'con', 'los', 'las', 'una', 'uno', 'por', 'favor']);
+const CATALOG_STOPWORDS = new Set([
+  'algo', 'para', 'domicilio', 'tienes', 'tiene', 'hay', 'con', 'los', 'las',
+  'una', 'uno', 'unos', 'unas', 'por', 'favor', 'quiero', 'quieres', 'recomienda',
+  'recomiendas', 'regala', 'regalame', 'manda', 'mandame', 'necesito', 'me', 'que',
+]);
 
 function summarize(value) {
   if (!value) return {};

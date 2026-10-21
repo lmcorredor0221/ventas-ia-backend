@@ -21,8 +21,8 @@ export function createSeedState() {
         },
         googleSheets: {
           spreadsheetIdRef: `${tenant.id.toUpperCase()}_CATALOG_SPREADSHEET_ID_REF`,
-          range: 'Catalogo!A1:H500',
-          catalogRange: 'Catalogo!A1:H500',
+          range: 'Catalogo!A1:P1000',
+          catalogRange: 'Catalogo!A1:P1000',
           customerProfilesRange: 'Clientes!A1:F500',
           ordersRange: 'Pedidos!A1:K500',
           primaryKey: 'sku',
