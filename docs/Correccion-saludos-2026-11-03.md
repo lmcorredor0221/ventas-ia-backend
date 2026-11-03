@@ -48,3 +48,11 @@ Nuevo evento `agent.greeting.replied`, correlacionado por conversación/traceId,
 Las cinco llamadas detalladas con 300 productos usaron aproximadamente 47.500 tokens de entrada cada una porque el planner existente incluye todo el catálogo. Es una oportunidad de optimización separada; esta corrección no cambia la arquitectura de recuperación. Los 2,36–2,63 segundos son tiempo del proveedor en la prueba local, no latencia E2E de producción.
 
 Tras desplegar, validar un nuevo saludo desde el comprador y comprobar `greeting`, `agent.greeting.replied` y entrega de Meta. No reenviar automáticamente mensajes anteriores: podrían duplicar respuestas.
+
+## Publicación verificada
+
+- Código: `43733d08bd0e2a6efd128997e97853b332509d5b`, incorporado a `backend/main`.
+- Render: `dep-dbl6f6nf3r2c73dnc5q0`, estado `live` desde 2026-11-03 23:01:50 UTC (18:01:50 Colombia).
+- `/health/ready`: `ok:true`, producción, PostgreSQL y WhatsApp live, sin errores ni advertencias.
+- `https://via.leanagentbuilder.com/api/health`: `ok:true` a las 23:02:21 UTC.
+- Pendiente de observación: entrega de un saludo nuevo por WhatsApp real. No se envió ningún mensaje al comprador durante esta validación.
