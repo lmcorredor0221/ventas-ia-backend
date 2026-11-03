@@ -1,3 +1,4 @@
+import { DEFAULT_CATALOG_RANGE, catalogImportRanges } from '../domain/catalogMetadata.js';
 import { createWhatsAppSignupAttempt, completeWhatsAppSignup, retryWhatsAppCoexistenceSync } from './whatsappSignup.js';
 import crypto from 'node:crypto';
 import { appendAuditEvent } from './authService.js';
@@ -581,8 +582,8 @@ export class SaasControlPlane {
       const nextTenant = next.tenants.find((item) => item.id === tenantId);
       if (nextTenant) {
         nextTenant.config.googleSheets.spreadsheetIdRef = `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`;
-        nextTenant.config.googleSheets.range = 'Catalogo!A1:J1000';
-        nextTenant.config.googleSheets.catalogRange = 'Catalogo!A1:J1000';
+        nextTenant.config.googleSheets.range = DEFAULT_CATALOG_RANGE;
+        nextTenant.config.googleSheets.catalogRange = DEFAULT_CATALOG_RANGE;
         nextTenant.config.googleSheets.customerProfilesRange = 'Clientes!A1:H1000';
         nextTenant.config.googleSheets.ordersRange = 'Pedidos!A1:M1000';
         nextTenant.config.googleDrive.rootFolderRef = `${tenantId.toUpperCase()}_GOOGLE_DRIVE_ROOT_FOLDER_ID_REF`;
@@ -670,13 +671,13 @@ export class SaasControlPlane {
     const products = validation.rows.filter((row) => row.activo).map(catalogRowToProduct);
     const source = live ? 'google_sheets_live' : 'local_test_fixture';
     const sheetValues = catalogRowsToSheetValues(validation.rows);
-    const catalogRange = tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:J1000';
+    const ranges = catalogImportRanges(tenant?.config?.googleSheets?.catalogRange, validation.rows.length, state.productsByTenant?.[tenantId]?.length ?? 0);
     if (live) {
-      await this.googleWorkspace.clearValues({ accessToken: live.accessToken, spreadsheetId: live.spreadsheetId, range: catalogRange });
+      await this.googleWorkspace.clearValues({ accessToken: live.accessToken, spreadsheetId: live.spreadsheetId, range: ranges.clear });
       await this.googleWorkspace.updateValues({
         accessToken: live.accessToken,
         spreadsheetId: live.spreadsheetId,
-        range: `Catalogo!A1:J${validation.rows.length + 1}`,
+        range: ranges.write,
         values: sheetValues,
       });
     }
@@ -684,6 +685,8 @@ export class SaasControlPlane {
     this.store.mutate((next) => {
       next.productsByTenant ??= {};
       next.productsByTenant[tenantId] = products;
+      const updatedTenant = next.tenants.find(item => item.id === tenantId);
+      updatedTenant.config.googleSheets.catalogRange = ranges.read;
       next.catalogImportsByTenant ??= {};
       next.catalogImportsByTenant[tenantId] = {
         tenantId,
@@ -2057,8 +2060,8 @@ function tenantConfigFor(tenantId) {
     },
     googleSheets: {
       spreadsheetIdRef: `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-      range: 'Catalogo!A1:J1000',
-      catalogRange: 'Catalogo!A1:J1000',
+      range: DEFAULT_CATALOG_RANGE,
+      catalogRange: DEFAULT_CATALOG_RANGE,
       customerProfilesRange: 'Clientes!A1:H1000',
       ordersRange: 'Pedidos!A1:M1000',
       primaryKey: 'sku',

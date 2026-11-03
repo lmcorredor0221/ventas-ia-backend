@@ -15,6 +15,7 @@ const previousApiKey = process.env.TEST_DEEPSEEK_API_KEY;
 try {
   store.load();
   store.mutate((state) => {
+    Object.assign(state.productsByTenant.andina[0], {description:'Tostado artesanal exclusivo',presentation:'500 g',normalizedPresentation:'500 g',tags:['origen colombiano'],productFamily:'cafe',attributes:{tueste:'medio',origen:'Huila'}});
     state.platformSettings.llm = {
       ...state.platformSettings.llm,
       provider: 'deepseek',
@@ -103,6 +104,7 @@ try {
   assert.equal(capturedOptions.headers['content-type'], 'application/json');
 
   const body = JSON.parse(capturedOptions.body);
+  assert.ok(body.messages.some(message => message.content.includes('Tostado artesanal exclusivo') && message.content.includes('Huila') && message.content.includes('500 g')), 'The real provider request must include description, presentation and structured attributes');
   assert.equal(body.model, 'deepseek-chat');
   assert.equal(body.temperature, 0);
   assert.equal(body.max_tokens, 900);

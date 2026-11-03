@@ -9,6 +9,12 @@ const CANONICAL_HEADERS = [
   'aliases',
   'activo',
   'drive_file_id',
+  'descripcion',
+  'etiquetas',
+  'familia_producto',
+  'presentacion_normalizada',
+  'atributos_json',
+  'origen_catalogo',
 ];
 
 const HEADER_ALIASES = {
@@ -22,6 +28,12 @@ const HEADER_ALIASES = {
   aliases: ['aliases', 'alias', 'sinonimos'],
   activo: ['activo', 'active', 'habilitado', 'disponible'],
   drive_file_id: ['drive_file_id', 'drivefileid', 'drive_file', 'ficha_drive'],
+  descripcion: ['descripcion', 'description', 'detalle', 'detalle_producto'],
+  etiquetas: ['etiquetas', 'tags', 'tag', 'palabras_clave', 'keywords'],
+  familia_producto: ['familia_producto', 'familia', 'product_family'],
+  presentacion_normalizada: ['presentacion_normalizada', 'presentation_normalized', 'tamano_normalizado', 'medida_normalizada'],
+  atributos_json: ['atributos_json', 'attributes_json', 'atributos', 'attributes'],
+  origen_catalogo: ['origen_catalogo', 'catalog_origin', 'origen'],
 };
 
 export function validateCatalogCsv(csvText) {
@@ -65,6 +77,9 @@ export function validateCatalogCsv(csvText) {
     if (row.precio === null) errors.push({ row: rowNumber, field: 'precio', message: 'El precio debe ser un numero mayor o igual a cero.' });
     if (row.stock === null) errors.push({ row: rowNumber, field: 'stock', message: 'El stock debe ser un numero mayor o igual a cero.' });
     if (!row.presentacion) warnings.push({ row: rowNumber, field: 'presentacion', message: 'Sin presentacion; el agente puede pedir una aclaracion.' });
+    if (row.atributos_json && !parseAttributes(row.atributos_json)) {
+      errors.push({ row: rowNumber, field: 'atributos_json', message: 'Los atributos deben ser un objeto JSON valido.' });
+    }
     if (row.activo === false && row.sku) warnings.push({ row: rowNumber, field: 'activo', message: 'Este producto quedara inactivo y no se ofrecera.' });
     rows.push(row);
   }
@@ -93,6 +108,12 @@ export function catalogRowsToSheetValues(rows) {
     row.aliases,
     row.activo ? 'TRUE' : 'FALSE',
     row.drive_file_id,
+    row.descripcion,
+    row.etiquetas,
+    row.familia_producto,
+    row.presentacion_normalizada,
+    row.atributos_json,
+    row.origen_catalogo,
   ])];
 }
 
@@ -108,6 +129,12 @@ export function catalogRowToProduct(row) {
     aliases: splitAliases(row.aliases),
     active: row.activo,
     driveFileId: row.drive_file_id || null,
+    description: row.descripcion || null,
+    tags: splitAliases(row.etiquetas),
+    productFamily: row.familia_producto || null,
+    normalizedPresentation: row.presentacion_normalizada || normalizePresentation(row.presentacion),
+    attributes: parseAttributes(row.atributos_json) ?? {},
+    catalogOrigin: row.origen_catalogo || null,
   };
 }
 
@@ -126,6 +153,12 @@ function canonicalRow(record, headerMap) {
     aliases: value('aliases'),
     activo: booleanValue(value('activo'), true),
     drive_file_id: value('drive_file_id'),
+    descripcion: value('descripcion'),
+    etiquetas: value('etiquetas'),
+    familia_producto: value('familia_producto'),
+    presentacion_normalizada: value('presentacion_normalizada') || normalizePresentation(value('presentacion')),
+    atributos_json: value('atributos_json'),
+    origen_catalogo: value('origen_catalogo'),
   };
 }
 
@@ -224,6 +257,30 @@ function booleanValue(value, fallback) {
 
 function splitAliases(value) {
   return String(value ?? '').split(/[|,;]/).map((item) => item.trim()).filter(Boolean);
+}
+
+export function parseAttributes(value) {
+  if (!String(value ?? '').trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizePresentation(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/mililitros?/g, 'ml')
+    .replace(/litros?/g, 'l')
+    .replace(/kilogramos?/g, 'kg')
+    .replace(/gramos?/g, 'g')
+    .replace(/unidades?/g, 'und')
+    .replace(/\s+/g, ' ');
 }
 
 function invalidResult(message) {

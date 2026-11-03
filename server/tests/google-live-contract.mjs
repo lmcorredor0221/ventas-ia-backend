@@ -19,8 +19,8 @@ process.env.SECRET_ENCRYPTION_KEY = 'test-secret-key-with-enough-entropy';
 const outboundCalls = [];
 const liveSheets = {
   Catalogo: [
-    ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id'],
-    ['LIVE-CHO-01', 'Chocoramo', 'Snacks', 'Ramo', '65 g', '2500', '12', 'chocoramo|ponque ramo', 'TRUE', 'drv-live-chocoramo'],
+    ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id','descripcion','etiquetas','familia_producto','presentacion_normalizada','atributos','origen_catalogo'],
+    ['LIVE-CHO-01', 'Chocoramo', 'Snacks', 'Ramo', '65 g', '2500', '12', 'chocoramo|ponque ramo', 'TRUE', 'drv-live-chocoramo','Ponque cubierto de chocolate','merienda','ponque','65 g','{"sabor":"chocolate"}','fixture'],
   ],
   Clientes: [
     ['telefono_whatsapp', 'nombre', 'direccion_principal', 'barrio', 'notas', 'preferencias', 'creado_en', 'actualizado_en'],
@@ -86,7 +86,8 @@ global.fetch = async (url, options = {}) => {
 
   if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && href.includes(':clear')) {
     assert.equal(options.headers.authorization, 'Bearer access-token-refreshed');
-    return jsonResponse({ clearedRange: 'Catalogo!A1:J1000' });
+    assert.ok(decodeURIComponent(href).includes('Catalogo!A1:P1000:clear'));
+    return jsonResponse({ clearedRange: 'Catalogo!A1:P1000' });
   }
 
   if (href.startsWith('https://sheets.googleapis.com/v4/spreadsheets/') && href.includes('/values/') && options.method === 'GET') {
@@ -113,6 +114,8 @@ global.fetch = async (url, options = {}) => {
     const rowNumber = Number(range.match(/![A-Z]+(\d+):/)?.[1]);
     const body = JSON.parse(options.body);
     if (sheetName === 'Catalogo') {
+      assert.equal(range, 'Catalogo!A1:P3');
+      assert.equal(body.values[0].length, 16);
       assert.equal(body.values.length, 3);
       liveSheets[sheetName] = body.values;
       return jsonResponse({ updatedRows: body.values.length });
@@ -176,12 +179,15 @@ try {
   assert.equal(tenant.config.googleSheets.spreadsheetIdRef, `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`);
   assert.ok(outboundCalls.some((call) => call.url.includes('/values:batchUpdate')));
 
+  store.mutate(() => { tenant.config.googleSheets.catalogRange = 'Catalogo!A1:J1000'; });
   const catalogSmoke = await postJson(`${base}/api/tools/google_sheets_read_table/smoke-test`, {
     tenantId,
     payload: { filters: { query: 'chocoramo' } },
   });
   assert.equal(catalogSmoke.result.source, 'google_sheets_live');
   assert.equal(catalogSmoke.result.rows[0].sku, 'LIVE-CHO-01');
+  assert.equal(catalogSmoke.result.rows[0].attributes.sabor, 'chocolate');
+  assert.ok(outboundCalls.some(call => decodeURIComponent(call.url).includes('Catalogo!A1:P1000')));
 
   const catalogCsv = [
     'sku,nombre,categoria,marca,presentacion,precio,stock,aliases,activo',
@@ -195,6 +201,10 @@ try {
   assert.equal(catalogImport.source, 'google_sheets_live');
   assert.equal(catalogImport.activeRows, 2);
   assert.equal(liveSheets.Catalogo.length, 3);
+  assert.equal(tenant.config.googleSheets.catalogRange, 'Catalogo!A1:P1000');
+  const afterImport = await postJson(`${base}/api/tools/google_sheets_read_table/smoke-test`, {tenantId,payload:{filters:{sku:'LIVE-CHO-01'}}});
+  assert.equal(afterImport.result.rows[0].price, 2800, 'Import must invalidate cached catalog immediately');
+  assert.deepEqual(afterImport.result.rows[0].attributes, {}, 'A legacy replacement must not retain old metadata');
 
   const upsertProfile = await postJson(`${base}/api/tools/google_sheets_customer_profile_upsert/smoke-test`, {
     tenantId,

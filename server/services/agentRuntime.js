@@ -1733,13 +1733,15 @@ function catalogSearchesFromPlan(plan, catalogItems, text) {
 function deliveryItemFiltersFromPlan(plan, item, index) {
   // The order item is already bound to this catalog SKU. It is more reliable
   // than a planner tool step that may accidentally be reused for another line.
-  if (item.skuHint) return { sku: item.skuHint };
   const planned = (plan.toolPlan ?? []).find((step) =>
     step.tool === 'google_sheets_read_table' &&
     (step.candidateIndex === index || step.candidate === item.catalogQuery || step.candidate === item.rawName)
   );
-  if (planned?.filters && Object.keys(planned.filters).length) return planned.filters;
-  return inferCatalogFilter(item.catalogQuery ?? item.rawName);
+  const attributes = item.requestedAttributes ?? planned?.filters?.attributes;
+  const filters = item.skuHint ? { sku: item.skuHint }
+    : planned?.filters && Object.keys(planned.filters).length ? planned.filters
+    : inferCatalogFilter(item.catalogQuery ?? item.rawName);
+  return attributes ? { ...filters, attributes } : filters;
 }
 
 function isAdditiveOrderText(text) {
