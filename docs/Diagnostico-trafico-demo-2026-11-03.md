@@ -75,3 +75,12 @@ Tenant `demo-de-tienda`, propietario `ventasiaopsstore@gmail.com`. Número de ti
 - `npm run test:postgres:recovery` pasó en PostgreSQL local real: GET de una tarea ausente del snapshot y POST de resolución después de reiniciar; rechazo de tareas resueltas/denegadas; aislamiento entre tenants; preparación de pedido con versión; segundo reinicio; tablas vacías; secretos Google/WhatsApp intactos. El schema temporal se elimina y los hashes de `public` quedan sin cambios. No se hace HTTP externo.
 - `npm run test:architecture`: siete contratos aprobados después de esta corrección.
 - Frontend `d6ca7220acda23fd4a44dab6e82618430e1aa459`, Vercel `A6Zs868mqbHoykHhoAGsker7zbFv`, Production Ready: corrige el aviso posterior a importar productos.
+
+## Resultado publicado
+
+- La nueva regresión falla contra `c605d01` sin el arreglo (POST 404 con GET exitoso) y pasa con la recuperación de tablas.
+- Backend `b16aa63d55e4139ba70e588d98be1d15e590df36`, Render `dep-dbl3ul3ncjis73e1qhi0`: Live a las 15:10:03; instancia `4bhn2`, PostgreSQL y Node 24.22.2.
+- En producción se volvió a abrir la misma tarea y se aprobó con una nota interna de recuperación (`responseMode=none`). Resultado visible: «Decisión guardada», cero pendientes y una conversación en curso. No se borró la conversación ni se envió una respuesta manual al comprador.
+- Consulta PostgreSQL posterior a la importación: 100 productos para `demo-de-tienda`. La hoja Google pertenece a `ventasiaopsstore@gmail.com` y sigue privada para esa cuenta.
+- Se solicitó al usuario una prueba nueva: «Para domicilio, una Coca-Cola de litro y medio y un Chocoramo». Subtotal esperado con el catálogo de prueba: COP 10.000. Pendiente de verificar llegada, latencia y respuesta posterior a estos despliegues.
+- Evidencias locales en `docs/evidencias/auditoria-preparacion-20261103/`: `demo-catalogo-importado.png`, `demo-backend-b16aa63-live.png`, `demo-conversacion-reanudada.png` y `catalogo-demo-100.csv`.
