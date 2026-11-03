@@ -433,7 +433,7 @@ export class AgentRuntime {
     return { summary: selected ? 'Catalog quote sent' : 'Catalog search needs review', plan };
   }
 
-  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
+  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, replaceDraft = false }) {
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
     const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
@@ -456,14 +456,14 @@ export class AgentRuntime {
         ...item,
         product,
         presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
-        lineTotal: product && item.quantity ? product.price * item.quantity : product && item.budgetAmount ? item.budgetAmount : null,
+        lineTotal: quotedLineTotal({ ...item, product }),
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
       };
     }));
 
     const currentConversation = await this.getConversation(conversationId);
     const previousDraft = currentConversation?.orderDraft;
-    const effectiveOrderItems = previousDraft && isAdditiveOrderText(normalized.text)
+    const effectiveOrderItems = previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
       : orderItems;
 
@@ -475,7 +475,7 @@ export class AgentRuntime {
       reason: 'validate_order_product_files',
     });
 
-    const missingFields = [...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
+    const missingFields = [...(!replaceDraft && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
     const selectedPaymentMethod = resolvePaymentMethod(normalized.text, paymentMethods)
       ?? resolvePaymentMethod(plan.order?.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods)
@@ -485,6 +485,8 @@ export class AgentRuntime {
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
       if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
       if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
+      if (item.product && !isPositiveAmount(item.product.price)) missingFields.push(`price:${item.catalogQuery}`);
+      if (!isPositiveAmount(item.quantity) && !isPositiveAmount(item.budgetAmount)) missingFields.push(`quantity:${item.catalogQuery}`);
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
       if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
         missingFields.push(`presentation:${item.catalogQuery}`);
@@ -493,6 +495,7 @@ export class AgentRuntime {
     const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
     if (nextProfile?.name) removeMissingField(missingFields, 'customer_name');
     if (nextProfile?.defaultAddress) removeMissingField(missingFields, 'delivery_address');
+    if (selectedPaymentMethod) removeMissingField(missingFields, 'payment_method');
     if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
@@ -628,6 +631,15 @@ export class AgentRuntime {
     const orderDraft = structuredClone(
       conversation?.orderDraft?.items?.length ? conversation.orderDraft : plan.order ?? {},
     );
+    // Old/sparse drafts may have lost their catalog snapshot. Requote before
+    // accepting confirmation; never turn a missing amount into a free order.
+    const quotedTotal = (orderDraft.items ?? []).reduce((sum, item) => sum + (quotedLineTotal(item) ?? 0), 0);
+    if (!orderDraft.items?.length || orderDraft.items.some((item) => quotedLineTotal(item) === null)
+      || Number(orderDraft.subtotal) !== quotedTotal) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile,
+        plan: { ...plan, intent: 'delivery_order', order: orderDraft, missingFields: orderDraft.missingFields ?? [] },
+      });
+    }
     const selectedPaymentMethod = resolvePaymentMethod(orderDraft.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(normalized.text, paymentMethods);
     if (orderDraft.delivery && !selectedPaymentMethod) {
@@ -665,13 +677,10 @@ export class AgentRuntime {
       status: 'pending_human_preparation',
     });
 
-    const confirmedItems = (orderDraft.items ?? []).map((item) => ({
-      name: item.product?.name ?? item.catalogQuery ?? item.skuHint ?? 'Producto por validar',
-      quantity: item.quantity ?? 1,
-      unitPrice: item.product?.price ?? null,
-      lineTotal: item.lineTotal ?? null,
-    }));
-    const deliveryAddress = customerProfile?.defaultAddress ?? 'Dirección pendiente por confirmar';
+    // Use the saved commercial facts for every consumer of the confirmation.
+    const confirmedItems = order.order.items;
+    const confirmedSubtotal = order.order.subtotal;
+    const deliveryAddress = order.order.deliveryAddress ?? 'Dirección pendiente por confirmar';
     await this.tools.call('human_handoff', tenantId, conversationId, {
       reason: 'Alistar domicilio confirmado',
       urgency: 'Alta',
@@ -679,7 +688,7 @@ export class AgentRuntime {
       context_snapshot: {
         summary: 'Pedido confirmado por WhatsApp; requiere preparacion y entrega humana.',
         orderId: order.order.id,
-        subtotal: orderDraft.subtotal,
+        subtotal: confirmedSubtotal,
         action: 'prepare_delivery_order',
         customerName: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
         customerWaId: normalized.waId,
@@ -694,14 +703,14 @@ export class AgentRuntime {
       stage: 'handoff',
       zone: 'approval',
       status: 'blocked',
-      value: formatCurrency(orderDraft.subtotal ?? 0),
+      value: formatCurrency(confirmedSubtotal),
       progress: 82,
       nextStep: 'Humano prepara el pedido y coordina entrega.',
       lastTool: 'google_sheets_order_write',
       orderId: order.order.id,
     });
 
-    const confirmationFallback = `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Subtotal de productos: ${formatCurrency(orderDraft.subtotal ?? 0)}.${paymentLabel ? ` Pago: ${paymentLabel}.` : ''} Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`;
+    const confirmationFallback = `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Subtotal de productos: ${formatCurrency(confirmedSubtotal)}.${paymentLabel ? ` Pago: ${paymentLabel}.` : ''} Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`;
     const confirmationReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -709,7 +718,7 @@ export class AgentRuntime {
       facts: {
         kind: 'order_confirmed',
         products: confirmedItems,
-        subtotal: orderDraft.subtotal ?? 0,
+        subtotal: confirmedSubtotal,
         requiredTerms: [paymentLabel, deliveryAddress, order.order.id].filter(Boolean),
       },
     });
@@ -721,7 +730,7 @@ export class AgentRuntime {
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
       orderId: order.order.id,
-      subtotal: orderDraft.subtotal ?? 0,
+      subtotal: confirmedSubtotal,
       itemCount: orderDraft.items?.length ?? 0,
     });
 
@@ -729,7 +738,8 @@ export class AgentRuntime {
   }
 
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
-    const draft = structuredClone(plan.order);
+    const conversation = await this.getConversation(conversationId);
+    const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
     const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
     const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
     const plannedPaymentMethod = resolvePaymentMethod(draft.paymentMethod, paymentMethods);
@@ -757,6 +767,19 @@ export class AgentRuntime {
       draft.items = (draft.items ?? []).filter((item) => !matchesRemovalQuery(item, collected.removeProductQuery));
     }
 
+    // New/replaced products must pass through the catalog resolver. Existing
+    // products keep their verified price even when the LLM returns only SKUs.
+    if (draft.items.some((item) => !item.product || !isPositiveAmount(item.product.price)
+      || (item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)))) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
+        plan: { ...plan, order: draft, missingFields: draft.missingFields ?? [] },
+      });
+    }
+    for (const item of draft.items) {
+      item.lineTotal = quotedLineTotal(item);
+      item.available = Boolean(item.product && item.product.stock >= (item.quantity ?? 1));
+    }
+
     const missingFields = (draft.missingFields ?? []).filter((field) => {
       if (field === 'customer_name') return !(nextProfile?.name || collected.name);
       if (field === 'delivery_address') return !(nextProfile?.defaultAddress || collected.defaultAddress);
@@ -772,6 +795,16 @@ export class AgentRuntime {
       return true;
     });
     draft.missingFields = [...new Set(missingFields)];
+    if (!draft.items.length) draft.missingFields.push('order_items');
+    for (const item of draft.items) {
+      if (item.lineTotal === null) draft.missingFields.push(`quantity:${item.catalogQuery}`);
+      if (!item.available) draft.missingFields.push(`stock:${item.catalogQuery}`);
+    }
+    if (needsHumanProductResolution(draft.missingFields)) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
+        plan: { ...plan, order: draft, missingFields: draft.missingFields },
+      });
+    }
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
 
     const canQuote = draft.missingFields.length === 0;
@@ -1873,6 +1906,42 @@ function describeOperationalFailure(error) {
   };
 }
 
+function isPositiveAmount(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function quotedLineTotal(item) {
+  if (!isPositiveAmount(item.product?.price)) return null;
+  if (isPositiveAmount(item.quantity)) return Number(item.product.price) * Number(item.quantity);
+  return isPositiveAmount(item.budgetAmount) ? Number(item.budgetAmount) : null;
+}
+
+function restoreClarificationDraft(saved = {}, planned = {}) {
+  const previous = saved ?? {};
+  const update = planned ?? {};
+  const items = update.items?.length ? update.items : previous.items ?? [];
+  return structuredClone({
+    ...previous,
+    ...update,
+    paymentMethod: update.paymentMethod ?? previous.paymentMethod,
+    missingFields: previous.missingFields ?? update.missingFields ?? [],
+    items: items.map((item) => {
+      const sku = item.skuHint ?? item.product?.sku;
+      const matches = (previous.items ?? []).filter((candidate) => sku
+        ? [candidate.product?.sku, candidate.skuHint].includes(sku)
+        : [candidate.catalogQuery, candidate.rawName, candidate.product?.name].filter(Boolean)
+          .some((name) => [item.catalogQuery, item.rawName].filter(Boolean).some((query) => normalizeText(name) === normalizeText(query))));
+      const known = matches.length === 1 ? matches[0] : null;
+      return { ...known, ...item,
+        quantity: item.quantity ?? known?.quantity,
+        budgetAmount: item.budgetAmount ?? known?.budgetAmount,
+        product: known?.product ?? null,
+        lineTotal: null,
+      };
+    }),
+  });
+}
+
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod }) {
   const uniqueMissing = [...new Set(missingFields)];
   const foundLines = orderItems
@@ -1931,6 +2000,7 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
 function needsHumanProductResolution(missingFields) {
   return missingFields.some((field) =>
     field.startsWith('product:') ||
+    field.startsWith('price:') ||
     field.startsWith('stock:')
   );
 }
@@ -2005,8 +2075,8 @@ function requestedProductName(item, fallback) {
 function buildHumanResolutionReply({ orderItems, missingFields, customerProfile }) {
   const uniqueMissing = [...new Set(missingFields)];
   const unavailable = uniqueMissing
-    .filter((field) => field.startsWith('product:') || field.startsWith('stock:'))
-    .map((field) => field.replace(/^product:|^stock:/, ''));
+    .filter((field) => field.startsWith('product:') || field.startsWith('stock:') || field.startsWith('price:'))
+    .map((field) => field.replace(/^product:|^stock:|^price:/, ''));
   const understood = orderItems.map(describeUnderstoodItem).filter(Boolean);
   const validationNotes = orderItems.map(describeValidationDoubt).filter(Boolean);
   const asks = [];
