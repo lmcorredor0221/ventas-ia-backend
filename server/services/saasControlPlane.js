@@ -1,4 +1,5 @@
 import { DEFAULT_CATALOG_RANGE, catalogImportRanges } from '../domain/catalogMetadata.js';
+import { DEFAULT_AGENT_NAME } from '../domain/agentIdentity.js';
 import { createWhatsAppSignupAttempt, completeWhatsAppSignup, retryWhatsAppCoexistenceSync } from './whatsappSignup.js';
 import crypto from 'node:crypto';
 import { appendAuditEvent } from './authService.js';
@@ -2078,7 +2079,8 @@ function tenantConfigFor(tenantId) {
       deprecated: true,
     },
     agentPolicy: {
-      tone: 'tendero_bogotano',
+      displayName: DEFAULT_AGENT_NAME,
+      tone: 'tendero_colombiano',
       responseLanguage: 'es-CO',
       missingQuantity: 'ask',
       humanEscalation: true,

@@ -1,9 +1,11 @@
 import { normalizePaymentMethods } from './paymentMethods.js';
+import { normalizeAgentDisplayName } from '../domain/agentIdentity.js';
 
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
   ['orderPolicy', new Set(['paymentMethods'])],
+  ['agentPolicy', new Set(['displayName'])],
 ]);
 
 const ADMIN_EDITABLE_SECTIONS = new Map([
@@ -14,7 +16,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['googleSheets', new Set(['spreadsheetIdRef', 'range', 'catalogRange', 'customerProfilesRange', 'ordersRange', 'primaryKey', 'refreshPolicy'])],
   ['googleDrive', new Set(['rootFolderRef', 'customerProfileFolderRef', 'filePolicyRef', 'refreshMode', 'allowedMimeTypes'])],
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
-  ['agentPolicy', new Set(['tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
+  ['agentPolicy', new Set(['displayName', 'tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
   ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
   ['secretsPolicy', null],
 ]);
@@ -84,6 +86,7 @@ export function mergeTenantConfig(base, patch) {
 }
 
 function normalizeOwnerField(section, field, value) {
+  if (section === 'agentPolicy' && field === 'displayName') return normalizeAgentDisplayName(value);
   if (section === 'orderPolicy' && field === 'paymentMethods') {
     return normalizePaymentMethodsValue(value);
   }
@@ -99,6 +102,7 @@ function normalizeOwnerField(section, field, value) {
 }
 
 function normalizeAdminValue(field, value) {
+  if (field === 'agentPolicy.displayName') return normalizeAgentDisplayName(value);
   if (field === 'orderPolicy.paymentMethods') return normalizePaymentMethodsValue(value);
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (Array.isArray(value)) return value.map((item) => normalizeAdminValue(field, item));
