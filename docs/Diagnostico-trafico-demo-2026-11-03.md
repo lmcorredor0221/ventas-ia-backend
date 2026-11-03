@@ -84,3 +84,12 @@ Tenant `demo-de-tienda`, propietario `ventasiaopsstore@gmail.com`. Número de ti
 - Consulta PostgreSQL posterior a la importación: 100 productos para `demo-de-tienda`. La hoja Google pertenece a `ventasiaopsstore@gmail.com` y sigue privada para esa cuenta.
 - Se solicitó al usuario una prueba nueva: «Para domicilio, una Coca-Cola de litro y medio y un Chocoramo». Subtotal esperado con el catálogo de prueba: COP 10.000. Pendiente de verificar llegada, latencia y respuesta posterior a estos despliegues.
 - Evidencias locales en `docs/evidencias/auditoria-preparacion-20261103/`: `demo-catalogo-importado.png`, `demo-backend-b16aa63-live.png`, `demo-conversacion-reanudada.png` y `catalogo-demo-100.csv`.
+
+## Prueba posterior a los despliegues — resultado verificado
+
+- Mensaje real recibido a las 15:11:34.840: «Para un domicilio me regalas una Coca-Cola litro y medio y chocorramo».
+- `inbound_messages`: comenzó procesamiento 15:11:38.207537; terminó 15:11:44.976301; `completed`, un intento, `last_error=NULL`. Espera 3,368 s; ejecución 6,769 s; recepción→finalización 10,136 s. Son tiempos del backend, no una garantía de latencia general ni una prueba de carga.
+- Respuesta visible: Coca-Cola original COP 7.200 y Ponque Chocoramo COP 2.800; subtotal COP 10.000; solicita nombre, dirección y pago Efectivo/Tarjeta/Bre-B. Meta confirmó `read` a las 15:11:46.488, `billable=false`, sin código de error. Recepción→callback de lectura: 11,648 s; los callbacks de Meta pueden llegar fuera de orden.
+- El usuario continuó seleccionando Bre-B a las 15:12. VIA registró el método y pidió completar los datos pendientes. La conversación continúa en la misma bandeja.
+- Se valida tráfico bidireccional, recuperación de la conversación, acceso al catálogo, cotización y selección de pago. No se declara completado todo el ciclo de pedido/confirmación/despacho con esta evidencia.
+- Evidencia adicional: `demo-respuesta-pedido-10000.png`.
