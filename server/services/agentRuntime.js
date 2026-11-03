@@ -3,6 +3,7 @@ import { processCoexistenceEvent } from './whatsappCoexistence.js';
 import { isClosedConversation, isDispatchedConversation } from '../domain/conversationStatus.js';
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
+import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null }) {
@@ -147,9 +148,6 @@ export class AgentRuntime {
       wa_id: normalized.waId,
       profile_name: normalized.profileName,
     });
-    if (customerLookup.status === 'connection_required') {
-      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan: null });
-    }
     const customerProfile = customerLookup.profile;
     if (customerProfile?.name) {
       await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
@@ -170,6 +168,20 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
+
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan,
+      items: plan.order?.items?.length ? plan.order.items : currentConversation?.orderDraft?.items ?? [] });
+    if (commerceResult) return commerceResult;
+    if (currentConversation?.commercePolicy?.awaitingContinuation) {
+      if (plan.commercePolicy?.continueAllowedItems || plan.intent === 'order_confirmation') {
+        return this.continueAllowedOrder({ tenantId, conversationId, normalized, customerProfile });
+      }
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: 'Quedaron únicamente los productos permitidos. Usa «Continuar sin ellos» para revisarlos o «Cancelar solicitud».' });
+    }
+    if (customerLookup.status === 'connection_required') {
+      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
+    }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -231,6 +243,79 @@ export class AgentRuntime {
     }
 
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
+  }
+
+  async enforceCommercePolicy({ tenantId, conversationId, normalized, plan = {}, items = plan.order?.items ?? [] }) {
+    const products = this.store.listProducts ? await this.store.listProducts(tenantId) : this.store.getState().productsByTenant?.[tenantId] ?? [];
+    const decision = assessCommerceItems({ items, policy: plan.commercePolicy, products });
+    if (!decision.blocked) return null;
+    const conversation = await this.getConversation(conversationId);
+    // Keep permitted lines already captured, but never retain a restricted
+    // product snapshot, quote or total in the draft being continued.
+    const previous = assessCommerceItems({ items: conversation?.orderDraft?.items ?? [], products,
+      policy: { restrictedItems: decision.restrictedItems, uncertainItems: decision.uncertainItems } });
+    const kept = mergeOrderItems(previous.allowedItems, decision.allowedItems);
+    const allowedItems = kept.map(({ product, lineTotal, available, presentationOptions, ...item }) => ({
+      ...item, skuHint: product?.sku ?? item.skuHint ?? item.sku,
+      catalogQuery: product?.name ?? item.catalogQuery ?? item.rawName ?? item.name,
+    }));
+    const unresolvedItems = mergeOrderItems(previous.unresolvedItems, decision.unresolvedItems)
+      .map(({ product, lineTotal, available, presentationOptions, ...item }) => item);
+    const awaitingContinuation = decision.restrictedItems.length > 0 && allowedItems.length > 0 && !unresolvedItems.length;
+    const notice = decision.restrictedItems.length ? WHATSAPP_COMMERCE_NOTICE : '';
+    const clarification = decision.uncertainItems.length
+      ? '¿Puedes aclarar el producto y para qué uso lo necesitas? Necesito identificarlo antes de continuar.' : '';
+    const continuation = awaitingContinuation ? 'Conservé los demás productos. ¿Deseas continuar únicamente con ellos?' : '';
+    const text = [notice, clarification, continuation].filter(Boolean).join(' ');
+    await this.patchConversation(conversationId, {
+      status: 'live', stage: 'clarification', zone: 'agent', value: 'Pendiente', lastTool: 'whatsapp_commerce_policy',
+      nextStep: awaitingContinuation ? 'Esperar aceptación para continuar solo con productos permitidos.'
+        : decision.uncertainItems.length ? 'Aclarar clasificación sin cotizar.' : 'Atender únicamente solicitudes permitidas por el canal.',
+      commercePolicy: { restrictedItems: decision.restrictedItems, uncertainItems: decision.uncertainItems,
+        customerDetails: plan.customerDetails ?? conversation?.commercePolicy?.customerDetails ?? null,
+        awaitingContinuation, evaluatedAt: new Date().toISOString() },
+      orderDraft: { delivery: Boolean(plan.order?.delivery || conversation?.orderDraft?.delivery), items: [...allowedItems, ...unresolvedItems],
+        paymentMethod: plan.order?.paymentMethod ?? conversation?.orderDraft?.paymentMethod ?? null,
+        missingFields: allowedItems.length ? [] : ['order_items'] },
+    });
+    this.events.emit({ type: 'whatsapp.commerce.restricted', tenantId, conversationId,
+      detail: decision.restrictedItems.length ? 'Solicitud excluida por política del canal.' : 'Clasificación del producto pendiente de aclaración.',
+      metadata: { traceId: normalized.traceId ?? null, categories: [...new Set(decision.restrictedItems.map(i => i.category))],
+        restrictedCount: decision.restrictedItems.length, uncertainCount: decision.uncertainItems.length, retainedCount: allowedItems.length } });
+    let interactive;
+    if (awaitingContinuation && this.store.createInteractionOffer) {
+      const id = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+      const options = [
+        { id: `vi:${id}:1`, title: 'Continuar sin ellos', action: 'continue_allowed_order' },
+        { id: `vi:${id}:2`, title: 'Cancelar solicitud', action: 'cancel_request' },
+      ];
+      await this.store.createInteractionOffer({ id, tenantId, conversationId, purpose: 'commerce_policy', options,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() });
+      interactive = { kind: 'button', body: text, buttons: options.map(({ id: optionId, title }) => ({ id: optionId, title })) };
+    }
+    // The compliance notice is fixed; a reply composer must not turn it into
+    // an offer to finish a restricted sale through a person or another channel.
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message', wa_id: normalized.waId, text, ...(interactive ? { interactive } : {}),
+    });
+    return { summary: 'WhatsApp commerce restriction handled', plan };
+  }
+
+  async continueAllowedOrder({ tenantId, conversationId, normalized, customerProfile }) {
+    const conversation = await this.getConversation(conversationId);
+    if (!conversation?.commercePolicy?.awaitingContinuation) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Esa opción ya no corresponde a la solicitud actual.' });
+    }
+    const draft = structuredClone(conversation.orderDraft ?? { items: [] });
+    const blocked = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, items: draft.items });
+    if (blocked) return blocked;
+    if (!customerProfile) customerProfile = (await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, { wa_id: normalized.waId })).profile;
+    const missingFields = [];
+    if (draft.delivery && !customerProfile?.name) missingFields.push('customer_name');
+    if (draft.delivery && !customerProfile?.defaultAddress) missingFields.push('delivery_address');
+    await this.patchConversation(conversationId, { commercePolicy: { ...conversation.commercePolicy, awaitingContinuation: false } });
+    return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile, replaceDraft: true,
+      plan: { intent: 'delivery_order', order: draft, missingFields, customerDetails: conversation.commercePolicy.customerDetails } });
   }
 
   async cancelConversation({ tenantId, conversationId, normalized }) {
@@ -352,6 +437,8 @@ export class AgentRuntime {
   }
 
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan });
+    if (commerceResult) return commerceResult;
     const text = normalized.text ?? '';
     const catalogItems = plan.order?.items ?? [];
     const catalogSearches = catalogSearchesFromPlan(plan, catalogItems, text);
@@ -365,10 +452,15 @@ export class AgentRuntime {
         });
         return {
           query: search.query,
+          restrictedItems: !catalog.rows.length ? catalog.restrictedItems ?? [] : [],
           selected: catalog.rows[0] ?? null,
           alternatives: catalog.rows.slice(1, 2),
         };
       }));
+      const restrictedItems = matches.flatMap(match => match.restrictedItems);
+      if (restrictedItems.length) return this.enforceCommercePolicy({ tenantId, conversationId, normalized,
+        plan: { ...plan, commercePolicy: { restrictedItems: restrictedItems.filter(i => i.category !== 'uncertain'),
+          uncertainItems: restrictedItems.filter(i => i.category === 'uncertain') } } });
       const selectedRows = matches.map((match) => match.selected).filter(Boolean);
       const drive = await this.resolveDriveContext({ tenantId, conversationId, selectedRows });
       const quote = buildMultiCatalogReply({ matches, drive, delivery: Boolean(plan.order?.delivery) });
@@ -402,6 +494,9 @@ export class AgentRuntime {
       cache_policy: 'short_ttl',
     });
     const selected = catalog.rows[0];
+    if (!selected && catalog.restrictedItems?.length) return this.enforceCommercePolicy({ tenantId, conversationId, normalized,
+      plan: { ...plan, commercePolicy: { restrictedItems: catalog.restrictedItems.filter(i => i.category !== 'uncertain'),
+        uncertainItems: catalog.restrictedItems.filter(i => i.category === 'uncertain') } } });
     const alternatives = catalog.rows.slice(1, 4);
     const drive = await this.resolveDriveContext({
       tenantId,
@@ -434,6 +529,8 @@ export class AgentRuntime {
   }
 
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, replaceDraft = false }) {
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan });
+    if (commerceResult) return commerceResult;
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
     const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
@@ -454,6 +551,8 @@ export class AgentRuntime {
       const product = selectAcceptableOrderProduct(catalog.rows, item);
       return {
         ...item,
+        ...(!catalog.rows.length && catalog.restrictedItems?.length
+          ? { commerceCategory: catalog.restrictedItems[0].category } : {}),
         product,
         presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
         lineTotal: quotedLineTotal({ ...item, product }),
@@ -466,6 +565,9 @@ export class AgentRuntime {
     const effectiveOrderItems = previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
       : orderItems;
+
+    const resolvedCommerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: effectiveOrderItems });
+    if (resolvedCommerceResult) return resolvedCommerceResult;
 
     const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
     const drive = await this.resolveDriveContext({
@@ -621,6 +723,11 @@ export class AgentRuntime {
   }
 
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
+    const existing = await this.getConversation(conversationId);
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan,
+      items: existing?.orderDraft?.items?.length ? existing.orderDraft.items : plan.order?.items ?? [] });
+    if (commerceResult) return commerceResult;
+    if (existing?.commercePolicy?.awaitingContinuation) return this.continueAllowedOrder({ tenantId, conversationId, normalized, customerProfile });
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
     const tenant = await this.getTenant(tenantId);
     const paymentMethods = paymentMethodsForTenant(tenant);
@@ -740,6 +847,8 @@ export class AgentRuntime {
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const conversation = await this.getConversation(conversationId);
     const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: draft.items });
+    if (commerceResult) return commerceResult;
     const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
     const collected = collectCustomerDetails({ plan, text: normalized.text, paymentMethods });
     const plannedPaymentMethod = resolvePaymentMethod(draft.paymentMethod, paymentMethods);
@@ -1396,6 +1505,13 @@ export class AgentRuntime {
           : 'Esa opción ya fue usada o no corresponde a este pedido. Escríbeme cómo quieres continuar.',
       });
     }
+    if (result.option?.action === 'cancel_request') return this.cancelConversation({ tenantId, conversationId, normalized });
+    if (result.option?.action === 'continue_allowed_order') return this.continueAllowedOrder({ tenantId, conversationId, normalized });
+    const current = await this.getConversation(conversationId);
+    const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, items: current?.orderDraft?.items ?? [] });
+    if (commerceResult) return commerceResult;
+    if (current?.commercePolicy?.awaitingContinuation) return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+      reason: 'El pedido cambió. Usa «Continuar sin ellos» para revisar únicamente los productos permitidos.' });
     if (result.option?.action === 'confirm_order') {
       return this.confirmOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
     }
@@ -2229,9 +2345,10 @@ function extractRemovalQuery(text) {
 function matchesRemovalQuery(item, query) {
   const normalized = normalizeText(query);
   if (!normalized) return false;
-  return normalizeText(item.rawName).includes(normalized) ||
-    normalizeText(item.catalogQuery).includes(normalized) ||
-    normalizeText(item.product?.name).includes(normalized);
+  // A product attribute such as "sin alcohol" is not an instruction to
+  // remove the product. Explicit removal of its full name still matches.
+  return [item.rawName, item.catalogQuery, item.product?.name].filter(Boolean)
+    .map(normalizeText).some(name => name.includes(normalized) && !name.includes(`sin ${normalized}`));
 }
 
 function confirmsPresentation(text, productName) {

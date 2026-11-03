@@ -32,6 +32,7 @@ try {
 
   let capturedUrl;
   let capturedOptions;
+  let commerceDecision;
   globalThis.fetch = async (url, options) => {
     capturedUrl = url;
     capturedOptions = options;
@@ -69,6 +70,7 @@ try {
               recommendedTools: ['google_sheets_read_table', 'whatsapp_business_messaging'],
               missingFields: [],
               confidence: 0.86,
+              commercePolicy: commerceDecision,
             }),
           },
         },
@@ -120,6 +122,24 @@ try {
   assert.ok(createdEvent);
   assert.equal(createdEvent.metadata.providerMetadata.usage.total_tokens, 200);
   assert.equal(createdEvent.metadata.providerMetadata.endpoint, 'https://api.deepseek.com/chat/completions');
+
+  commerceDecision = {
+    restrictedItems: [{ rawName: 'marca con error', category: 'tobacco' }],
+    uncertainItems: [{ rawName: 'alcohol' }],
+    continueAllowedItems: true,
+  };
+  const policyPlan = await planner.plan({
+    tenantId: 'andina', conversationId: 'conv-policy-contract',
+    normalized: { text: 'Continúa solo con lo permitido', waId: '573001112233', provider: 'whatsapp' },
+    customerProfile: null,
+    conversation: { commercePolicy: { awaitingContinuation: true } },
+  });
+  assert.deepEqual(policyPlan.commercePolicy, commerceDecision, 'Provider policy evidence must survive normalization and enrichment');
+  const policyPrompt = JSON.parse(capturedOptions.body).messages.map(message => message.content).join('\n');
+  assert.match(policyPrompt, /commercePolicy/);
+  assert.match(policyPrompt, /alcohol de limpieza/);
+  assert.match(policyPrompt, /existingCommercePolicy/);
+  assert.match(policyPrompt, /"awaitingContinuation":true/);
 
   delete process.env.TEST_DEEPSEEK_API_KEY;
   store.mutate((state) => {

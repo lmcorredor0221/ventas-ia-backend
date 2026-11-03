@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { assertCommerceOrderAllowed, catalogCommerceCategory } from '../domain/whatsappCommercePolicy.js';
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 import { findOpenPendingRequest } from './pendingRequestPolicy.js';
 
@@ -102,10 +103,12 @@ export class ToolRegistry {
     const rows = live
       ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: payload.range ?? tenant?.config?.googleSheets?.catalogRange })
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
+    const matchingRows = filterRows(rows, payload.filters);
     return {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'driveFileId'],
-      rows: filterRows(rows, payload.filters),
+      rows: matchingRows.filter(row => !catalogCommerceCategory(row)),
+      restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
       source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
       fetched_at: new Date().toISOString(),
@@ -185,6 +188,8 @@ export class ToolRegistry {
   }
 
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
+    const products = this.store.listProducts ? await this.store.listProducts(tenantId) : this.store.getState().productsByTenant?.[tenantId] ?? [];
+    assertCommerceOrderAllowed(payload.items ?? [], products);
     await sleep(25);
     const now = new Date().toISOString();
     const status = assertOrderStatus(payload.status ?? 'pending_human_preparation');
