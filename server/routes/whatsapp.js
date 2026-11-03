@@ -43,86 +43,84 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
         }));
         return res.status(403).json({ error: 'Invalid WhatsApp signature' });
       }
-      normalized = normalizeWhatsAppPayload(req.body, store.getState());
-      if (!normalized) {
-        recordWebhookEvent(store, webhookRecordFromRequest(req, {
-          status: 'ignored',
-          httpStatus: 400,
-          durationMs: Date.now() - startedAt,
-          errorCode: 'malformed_payload',
-          errorMessage: 'Malformed or unsupported WhatsApp payload',
-        }));
-        return res.status(400).json({ error: 'Malformed or unsupported WhatsApp payload' });
-      }
-      if (!normalized.tenantId) {
-        recordWebhookEvent(store, webhookRecordFromRequest(req, {
-          status: 'ignored',
-          httpStatus: 200,
-          durationMs: Date.now() - startedAt,
-          eventType: normalized.messageType,
-          externalId: normalized.messageId,
-          errorCode: 'whatsapp_tenant_not_found',
-          errorMessage: 'WhatsApp event does not belong to a connected tenant',
-          metadata: {
-            phoneNumberId: normalized.phoneNumberId,
-            waId: normalized.waId,
-            traceId: normalized.traceId,
-            requestId: req.requestId,
-          },
-        }));
-        return res.status(200).json({ ok: true, ignored: true, reason: 'whatsapp_tenant_not_found' });
-      }
-      controlPlane?.requireTenantOperational(normalized.tenantId);
-      if (normalized.messageType === 'delivery_status') {
+      const events = normalizeWhatsAppEvents(req.body, store.getState());
+      if (!Array.isArray(req.body?.entry)) return res.status(400).json({ error: 'Malformed WhatsApp payload' });
+      const results = [];
+      for (const event of events) results.push(await processEvent(event));
+      return res.status(200).json(results.length === 1 ? results[0] : { ok: true, results });
+
+      async function processEvent(event) {
+        normalized = event;
+        if (!normalized.tenantId) {
+          recordWebhookEvent(store, webhookRecordFromRequest(req, {
+            status: 'ignored',
+            httpStatus: 200,
+            durationMs: Date.now() - startedAt,
+            eventType: normalized.messageType,
+            externalId: normalized.messageId,
+            errorCode: 'whatsapp_tenant_not_found',
+            errorMessage: 'WhatsApp event does not belong to a connected tenant',
+            metadata: {
+              phoneNumberId: normalized.phoneNumberId,
+              waId: normalized.waId,
+              traceId: normalized.traceId,
+              requestId: req.requestId,
+            },
+          }));
+          return { ok: true, ignored: true, reason: 'whatsapp_tenant_not_found' };
+        }
+        if (normalized.messageType === 'delivery_status') {
+          recordWebhookEvent(store, webhookRecordFromRequest(req, {
+            tenantId: normalized.tenantId,
+            eventType: normalized.messageType,
+            externalId: normalized.messageId,
+            status: 'ignored',
+            httpStatus: 200,
+            durationMs: Date.now() - startedAt,
+            metadata: {
+              phoneNumberId: normalized.phoneNumberId,
+              waId: normalized.waId,
+              traceId: normalized.traceId,
+              requestId: req.requestId,
+              deliveryStatus: normalized.text,
+            },
+          }));
+          return { ok: true, ignored: true, reason: 'delivery_status' };
+        }
+        if (!normalized.coexistenceEvent) controlPlane?.requireTenantOperational(normalized.tenantId);
+        if (config.asyncInboundEnabled) {
+          const queued = await store.enqueueInboundMessage(normalized);
+          recordWebhookEvent(store, webhookRecordFromRequest(req, {
+            tenantId: normalized.tenantId,
+            eventType: normalized.messageType,
+            externalId: normalized.messageId,
+            status: queued.created ? 'queued' : 'duplicate',
+            httpStatus: 200,
+            durationMs: Date.now() - startedAt,
+            metadata: {
+              duplicate: !queued.created,
+              queue: 'whatsapp.inbound_processing',
+              phoneNumberId: normalized.phoneNumberId,
+              waId: normalized.waId,
+              traceId: normalized.traceId,
+              requestId: req.requestId,
+            },
+          }));
+          return { ok: true, queued: queued.created, duplicate: !queued.created };
+        }
+        const result = await runtime.processInbound(normalized);
         recordWebhookEvent(store, webhookRecordFromRequest(req, {
           tenantId: normalized.tenantId,
           eventType: normalized.messageType,
           externalId: normalized.messageId,
-          status: 'ignored',
+          status: result.duplicate ? 'duplicate' : 'processed',
           httpStatus: 200,
           durationMs: Date.now() - startedAt,
-          metadata: {
-            phoneNumberId: normalized.phoneNumberId,
-            waId: normalized.waId,
-            traceId: normalized.traceId,
-            requestId: req.requestId,
-            deliveryStatus: normalized.text,
-          },
+          conversationId: result.conversation?.id,
+          metadata: { duplicate: result.duplicate, phoneNumberId: normalized.phoneNumberId, waId: normalized.waId, traceId: normalized.traceId, requestId: req.requestId },
         }));
-        return res.status(200).json({ ok: true, ignored: true, reason: 'delivery_status' });
+        return { ok: true, duplicate: result.duplicate, conversationId: result.conversation?.id };
       }
-      if (config.asyncInboundEnabled) {
-        const queued = await store.enqueueInboundMessage(normalized);
-        recordWebhookEvent(store, webhookRecordFromRequest(req, {
-          tenantId: normalized.tenantId,
-          eventType: normalized.messageType,
-          externalId: normalized.messageId,
-          status: queued.created ? 'queued' : 'duplicate',
-          httpStatus: 200,
-          durationMs: Date.now() - startedAt,
-          metadata: {
-            duplicate: !queued.created,
-            queue: 'whatsapp.inbound_processing',
-            phoneNumberId: normalized.phoneNumberId,
-            waId: normalized.waId,
-            traceId: normalized.traceId,
-            requestId: req.requestId,
-          },
-        }));
-        return res.status(200).json({ ok: true, queued: queued.created, duplicate: !queued.created });
-      }
-      const result = await runtime.processInbound(normalized);
-      recordWebhookEvent(store, webhookRecordFromRequest(req, {
-        tenantId: normalized.tenantId,
-        eventType: normalized.messageType,
-        externalId: normalized.messageId,
-        status: result.duplicate ? 'duplicate' : 'processed',
-        httpStatus: 200,
-        durationMs: Date.now() - startedAt,
-        conversationId: result.conversation?.id,
-        metadata: { duplicate: result.duplicate, phoneNumberId: normalized.phoneNumberId, waId: normalized.waId, traceId: normalized.traceId, requestId: req.requestId },
-      }));
-      return res.status(200).json({ ok: true, duplicate: result.duplicate, conversationId: result.conversation?.id });
     } catch (error) {
       recordWebhookEvent(store, webhookRecordFromRequest(req, {
         tenantId: normalized?.tenantId,
@@ -215,7 +213,7 @@ function normalizeWhatsAppPayload(payload, state) {
     tenantId: tenant?.id ?? null,
     workspaceId: tenant?.id ?? null,
     waId: message.from,
-    profileName: change?.contacts?.[0]?.profile?.name,
+    profileName: change?.contacts?.find(c => c.wa_id === message.from)?.profile?.name,
     phoneNumberId,
     messageId: message.id,
     traceId: `wa:${message.id}`,
@@ -242,5 +240,36 @@ function resolveTenantByPhoneNumberId(state, phoneNumberId) {
     error.code = 'whatsapp_phone_number_missing';
     throw error;
   }
-  return state.tenants.find((item) => item.config?.whatsapp?.phoneNumberId === phoneNumberId) ?? null;
+  const matches = state.tenants.filter(item => item.config?.whatsapp?.phoneNumberId === phoneNumberId);
+  if (matches.length > 1) throw Object.assign(new Error('Conflicting WhatsApp number ownership'), { statusCode: 409, code: 'whatsapp_phone_ownership_conflict' });
+  return matches[0] ?? null;
+}
+
+export function normalizeWhatsAppEvents(payload, state) {
+  const result = [];
+  for (const entry of payload?.entry ?? []) for (const change of entry.changes ?? []) {
+    const value = change.value ?? {};
+    const field = change.field ?? 'messages';
+    if (['smb_message_echoes', 'smb_app_state_sync', 'history', 'account_update'].includes(field)) {
+      const phoneNumberId = value.metadata?.phone_number_id;
+      const wabaId = value.waba_info?.waba_id ?? entry.id;
+      const tenants = field === 'account_update'
+        ? state.tenants.filter(t => t.config?.whatsapp?.wabaId === wabaId && (!value.waba_info?.owner_business_id || t.config.whatsapp.businessId === value.waba_info.owner_business_id))
+        : [resolveTenantByPhoneNumberId(state, phoneNumberId)].filter(Boolean);
+      for (const tenant of tenants) {
+        const id = 'coex:' + tenant.id + ':' + crypto.createHash('sha256').update(JSON.stringify({ field, value, time: entry.time })).digest('hex');
+        result.push({ provider: 'meta_whatsapp_cloud_api', tenantId: tenant.id, workspaceId: tenant.id, messageId: id,
+          traceId: id, phoneNumberId: phoneNumberId ?? tenant.config.whatsapp.phoneNumberId, messageType: field,
+          coexistenceEvent: { field, value, timestamp: entry.time }, timestamp: Number(entry.time ?? Date.now()/1000)*1000 });
+      }
+      continue;
+    }
+    if (field !== 'messages') continue;
+    for (const key of ['messages', 'statuses']) for (const item of value[key] ?? []) {
+      const isolated = { entry: [{ changes: [{ value: { ...value, messages: [], statuses: [], [key]: [item] } }] }] };
+      const event = normalizeWhatsAppPayload(isolated, state);
+      if (event) result.push(event);
+    }
+  }
+  return result;
 }

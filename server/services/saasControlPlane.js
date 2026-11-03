@@ -1,3 +1,4 @@
+import { createWhatsAppSignupAttempt, completeWhatsAppSignup, retryWhatsAppCoexistenceSync } from './whatsappSignup.js';
 import crypto from 'node:crypto';
 import { appendAuditEvent } from './authService.js';
 import {
@@ -27,8 +28,9 @@ const GOOGLE_SCOPES = [
   'openid',
   'email',
   'profile',
+  // Sheets supports per-file Drive access. VIA creates the operational files;
+  // it does not need permission to every spreadsheet in the owner's account.
   'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/spreadsheets',
 ];
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'authorized', 'trial', 'grace_period']);
@@ -1356,11 +1358,14 @@ export class SaasControlPlane {
     return this.getTenantBundle(tenantId);
   }
 
-  startWhatsAppEmbeddedSignup(tenantId, { purpose = 'connect' } = {}) {
+  startWhatsAppEmbeddedSignup(tenantId, { purpose = 'connect', actorId } = {}) {
     this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_setup');
     const status = this.getWhatsAppOnboarding(tenantId);
     const normalizedPurpose = purpose === 'renew' ? 'renew' : 'connect';
+    if (status.canAutomate && !status.setupPath) {
+      throw Object.assign(new Error('Elige cómo usas hoy el número de tu tienda.'), { statusCode: 422, code: 'whatsapp_setup_path_required' });
+    }
     if (normalizedPurpose === 'renew' && !status.connected) {
       const error = new Error('Conecta un numero de WhatsApp antes de renovar su acceso.');
       error.statusCode = 409;
@@ -1374,6 +1379,9 @@ export class SaasControlPlane {
       throw error;
     }
     const now = new Date().toISOString();
+    const signupAttempt = status.canAutomate ? createWhatsAppSignupAttempt(this, tenantId, {
+      purpose: normalizedPurpose, setupPath: status.setupPath, actorId,
+    }) : null;
     this.store.mutate((state) => {
       state.whatsappOnboardingByTenant[tenantId] = {
         ...(state.whatsappOnboardingByTenant[tenantId] ?? {}),
@@ -1382,6 +1390,7 @@ export class SaasControlPlane {
         lastAttemptAt: now,
         lastAttemptMode: status.automationMode,
         lastAttemptKind: normalizedPurpose,
+        attempt: signupAttempt?.saved ?? null,
         updatedAt: now,
         createdAt: state.whatsappOnboardingByTenant[tenantId]?.createdAt ?? now,
       };
@@ -1409,6 +1418,8 @@ export class SaasControlPlane {
             : status.platformReadiness.appReviewStatus === 'changes_requested'
               ? 'Meta solicitó ajustes a la solicitud de WhatsApp de Ventas IA.'
               : 'Ventas IA aún debe enviar a Meta la solicitud de acceso avanzado de WhatsApp.'
+          : status.reason === 'meta_login_review_pending'
+            ? 'WhatsApp ya fue aprobado. Falta habilitar en Meta el inicio de sesión de clientes externos de Ventas IA.'
           : status.reason === 'meta_webhook_not_configured'
             ? 'Falta configurar el webhook HTTPS de Meta para abrir Embedded Signup desde la microapp.'
             : 'Falta configurar la aplicación de Meta para abrir Embedded Signup desde la microapp.',
@@ -1425,6 +1436,8 @@ export class SaasControlPlane {
         configId: process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID,
         graphApiVersion: this.config.whatsappGraphVersion,
         responseType: 'code',
+        setupPath: status.setupPath,
+        attemptId: signupAttempt.attemptId,
       },
       status: this.getWhatsAppOnboarding(tenantId),
     };
@@ -1520,7 +1533,7 @@ export class SaasControlPlane {
       purpose: 'Canal de prueba de Meta limitado al piloto de plataforma',
     });
     const now = new Date().toISOString();
-    const result = this.saveWhatsAppBinding(tenantId, {
+    const result = await this.saveWhatsAppBinding(tenantId, {
       phoneNumberId: pilot.phoneNumberId,
       wabaId: pilot.wabaId,
       displayPhoneNumber: phone.display_phone_number ?? pilot.displayPhoneNumber,
@@ -1553,139 +1566,15 @@ export class SaasControlPlane {
     return this.getTenantBundle(tenantId);
   }
 
-  async completeWhatsAppEmbeddedSignup(tenantId, payload = {}) {
-    this.requireTenant(tenantId);
-    this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_embedded_signup');
-    const readiness = this.getWhatsAppOnboarding(tenantId);
-    if (!readiness.canAutomate) {
-      const error = new Error('La conexión con Meta aún no está habilitada por Ventas IA.');
-      error.statusCode = 428;
-      error.code = readiness.reason;
-      throw error;
-    }
-    const code = String(payload.code ?? '').trim();
-    const wabaId = String(payload.wabaId ?? '').trim();
-    const phoneNumberId = String(payload.phoneNumberId ?? '').trim();
-    const registrationPin = String(payload.registrationPin ?? '').trim();
-    const appId = String(process.env.META_APP_ID ?? '').trim();
-    const appSecret = String(process.env.META_APP_SECRET ?? process.env.WHATSAPP_APP_SECRET ?? '').trim();
-    const configId = String(process.env.WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID ?? '').trim();
-
-    if (!code || !wabaId || !phoneNumberId) {
-      const error = new Error('Embedded Signup debe entregar code, wabaId y phoneNumberId.');
-      error.statusCode = 422;
-      error.code = 'whatsapp_embedded_signup_payload_incomplete';
-      throw error;
-    }
-    if (!appId || !appSecret || !configId) {
-      const error = new Error('Meta Embedded Signup no esta configurado en la plataforma.');
-      error.statusCode = 428;
-      error.code = 'meta_embedded_signup_not_configured';
-      throw error;
-    }
-
-    const tokenUrl = new URL(`https://graph.facebook.com/${this.config.whatsappGraphVersion}/oauth/access_token`);
-    tokenUrl.searchParams.set('client_id', appId);
-    tokenUrl.searchParams.set('client_secret', appSecret);
-    tokenUrl.searchParams.set('code', code);
-    const tokenPayload = await fetchGraphJson(tokenUrl, { method: 'GET' }, 'whatsapp_embedded_signup_token_exchange');
-    const accessToken = String(tokenPayload.access_token ?? '').trim();
-    if (!accessToken) {
-      const error = new Error('Meta no devolvio un access token para la tienda.');
-      error.statusCode = 502;
-      error.code = 'whatsapp_embedded_signup_token_missing';
-      throw error;
-    }
-
-    const phone = await fetchGraphJson(
-      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name`,
-      { headers: { authorization: `Bearer ${accessToken}` } },
-      'whatsapp_phone_validation',
-    );
-    if (String(phone.id ?? '') !== phoneNumberId) {
-      const error = new Error('El numero seleccionado por Meta no coincide con el identificador recibido.');
-      error.statusCode = 422;
-      error.code = 'whatsapp_phone_mismatch';
-      throw error;
-    }
-
-    const wabaPhones = await fetchGraphJson(
-      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(wabaId)}/phone_numbers?fields=id`,
-      { headers: { authorization: `Bearer ${accessToken}` } },
-      'whatsapp_waba_validation',
-    );
-    if (!(wabaPhones.data ?? []).some((item) => String(item.id ?? '') === phoneNumberId)) {
-      const error = new Error('El numero no pertenece a la cuenta WhatsApp Business seleccionada.');
-      error.statusCode = 422;
-      error.code = 'whatsapp_phone_not_in_waba';
-      throw error;
-    }
-
-    // Meta keeps the business assets as its source of truth. After the owner
-    // approves Embedded Signup, finish the tenant-specific operational binding.
-    await fetchGraphJson(
-      `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(wabaId)}/subscribed_apps`,
-      { method: 'POST', headers: { authorization: `Bearer ${accessToken}` } },
-      'whatsapp_waba_webhook_subscription',
-    );
-
-    const onboarding = this.getWhatsAppOnboarding(tenantId);
-    const renewalAttempt = this.store.getState().whatsappOnboardingByTenant[tenantId]?.lastAttemptKind === 'renew';
-    const requiresPhoneRegistration = onboarding.setupPath !== 'cloud_api_existing' && !renewalAttempt;
-    if (requiresPhoneRegistration) {
-      if (!/^\d{6}$/.test(registrationPin)) {
-        const error = new Error('Crea un PIN de seguridad de seis dígitos para proteger el número en Meta.');
-        error.statusCode = 422;
-        error.code = 'whatsapp_registration_pin_required';
-        throw error;
-      }
-      await fetchGraphJson(
-        `https://graph.facebook.com/${this.config.whatsappGraphVersion}/${encodeURIComponent(phoneNumberId)}/register`,
-        {
-          method: 'POST',
-          headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ messaging_product: 'whatsapp', pin: registrationPin }),
-        },
-        'whatsapp_phone_registration',
-      );
-    }
-
-    const accessTokenRef = this.secretVault.saveSecret({
-      tenantId,
-      name: 'WHATSAPP_ACCESS_TOKEN',
-      value: accessToken,
-      provider: 'meta_whatsapp_cloud_api',
-      purpose: 'WhatsApp Cloud API token obtenido por Embedded Signup',
-    });
-    const accessTokenIssuedAt = new Date().toISOString();
-    const tokenExpiresInSeconds = Number(tokenPayload.expires_in);
-    const tokenLifetimeMs = Number.isFinite(tokenExpiresInSeconds) && tokenExpiresInSeconds > 0
-      ? tokenExpiresInSeconds * 1000
-      : Math.max(1, Number(this.config.whatsappTenantTokenLifetimeDays ?? 60)) * 24 * 60 * 60 * 1000;
-    const accessTokenExpiresAt = new Date(Date.parse(accessTokenIssuedAt) + tokenLifetimeMs).toISOString();
-    const result = this.saveWhatsAppBinding(tenantId, {
-      phoneNumberId,
-      wabaId,
-      displayPhoneNumber: phone.display_phone_number ?? payload.displayPhoneNumber,
-      verifiedName: phone.verified_name ?? payload.verifiedName,
-      accessTokenRef,
-      accessTokenIssuedAt,
-      accessTokenExpiresAt,
-    }, { verifiedByProvider: true });
-    this.audit(tenantId, 'whatsapp.embedded_signup.completed', 'whatsapp_connection', {
-      wabaId,
-      phoneNumberId,
-      accessTokenRef,
-      configId,
-      webhookSubscribed: true,
-      phoneRegistered: requiresPhoneRegistration,
-      renewalAttempt,
-      accessTokenExpiresAt,
-    });
-    return result;
+  async completeWhatsAppEmbeddedSignup(tenantId, payload = {}, context = {}) {
+    return completeWhatsAppSignup(this, tenantId, payload, context, fetchGraphJson);
   }
 
-  saveWhatsAppBinding(tenantId, payload = {}, { verifiedByProvider = false } = {}) {
+  async retryWhatsAppCoexistenceSync(tenantId) {
+    return retryWhatsAppCoexistenceSync(this, tenantId, fetchGraphJson);
+  }
+
+  async saveWhatsAppBinding(tenantId, payload = {}, { verifiedByProvider = false } = {}) {
     const tenant = this.requireTenant(tenantId);
     this.requireActiveSubscriptionForSetup(tenantId, 'whatsapp_binding');
     if (!verifiedByProvider) {
@@ -1700,6 +1589,13 @@ export class SaasControlPlane {
       error.statusCode = 400;
       throw error;
     }
+    const other = this.store.getState().tenants.find((item) => item.id !== tenantId && item.config?.whatsapp?.phoneNumberId === phoneNumberId);
+    if (other) throw Object.assign(new Error('Este número ya está vinculado a otra tienda de VIA.'), { code: 'whatsapp_phone_already_bound', statusCode: 409 });
+    await this.store.persistTenantCritical?.(tenantId);
+    await this.store.claimWhatsAppPhone?.(tenantId, phoneNumberId);
+    const previousConfig = structuredClone(tenant.config.whatsapp);
+    const previousLifecycle = structuredClone(tenant.lifecycle);
+    const previousOnboarding = structuredClone(this.store.getState().whatsappOnboardingByTenant[tenantId]);
     const now = new Date().toISOString();
     this.store.mutate((state) => {
       const nextTenant = state.tenants.find((item) => item.id === tenantId);
@@ -1708,12 +1604,16 @@ export class SaasControlPlane {
           ...(nextTenant.config.whatsapp ?? tenantConfigFor(tenantId).whatsapp),
           phoneNumberId,
           wabaId: String(payload.wabaId ?? nextTenant.config.whatsapp?.wabaId ?? '').trim() || null,
+          businessId: payload.businessId ?? nextTenant.config.whatsapp?.businessId ?? null,
+          coexistence: payload.coexistence ?? nextTenant.config.whatsapp?.coexistence ?? false,
+          tokenExpiryKnown: payload.tokenExpiryKnown ?? false,
+          accessRevokedAt: null,
           displayPhoneNumber: String(payload.displayPhoneNumber ?? nextTenant.whatsappNumber ?? '').trim() || null,
           verifiedName: String(payload.verifiedName ?? nextTenant.name ?? '').trim() || null,
           phoneNumberIdRef: String(payload.phoneNumberIdRef ?? nextTenant.config.whatsapp?.phoneNumberIdRef ?? `${tenantId.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`).trim(),
           accessTokenRef: String(payload.accessTokenRef ?? nextTenant.config.whatsapp?.accessTokenRef ?? `${tenantId.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`).trim(),
           accessTokenIssuedAt: String(payload.accessTokenIssuedAt ?? nextTenant.config.whatsapp?.accessTokenIssuedAt ?? '').trim() || null,
-          accessTokenExpiresAt: String(payload.accessTokenExpiresAt ?? nextTenant.config.whatsapp?.accessTokenExpiresAt ?? '').trim() || null,
+          accessTokenExpiresAt: Object.hasOwn(payload, 'accessTokenExpiresAt') ? payload.accessTokenExpiresAt : nextTenant.config.whatsapp?.accessTokenExpiresAt ?? null,
           verifyTokenRef: String(payload.verifyTokenRef ?? nextTenant.config.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF').trim(),
           appSecretRef: String(payload.appSecretRef ?? nextTenant.config.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF').trim(),
         };
@@ -1729,7 +1629,17 @@ export class SaasControlPlane {
         createdAt: state.whatsappOnboardingByTenant[tenantId]?.createdAt ?? now,
       };
     });
-    this.persistTenantCritical(tenantId);
+    try {
+      if (this.store.persistWhatsAppOnboarding) await this.store.persistWhatsAppOnboarding(tenantId);
+      else await this.store.persistTenantCritical?.(tenantId);
+    } catch (error) {
+      this.store.mutate((state) => {
+        tenant.config.whatsapp = previousConfig;
+        tenant.lifecycle = previousLifecycle;
+        state.whatsappOnboardingByTenant[tenantId] = previousOnboarding;
+      });
+      throw error;
+    }
     this.completeOnboardingStep(tenantId, 'whatsapp');
     this.recordBillingFunnel(tenantId, 'whatsapp_configured', { phoneNumberId });
     this.events.emit({ type: 'whatsapp.connection.bound', tenantId, detail: 'WhatsApp conectado a la tienda', metadata: { phoneNumberId } });
@@ -1738,6 +1648,7 @@ export class SaasControlPlane {
       wabaId: payload.wabaId ?? null,
       hasAccessTokenRef: Boolean(payload.accessTokenRef ?? tenant.config?.whatsapp?.accessTokenRef),
     });
+    await this.store.flush?.();
     return this.getTenantBundle(tenantId);
   }
 
@@ -2219,18 +2130,20 @@ function whatsappOnboardingForTenant({ tenant, saved, testPilot, tokenLifetimeDa
     && isHttpsUrl(whatsappWebhookPublicUrl()),
   );
   const appReviewApproved = process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED === 'true';
+  const loginReviewApproved = process.env.META_FACEBOOK_LOGIN_ADVANCED_ACCESS_APPROVED === 'true';
   const reportedReviewStatus = process.env.META_WHATSAPP_APP_REVIEW_STATUS;
   const appReviewStatus = appReviewApproved
     ? 'approved'
     : ['in_review', 'changes_requested'].includes(reportedReviewStatus)
       ? reportedReviewStatus
       : 'not_submitted';
-  const canAutomate = metaConfigured && webhookConfigured && appReviewApproved;
+  const canAutomate = metaConfigured && webhookConfigured && appReviewApproved && loginReviewApproved;
   const connected = Boolean(whatsapp.phoneNumberId);
   const token = whatsappAccessTokenHealth({
     connected,
     issuedAt: whatsapp.accessTokenIssuedAt,
     expiresAt: whatsapp.accessTokenExpiresAt,
+    expiryKnown: whatsapp.tokenExpiryKnown,
     tokenLifetimeDays,
     tokenRenewalWindowDays,
   });
@@ -2248,13 +2161,16 @@ function whatsappOnboardingForTenant({ tenant, saved, testPilot, tokenLifetimeDa
     status,
     connected,
     automationMode: canAutomate ? 'embedded_signup' : 'guided_manual',
+    channelStatus: whatsapp.accessRevokedAt ? 'revoked' : connected ? 'bound' : 'not_connected',
     canAutomate,
-    platformReadiness: { appReviewApproved, appReviewStatus, metaConfigured, webhookConfigured },
+    platformReadiness: { appReviewApproved, appReviewStatus, loginReviewApproved, metaConfigured, webhookConfigured },
     testPilot: publicWhatsAppTestPilot(testPilot),
     reason: canAutomate
       ? null
       : !appReviewApproved
         ? 'meta_app_review_pending'
+        : !loginReviewApproved
+          ? 'meta_login_review_pending'
         : !metaConfigured
           ? 'meta_app_not_configured'
           : 'meta_webhook_not_configured',
@@ -2266,6 +2182,8 @@ function whatsappOnboardingForTenant({ tenant, saved, testPilot, tokenLifetimeDa
     binding: {
       phoneNumberId: whatsapp.phoneNumberId ?? null,
       wabaId: whatsapp.wabaId ?? null,
+      businessId: whatsapp.businessId ?? null,
+      coexistence: Boolean(whatsapp.coexistence),
       displayPhoneNumber: whatsapp.displayPhoneNumber ?? tenant.whatsappNumber ?? null,
       verifiedName: whatsapp.verifiedName ?? null,
       accessTokenRef: whatsapp.accessTokenRef ?? null,
@@ -2275,6 +2193,9 @@ function whatsappOnboardingForTenant({ tenant, saved, testPilot, tokenLifetimeDa
       accessTokenExpiresAt: whatsapp.accessTokenExpiresAt ?? null,
     },
     token,
+    billing: { payer: 'tenant', status: 'not_verified', url: 'https://business.facebook.com/wa/manage/home/' },
+    sync: { required: Boolean(whatsapp.coexistence), requests: saved.attempt?.syncRequests ?? {}, error: saved.attempt?.syncError ?? null, ...saved.syncProgress },
+    phoneSelection: saved.attempt?.status === 'awaiting_phone_selection' ? saved.attempt.phones ?? [] : [],
     requirements: whatsappRequirementsForPath(setupPath),
     steps: whatsappSetupSteps({ setupPath, connected, canAutomate, whatsapp }),
     externalLinks: {
@@ -2326,7 +2247,7 @@ function missingWhatsAppMessagingPermissions(permissions = []) {
     .filter((permission) => !granted.has(permission));
 }
 
-function whatsappAccessTokenHealth({ connected, issuedAt, expiresAt, tokenLifetimeDays, tokenRenewalWindowDays }) {
+function whatsappAccessTokenHealth({ connected, issuedAt, expiresAt, expiryKnown, tokenLifetimeDays, tokenRenewalWindowDays }) {
   if (!connected) {
     return {
       status: 'not_connected',
@@ -2339,12 +2260,12 @@ function whatsappAccessTokenHealth({ connected, issuedAt, expiresAt, tokenLifeti
   const expiry = Date.parse(expiresAt ?? '');
   if (!Number.isFinite(expiry)) {
     return {
-      status: 'unknown',
+      status: expiryKnown ? 'no_expiry' : 'unknown',
       renewalRequired: false,
       issuedAt: issuedAt ?? null,
       expiresAt: null,
       daysRemaining: null,
-      message: 'Esta conexión se creó antes del control de vencimiento. Reautorízala cuando te sea posible para registrar su próxima fecha de renovación.',
+      message: expiryKnown ? 'Meta no fijó fecha de vencimiento. El acceso sigue sujeto a revocación y permisos.' : 'Meta no informó una fecha de vencimiento. Puedes reautorizar la conexión si deja de funcionar.',
     };
   }
   const remainingMs = expiry - Date.now();
@@ -2386,7 +2307,7 @@ function whatsappRequirementsForPath(setupPath) {
     return [
       'Acceso admin al negocio Meta del cliente',
       'Cuenta WhatsApp existente o permiso para seleccionarla',
-      'Identificador del número, acceso permanente y referencia de verificación',
+      'Seleccionar en Meta el número de la tienda y autorizar a VIA',
     ];
   }
   if (setupPath === 'new_business') {
@@ -2397,9 +2318,9 @@ function whatsappRequirementsForPath(setupPath) {
     ];
   }
   return [
-    'Confirmar si el numero actual puede migrarse a la integración oficial',
-    'Acceso al telefono para recibir OTP',
-    'Definir si la tienda conserva el numero o usa uno nuevo',
+    'Tener WhatsApp Business actualizado y acceso al celular de la tienda',
+    'Autorizar la coexistencia en Meta si el número cumple sus requisitos',
+    'Elegir si se comparte el historial, conservando WhatsApp Business en el celular',
   ];
 }
 
@@ -2686,7 +2607,7 @@ function parseEmailFromIdToken(idToken) {
 }
 
 async function fetchGraphJson(url, options = {}, operation = 'whatsapp_graph_request') {
-  const response = await fetch(url, options);
+  const response = await fetch(url, { ...options, signal: options.signal ?? AbortSignal.timeout(15_000) });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(`Meta Graph API fallo durante ${operation}: ${response.status}`);

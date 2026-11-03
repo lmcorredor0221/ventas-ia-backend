@@ -4,7 +4,13 @@ export function validateRuntimeConfig(config, env = process.env) {
   const warnings = [];
   const add = (condition, message) => { if (!condition) errors.push(message); };
 
+  if (config.asyncInboundEnabled) {
+    add(config.integrationOutboxEnabled === true, 'WHATSAPP_ASYNC_INBOUND_ENABLED requiere INTEGRATION_OUTBOX_ENABLED=true.');
+  }
+
   if (production) {
+    if (!config.asyncInboundEnabled) warnings.push('WhatsApp procesa mensajes antes del ACK; habilita recepción durable asíncrona.');
+    if (!config.integrationOutboxEnabled) warnings.push('La cola de sincronización no tiene consumidor habilitado.');
     add(config.storageDriver === 'postgres' && Boolean(config.databaseUrl), 'Producción requiere STORAGE_DRIVER=postgres y DATABASE_URL.');
     add(config.authRequired === true, 'Producción requiere AUTH_REQUIRED=true.');
     add(config.csrfRequired === true, 'Producción requiere CSRF_REQUIRED=true.');

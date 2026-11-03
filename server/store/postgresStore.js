@@ -236,6 +236,42 @@ export class PostgresStore {
     }, 'critical tenant write');
   }
 
+  async claimWhatsAppPhone(tenantId, phoneNumberId) {
+    try {
+      await this.pool.query(`INSERT INTO whatsapp_phone_claims(phone_number_id, tenant_id)
+        VALUES ($1, $2) ON CONFLICT (tenant_id) DO UPDATE
+        SET phone_number_id = EXCLUDED.phone_number_id, updated_at = now()`, [phoneNumberId, tenantId]);
+    } catch (error) {
+      if (error.code === '23505') throw Object.assign(new Error('Este número ya está vinculado a otra tienda de VIA.'), { code: 'whatsapp_phone_already_bound', statusCode: 409 });
+      throw error;
+    }
+  }
+
+  persistWhatsAppOnboarding(tenantId) {
+    return this.queueWrite(async () => {
+      const state = this.getState();
+      const onboarding = state.whatsappOnboardingByTenant?.[tenantId] ?? {};
+      const secrets = Object.fromEntries(Object.entries(state.secretsByRef ?? {}).filter(([, secret]) => secret.tenantId === tenantId));
+      const tenant = state.tenants.find(t => t.id === tenantId);
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await upsertTenant(client, tenant);
+        await client.query(`UPDATE app_state SET document =
+          jsonb_set(jsonb_set(document, '{whatsappOnboardingByTenant}',
+            COALESCE(document->'whatsappOnboardingByTenant', '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb)),
+            '{secretsByRef}', COALESCE(document->'secretsByRef', '{}'::jsonb) || $3::jsonb), updated_at = now()
+          WHERE id = 'runtime'`, [tenantId, JSON.stringify(onboarding), JSON.stringify(secrets)]);
+        await client.query(`UPDATE app_state SET document = jsonb_set(document, '{tenants}',
+          (SELECT jsonb_agg(CASE WHEN item->>'id' = $1 THEN $2::jsonb ELSE item END ORDER BY ord)
+            FROM jsonb_array_elements(document->'tenants') WITH ORDINALITY AS items(item, ord)))
+          WHERE id = 'runtime'`, [tenantId, JSON.stringify(tenant)]);
+        await client.query('COMMIT');
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+    }, 'WhatsApp signup state');
+  }
+
   persistEvent(event) {
     return this.queueWrite(async () => {
       const client = await this.pool.connect();

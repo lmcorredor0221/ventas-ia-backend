@@ -47,6 +47,17 @@ export class JsonStore {
     return result;
   }
 
+  claimWhatsAppPhone(tenantId, phoneNumberId) {
+    this.mutate(state => {
+      state.whatsappPhoneClaims ??= {};
+      const owner = state.whatsappPhoneClaims[phoneNumberId];
+      const bound = state.tenants.find(t => t.id !== tenantId && t.config?.whatsapp?.phoneNumberId === phoneNumberId);
+      if ((owner && owner !== tenantId) || bound) throw Object.assign(new Error('Este número ya está vinculado a otra tienda de VIA.'), { code: 'whatsapp_phone_already_bound', statusCode: 409 });
+      for (const [phone, id] of Object.entries(state.whatsappPhoneClaims)) if (id === tenantId && phone !== phoneNumberId) delete state.whatsappPhoneClaims[phone];
+      state.whatsappPhoneClaims[phoneNumberId] = tenantId;
+    });
+  }
+
   claimProcessedMessage(messageId, payload = {}) {
     if (!messageId) return true;
     let claimed = false;

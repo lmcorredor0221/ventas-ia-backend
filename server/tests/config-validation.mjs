@@ -22,6 +22,8 @@ const productionEnv = {
 };
 
 assert.equal(validateRuntimeConfig(productionConfig, productionEnv).production, true);
+assert.throws(() => validateRuntimeConfig({ ...productionConfig, asyncInboundEnabled: true }, productionEnv), /INTEGRATION_OUTBOX_ENABLED=true/);
+assert.equal(validateRuntimeConfig({ ...productionConfig, asyncInboundEnabled: true, integrationOutboxEnabled: true }, productionEnv).errors.length, 0);
 assert.throws(
   () => validateRuntimeConfig({ ...productionConfig, whatsappMode: 'mock' }, productionEnv),
   /WHATSAPP_PROVIDER_MODE=live/,

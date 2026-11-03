@@ -1138,7 +1138,7 @@ try {
     accessTokenRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,
     wabaId: '300000000001',
   }, { expectedStatus: 428 });
-  const whatsappBinding = controlPlane.saveWhatsAppBinding(createdTenant.tenant.id, {
+  const whatsappBinding = await controlPlane.saveWhatsAppBinding(createdTenant.tenant.id, {
     phoneNumberId: '200000000001',
     phoneNumberIdRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
     accessTokenRef: `${createdTenant.tenant.id.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,

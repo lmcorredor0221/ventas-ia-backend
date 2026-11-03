@@ -6,6 +6,7 @@ import { createAppAsync } from '../index.js';
 
 const originalFetch = global.fetch;
 const envKeys = [
+  'META_FACEBOOK_LOGIN_ADVANCED_ACCESS_APPROVED',
   'META_APP_ID',
   'META_APP_SECRET',
   'META_WHATSAPP_ADVANCED_ACCESS_APPROVED',
@@ -31,6 +32,7 @@ const graphCalls = [];
 let pilotPermissions = ['whatsapp_business_management', 'whatsapp_business_messaging'];
 
 Object.assign(process.env, {
+  META_FACEBOOK_LOGIN_ADVANCED_ACCESS_APPROVED: 'true',
   META_APP_ID: 'meta-app-contract',
   META_APP_SECRET: 'meta-secret-contract',
   META_WHATSAPP_ADVANCED_ACCESS_APPROVED: 'false',
@@ -47,11 +49,15 @@ Object.assign(process.env, {
 global.fetch = async (url, options = {}) => {
   const href = String(url);
   graphCalls.push({ url: href, options });
-  if (href.includes('/oauth/access_token')) return jsonResponse({ access_token: 'tenant-a-meta-token' });
+  if (href.includes('/oauth/access_token')) return jsonResponse({ access_token: 'tenant-a-meta-token', expires_in: 60 * 86400 });
+  if (href.includes('/me?fields=client_business_id')) return jsonResponse({ client_business_id: 'business-contract' });
   if (href.includes('/me/permissions')) {
     assert.match(options.headers.authorization, /^Bearer (pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ data: pilotPermissions.map((permission) => ({ permission, status: 'granted' })) });
   }
+  if (href.includes('/200000000002?fields=')) return jsonResponse({ id: '200000000002', display_phone_number: '+1 555 202 4079', verified_name: 'Piloto' });
+  if (href.includes('/300000000002/phone_numbers')) return jsonResponse({ data: [{ id: '200000000002' }] });
+  if (href.includes('/300000000002/subscribed_apps')) return jsonResponse({ success: true });
   if (href.includes('/200000000001?fields=')) {
     assert.match(options.headers.authorization, /^Bearer (tenant-a-meta-token|pilot-meta-token|pilot-meta-token-renewed)$/);
     return jsonResponse({ id: '200000000001', display_phone_number: '+57 300 000 0000', verified_name: 'Tienda Contrato' });
@@ -131,7 +137,9 @@ try {
   assert.equal(graphCalls.length, 0);
   process.env.META_WHATSAPP_ADVANCED_ACCESS_APPROVED = 'true';
   assert.equal(controlPlane.getWhatsAppOnboarding('andina').platformReadiness.appReviewStatus, 'approved');
+  const attempt = controlPlane.startWhatsAppEmbeddedSignup('andina');
   const result = await controlPlane.completeWhatsAppEmbeddedSignup('andina', {
+    attemptId: attempt.launch.attemptId,
     code: 'embedded-code-contract',
     wabaId: '300000000001',
     phoneNumberId: '200000000001',
@@ -144,7 +152,8 @@ try {
   assert.ok(Date.parse(result.tenant.config.whatsapp.accessTokenIssuedAt));
   assert.ok(Date.parse(result.tenant.config.whatsapp.accessTokenExpiresAt));
   assert.equal(result.whatsappOnboarding.token.status, 'valid');
-  assert.equal(graphCalls.length, 5);
+  assert.ok(graphCalls.some(c => c.url.includes('/me?fields=client_business_id')));
+  assert.equal(graphCalls.filter(c => c.url.includes('/register')).length, 1);
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.embedded_signup.completed'));
   const renewal = controlPlane.startWhatsAppEmbeddedSignup('andina', { purpose: 'renew' });
   assert.equal(renewal.mode, 'embedded_signup');
@@ -166,8 +175,8 @@ try {
   Object.assign(process.env, {
     META_WHATSAPP_TEST_CHANNEL_ENABLED: 'true',
     META_WHATSAPP_TEST_TENANT_ID: pilotBundle.tenant.id,
-    META_WHATSAPP_TEST_PHONE_NUMBER_ID: '200000000001',
-    META_WHATSAPP_TEST_WABA_ID: '300000000001',
+    META_WHATSAPP_TEST_PHONE_NUMBER_ID: '200000000002',
+    META_WHATSAPP_TEST_WABA_ID: '300000000002',
     META_WHATSAPP_TEST_ACCESS_TOKEN: 'pilot-meta-token',
     META_WHATSAPP_TEST_DISPLAY_PHONE_NUMBER: '+1 555 202-4079',
     META_WHATSAPP_TEST_VERIFIED_NAME: 'Ventas IA Piloto',
@@ -178,7 +187,7 @@ try {
   assert.equal(pilotStatus.testPilot.configured, true);
   assert.equal('accessToken' in pilotStatus.testPilot, false);
   const pilotResult = await controlPlane.connectWhatsAppTestPilot(pilotBundle.tenant.id, { actor: { id: 'platform-admin' } });
-  assert.equal(pilotResult.tenant.config.whatsapp.phoneNumberId, '200000000001');
+  assert.equal(pilotResult.tenant.config.whatsapp.phoneNumberId, '200000000002');
   assert.equal(pilotResult.whatsappOnboarding.status, 'connected');
   assert.equal(secretVault.readSecret(pilotResult.tenant.config.whatsapp.accessTokenRef), 'pilot-meta-token');
   assert.ok(store.getState().auditEvents.some((event) => event.action === 'whatsapp.test_pilot.connected'));

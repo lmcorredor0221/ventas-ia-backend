@@ -43,7 +43,7 @@ global.fetch = async (url, options = {}) => {
         access_token: 'access-token-initial',
         refresh_token: 'refresh-token-sensitive',
         expires_in: 3600,
-        scope: 'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
+        scope: 'openid email profile https://www.googleapis.com/auth/drive.file',
         id_token: fakeIdToken({ email: 'dueno-google-live@example.com' }),
       });
     }
@@ -155,6 +155,9 @@ try {
   const oauthStart = await getJson(`${base}/api/saas/tenants/${tenantId}/google/oauth/start`);
   assert.equal(oauthStart.ready, true);
   assert.ok(oauthStart.authorizationUrl.includes('client_id=google-client-test'));
+  const requestedScopes = new URL(oauthStart.authorizationUrl).searchParams.get('scope').split(' ');
+  assert.ok(requestedScopes.includes('https://www.googleapis.com/auth/drive.file'));
+  assert.equal(requestedScopes.includes('https://www.googleapis.com/auth/spreadsheets'), false);
 
   const oauthCallback = await getJson(`${base}/api/saas/google/oauth/callback?state=${oauthStart.state}&code=live-code`);
   assert.equal(oauthCallback.connection.status, 'connected');

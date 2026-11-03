@@ -115,7 +115,7 @@ try {
   const oauthStart = await getJson(`${base}/api/saas/tenants/${tenantId}/google/oauth/start`);
   await getJson(`${base}/api/saas/google/oauth/callback?state=${oauthStart.state}&code=dev-mock-code&mockAccountEmail=${encodeURIComponent(testOwnerEmail)}`);
   await postJson(`${base}/api/saas/tenants/${tenantId}/google/provision`, {});
-  const whatsappBinding = controlPlane.saveWhatsAppBinding(tenantId, {
+  const whatsappBinding = await controlPlane.saveWhatsAppBinding(tenantId, {
     phoneNumberId: `pg-smoke-phone-${suffix}`,
     phoneNumberIdRef: `${tenantId.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
     accessTokenRef: `${tenantId.toUpperCase()}_WHATSAPP_ACCESS_TOKEN_REF`,

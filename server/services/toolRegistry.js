@@ -244,12 +244,37 @@ export class ToolRegistry {
     if (!spreadsheetId) return null;
     const refreshToken = this.secretVault.readSecret(connection.refreshTokenRef);
     if (!refreshToken) return null;
-    const accessToken = await this.googleAccessToken({ tenantId, refreshTokenRef: connection.refreshTokenRef, refreshToken });
-    return { accessToken, spreadsheetId, connection, workspace };
+    try {
+      const accessToken = await this.googleAccessToken({ tenantId, refreshTokenRef: connection.refreshTokenRef, refreshToken });
+      return { accessToken, spreadsheetId, connection, workspace };
+    } catch (error) {
+      // A revoked grant is an actionable connection state, not a missing product.
+      // Do not mark transient provider/network errors as revoked credentials.
+      if (error.payload?.error !== 'invalid_grant') throw error;
+      // A concurrent OAuth callback may already have replaced this connection.
+      if (this.store.getState().googleConnectionsByTenant?.[tenantId] !== connection) throw error;
+      this.store.mutate((next) => {
+        Object.assign(next.googleConnectionsByTenant[tenantId], {
+          status: 'reconnect_required', lastErrorCode: 'invalid_grant',
+          lastErrorAt: new Date().toISOString(),
+        });
+        const tenant = next.tenants.find((item) => item.id === tenantId);
+        if (tenant?.config?.googleOAuth) tenant.config.googleOAuth.status = 'reconnect_required';
+        if (tenant?.lifecycle) tenant.lifecycle.googleStatus = 'reconnect_required';
+      });
+      await this.store.persistTenantCritical?.(tenantId);
+      this.events.emit({ type: 'integration.reconnect_required', tenantId,
+        detail: 'Reconecta Google desde Poner en marcha para consultar el catálogo y sincronizar pedidos.',
+        metadata: { provider: 'google', errorCode: 'invalid_grant' } });
+      return null;
+    }
   }
 
   async googleAccessToken({ tenantId, refreshTokenRef, refreshToken }) {
-    const key = `${tenantId}:${refreshTokenRef}`;
+    // The vault reference is stable across rotations; invalidate cached tokens
+    // when the connection is replaced, without putting credentials in cache keys.
+    const connectedAt = this.store.getState().googleConnectionsByTenant?.[tenantId]?.connectedAt ?? '';
+    const key = `${tenantId}:${refreshTokenRef}:${connectedAt}`;
     const now = Date.now();
     const cached = this.googleAccessTokenCache.get(key);
     if (cached?.accessToken && cached.expiresAt > now) return cached.accessToken;
@@ -385,10 +410,22 @@ export class ToolRegistry {
     const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
     const live = await this.liveGoogleContext(tenantId);
     if (!live) {
-      if (connection?.status === 'connected' && connection.mode === 'live') {
+      if (connection?.mode === 'live') {
         throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión antes de continuar.');
       }
       return { status: 'not_connected' };
+    }
+    // A worker can restart after Google accepted a write but before completion
+    // was persisted. Reconcile by the durable order ID before appending again.
+    const rows = await this.googleWorkspace.readValues({
+      accessToken: live.accessToken, spreadsheetId: live.spreadsheetId, range: 'Pedidos!A:A',
+    });
+    const rowIndex = rows.findIndex((row) => row[0] === order.id);
+    if (rowIndex >= 0) {
+      const sourceRef = `Pedidos!A${rowIndex + 1}:M${rowIndex + 1}`;
+      await this.googleWorkspace.updateValues({ accessToken: live.accessToken,
+        spreadsheetId: live.spreadsheetId, range: sourceRef, values: [orderToSheetRow(order)] });
+      return { status: 'synced', sourceRef, reconciled: true };
     }
     const sourceRef = await this.appendLiveOrder({ tenantId, live, order });
     return { status: 'synced', sourceRef };
@@ -398,7 +435,7 @@ export class ToolRegistry {
     const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
     const live = await this.liveGoogleContext(tenantId);
     if (!live) {
-      if (connection?.status === 'connected' && connection.mode === 'live') {
+      if (connection?.mode === 'live') {
         throw googleConnectionRequiredError('La hoja de pedidos figura conectada, pero no podemos acceder a ella. Revisa la conexión antes de continuar.');
       }
       return { status: 'not_connected' };
@@ -605,6 +642,9 @@ export class ToolRegistry {
   }
 
   async sendLiveWhatsAppMessage({ tenant, payload }) {
+    if (tenant?.config?.whatsapp?.accessRevokedAt) {
+      throw Object.assign(new Error('Meta retiró el acceso al canal. El propietario debe renovar su autorización.'), { code: 'whatsapp_access_revoked', statusCode: 428 });
+    }
     const phoneNumberId = tenant?.config?.whatsapp?.phoneNumberId;
     const tokenRef = tenant?.config?.whatsapp?.accessTokenRef;
     const accessToken = this.secretVault?.readSecret(tokenRef);

@@ -76,8 +76,10 @@ function createExpressRuntime({ config, store }) {
         const result = await tools.syncLiveOrderStatus({
           tenantId: entry.payload.tenantId,
           order,
-          status: entry.payload.status,
-          updatedAt: entry.payload.updatedAt,
+          // Replaying an old projection must not move a dispatched order back
+          // to preparation. PostgreSQL owns the current order state.
+          status: order.status,
+          updatedAt: order.updatedAt,
         });
         if (result.status === 'synced') {
           store.mutate((state) => {

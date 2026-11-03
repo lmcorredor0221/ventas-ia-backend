@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { processCoexistenceEvent } from './whatsappCoexistence.js';
 import { isClosedConversation, isDispatchedConversation } from '../domain/conversationStatus.js';
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
@@ -34,6 +35,7 @@ export class AgentRuntime {
   }
 
   async processInbound(normalized, { skipIdempotency = false } = {}) {
+    if (normalized.coexistenceEvent) return processCoexistenceEvent(this, normalized);
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
     normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
     await this.closeExpiredManualCases();
@@ -145,6 +147,9 @@ export class AgentRuntime {
       wa_id: normalized.waId,
       profile_name: normalized.profileName,
     });
+    if (customerLookup.status === 'connection_required') {
+      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan: null });
+    }
     const customerProfile = customerLookup.profile;
     if (customerProfile?.name) {
       await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
@@ -165,10 +170,6 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
-
-    if (customerLookup.status === 'connection_required' && ['catalog_query', 'delivery_order', 'order_confirmation', 'order_clarification'].includes(plan.intent)) {
-      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
-    }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -305,7 +306,7 @@ export class AgentRuntime {
   }
 
   async handleGoogleUnavailable({ tenantId, conversationId, normalized, plan }) {
-    const message = 'No puedo confirmar el catalogo en este momento porque la tienda no esta conectada a Google. Dejo tu solicitud en manos del tendero para validarla y continuar contigo.';
+    const message = 'Recibí tu solicitud. En este momento no puedo verificar los productos y precios; le aviso a la tienda para que te ayude a continuar.';
     await this.patchConversation(conversationId, {
       stage: 'handoff',
       zone: 'approval',
@@ -1191,6 +1192,8 @@ export class AgentRuntime {
     this.store.mutate((state) => {
       const conversation = state.conversations.find((item) => item.id === conversationId);
       if (!conversation) return;
+      if (message.providerMessageId && conversation.messages.some((existing) =>
+        existing.providerMessageId === message.providerMessageId && existing.role === message.role)) return;
       conversation.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...message });
       conversation.need = message.text ?? conversation.need;
       conversation.updatedAt = new Date().toISOString();

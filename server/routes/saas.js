@@ -201,10 +201,11 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
-  router.post('/tenants/:tenantId/whatsapp/embedded-signup/start', (req, res, next) => {
+  router.post('/tenants/:tenantId/whatsapp/embedded-signup/start', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'connect' });
+      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'connect', actorId: req.auth?.user?.id });
+      await controlPlane.store.persistWhatsAppOnboarding?.(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.requested', resource: 'whatsapp_connection' });
       res.json(result);
     } catch (error) {
@@ -212,10 +213,11 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
-  router.post('/tenants/:tenantId/whatsapp/embedded-signup/renew', (req, res, next) => {
+  router.post('/tenants/:tenantId/whatsapp/embedded-signup/renew', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'renew' });
+      const result = controlPlane.startWhatsAppEmbeddedSignup(req.params.tenantId, { purpose: 'renew', actorId: req.auth?.user?.id });
+      await controlPlane.store.persistWhatsAppOnboarding?.(req.params.tenantId);
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.renewal_requested', resource: 'whatsapp_connection' });
       res.json(result);
     } catch (error) {
@@ -250,18 +252,27 @@ export function createSaasRouter({ controlPlane, auth }) {
   router.post('/tenants/:tenantId/whatsapp/embedded-signup/complete', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = await controlPlane.completeWhatsAppEmbeddedSignup(req.params.tenantId, req.body ?? {});
-      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.embedded_signup.completed', resource: 'whatsapp_connection' });
+      const result = await controlPlane.completeWhatsAppEmbeddedSignup(req.params.tenantId, req.body ?? {}, { actorId: req.auth?.user?.id });
+      const action = result.requiresPhoneSelection ? 'whatsapp.embedded_signup.phone_selection_required'
+        : result.syncPending ? 'whatsapp.embedded_signup.sync_pending' : 'whatsapp.embedded_signup.completed';
+      auth.recordTenantAction(req, { tenantId: req.params.tenantId, action, resource: 'whatsapp_connection' });
       res.json(result);
     } catch (error) {
       next(error);
     }
   });
 
-  router.post('/tenants/:tenantId/whatsapp/binding', (req, res, next) => {
+  router.post('/tenants/:tenantId/whatsapp/coexistence/sync', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
-      const result = controlPlane.saveWhatsAppBinding(req.params.tenantId, req.body ?? {});
+      res.json(await controlPlane.retryWhatsAppCoexistenceSync(req.params.tenantId));
+    } catch (error) { next(error); }
+  });
+
+  router.post('/tenants/:tenantId/whatsapp/binding', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.saveWhatsAppBinding(req.params.tenantId, req.body ?? {});
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'whatsapp.binding.requested', resource: 'whatsapp_connection' });
       res.json(result);
     } catch (error) {
