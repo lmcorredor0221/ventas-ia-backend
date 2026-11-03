@@ -396,9 +396,10 @@ function enrichPendingRequests(requests, state) {
       || title.includes('domicilio');
     if (!looksLikeDelivery) return request;
     const requestOrderId = snapshot.orderId ?? snapshot.order_id;
-    const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => (
-      requestOrderId ? item.id === requestOrderId : item.conversationId === request.conversationId
-    ));
+    // Do not rewrite a previous product/recovery escalation as preparation of
+    // a newer order just because both tasks belong to the same conversation.
+    if (!requestOrderId) return request;
+    const order = (state.ordersByTenant?.[request.tenantId] ?? []).find((item) => item.id === requestOrderId);
     if (!order) return request;
     const displayOrder = enrichOrderForDisplay(order, state);
     return {

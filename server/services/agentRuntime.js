@@ -1684,9 +1684,8 @@ function resolveHumanReplyWaId(state, request, conversation) {
 function findOrderForDeliveryRequest(state, request) {
   const snapshot = request?.contextSnapshot ?? request?.context_snapshot ?? {};
   const orderId = snapshot.orderId ?? snapshot.order_id;
-  return (state.ordersByTenant?.[request?.tenantId] ?? []).find((order) => (
-    orderId ? order.id === orderId : order.conversationId === request?.conversationId
-  )) ?? null;
+  if (!orderId) return null;
+  return (state.ordersByTenant?.[request?.tenantId] ?? []).find((order) => order.id === orderId) ?? null;
 }
 
 function orderItemKey(item) {

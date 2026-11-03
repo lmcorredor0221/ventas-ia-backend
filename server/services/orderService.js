@@ -208,9 +208,9 @@ function requestSnapshot(request) {
 
 function deliveryRequestMatchesOrder(request, order) {
   const requestOrderId = requestSnapshot(request).orderId ?? requestSnapshot(request).order_id;
-  // A conversation can contain several historical orders. Once a handoff has
-  // an order id, it must never be allowed to advance another order in that chat.
-  return requestOrderId ? requestOrderId === order.id : request?.conversationId === order.conversationId;
+  // Catalog/recovery decisions share the chat but do not take or cancel an
+  // order. Only a handoff explicitly linked to this order may affect its state.
+  return Boolean(requestOrderId && requestOrderId === order.id);
 }
 
 function isDeliveryPreparationRequest(request) {

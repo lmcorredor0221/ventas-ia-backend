@@ -44,10 +44,25 @@ try {
   });
   const lifecycleStart = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.equal(lifecycleStart.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'pending_human_preparation');
+  // A catalog/recovery handoff happened before the order existed. Resolving
+  // that task must not count as taking a later order in the same conversation.
+  store.mutate((state) => {
+    state.pendingRequests.push({
+      id: 'catalog-recovery-before-order', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      title: 'Validar pedido con la tienda', assignedTeam: 'ventas', status: 'resolved',
+      createdAt: '2026-11-03T19:29:41.375Z', resolvedAt: '2026-11-03T20:10:20.866Z',
+      contextSnapshot: { summary: 'No se pudo consultar el catálogo.' },
+    });
+  });
   await patchJson(`${base}/api/orders/order-lifecycle-smoke/status`, { status: 'preparing' }, { expectedStatus: 409 });
   await postJson(`${base}/api/pending-requests/request-lifecycle-smoke/resolve`, { outcome: 'approved', responseMode: 'none' });
   const lifecyclePreparing = await getJson(`${base}/api/ops/overview?tenantId=andina`);
   assert.equal(lifecyclePreparing.orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'preparing');
+  const recoveryHistory = (await getJson(`${base}/api/pending-requests?tenantId=andina`))
+    .find((request) => request.id === 'catalog-recovery-before-order');
+  assert.equal(recoveryHistory.contextSnapshot.orderId, undefined, 'A recovery task must not acquire an unrelated order');
+  assert.equal(recoveryHistory.action, undefined);
+  assert.equal(recoveryHistory.title, 'Validar pedido con la tienda');
 
   // A customer may place another order in the same conversation. A resolved
   // task for the old order must not put the new pending task into "preparing".
@@ -88,6 +103,17 @@ try {
   assert.equal(lifecycleDelivered.status, 'delivered');
   assert.equal(lifecycleDelivered.statusHistory.length, 3);
   assert.equal((await getJson(`${base}/api/ops/overview?tenantId=andina`)).orders.find((order) => order.id === 'order-lifecycle-smoke').status, 'delivered');
+  // A generic human decision cannot cancel/advance the customer's newer order.
+  store.mutate((state) => {
+    state.pendingRequests.unshift({
+      id: 'generic-human-decision', tenantId: 'andina', conversationId: 'wa-lifecycle-smoke',
+      title: 'Revisar domicilio', assignedTeam: 'operaciones', status: 'pending', contextSnapshot: {},
+    });
+  });
+  await postJson(`${base}/api/pending-requests/generic-human-decision/resolve`, { outcome: 'denied', responseMode: 'none' });
+  assert.equal(store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-follow-up-smoke').status, 'pending_human_preparation');
+  await postJson(`${base}/api/pending-requests/request-lifecycle-follow-up-smoke/resolve`, { outcome: 'approved', responseMode: 'none' });
+  assert.equal(store.getState().ordersByTenant.andina.find((order) => order.id === 'order-lifecycle-follow-up-smoke').status, 'preparing');
   store.mutate((state) => {
     state.ordersByTenant.andina.unshift({
       id: 'order-orphan-smoke', tenantId: 'andina', conversationId: 'wa-orphan-smoke',
