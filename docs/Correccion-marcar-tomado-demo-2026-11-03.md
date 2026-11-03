@@ -25,6 +25,16 @@ La vista operativa calculaba el estado con las tareas pendientes, mientras la tr
 
 La regresión en `server/tests/backend-smoke.mjs` inserta una tarea histórica de recuperación resuelta y reproduce el HTTP 409 antes del cambio. Con el cambio, la tarea de preparación correcta pasa a resuelta y el pedido a `preparing`. También verifica que una decisión genérica denegada no cancele un pedido posterior y que la API no añada una asociación ficticia al historial.
 
-`npm run test:architecture`: siete contratos aprobados, incluidos concurrencia, outbox, persistencia y flujo de preparación/despacho. `npm run test:backend`: suite completa aprobada; incluye smoke, continuidad de cotización, concurrencia, errores, 50 escenarios colombianos (60 pasos), contratos LLM, autenticación, Google, WhatsApp y Embedded Signup. Son pruebas locales con límites externos controlados, no una nueva ejecución E2E contra DeepSeek real. La verificación en producción se documentará al finalizar.
+`npm run test:architecture`: siete contratos aprobados, incluidos concurrencia, outbox, persistencia y flujo de preparación/despacho. `npm run test:backend`: suite completa aprobada; incluye smoke, continuidad de cotización, concurrencia, errores, 50 escenarios colombianos (60 pasos), contratos LLM, autenticación, Google, WhatsApp y Embedded Signup. Son pruebas locales con límites externos controlados, no una nueva ejecución E2E contra DeepSeek real.
+
+## Despliegue y comprobación real
+
+- Código publicado en `backend/main`: `2276c4742ec88efbe237f6778ae626a45f40fb19`.
+- Render: servicio `srv-db7sqqmq1p3s73elv1eg`, despliegue `dep-dbl4ikbncjis73b73fmg`, Live a las 15:52:24 de Colombia. Se conservó Auto-Deploy desactivado.
+- `/health/ready`: `ok: true`, PostgreSQL, WhatsApp live, sin errores ni advertencias, a las 20:52:30 UTC.
+- Desde la sesión real del navegador interno, «Marcar tomado» devolvió HTTP 200. El pedido quedó `preparing`, versión 1, con transición registrada a las 20:52:51.541 UTC y origen `human_request`.
+- La vista operativa pasó de la tarea «Pedido por preparar» a una sola tarjeta «Alistando pedido», por $10.000, con Coca-Cola 1.5L y Chocorramo. Quedaron cero tareas pendientes y el botón «Marcar en camino».
+- Se recargó la página y se volvió a «Pedidos y pendientes»: el estado Alistando se conservó. No se ejecutó el despacho ni se envió un mensaje de prueba adicional.
+- Evidencia local: `docs/evidencias/auditoria-preparacion-20261103/demo-pedido-tomado.png` en el workspace principal. Se mantiene fuera del repositorio remoto porque contiene datos del pedido.
 
 El incidente de subtotal cero del mismo pedido está documentado por separado. Esta corrección no reescribe sus importes ni los mensajes históricos.
