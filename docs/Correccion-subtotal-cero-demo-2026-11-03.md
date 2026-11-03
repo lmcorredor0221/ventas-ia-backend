@@ -38,3 +38,10 @@ El arreglo evita nuevos casos; no modifica automáticamente la conversación ni 
 Para comprobar en vivo: terminar el pedido de prueba por el flujo habitual y enviar un pedido nuevo, completar pago/datos y confirmar. Verificar que cotización, WhatsApp, fila PostgreSQL, tarea del tendero y proyección Sheets comparten COP 10.000. El despliegue saludable por sí solo no acredita esta repetición E2E.
 
 Base de código: backend `b16aa63`; documentación posterior hasta `11a4f1b`. Worktree: `via-meta-autoservicio-20261103/backend`, no el checkout principal antiguo.
+
+## Publicación verificada
+
+- Commit `0f479eacfdfc650cba2a6f6b22cc9df6534d7000` publicado en `backend/main`.
+- Render `dep-dbl49gui0phs738ehio0`: `Deploy succeeded | Live`, 3 de noviembre de 2026 a las 15:33:03 Colombia. Node 24.22.2, PostgreSQL, instancia `r7hhm`.
+- Captura local: `docs/evidencias/auditoria-preparacion-20261103/demo-subtotal-corregido-live.png`.
+- Pendiente: nueva conversación real posterior al despliegue. No se confundirá la aprobación de contratos locales con una nueva prueba E2E real.
