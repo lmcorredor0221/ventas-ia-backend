@@ -101,3 +101,46 @@ La evidencia esta lista cuando:
 - La cuenta de revision puede entrar a una tienda de demostracion sin una barrera de pago.
 - No se exponen secretos y no se mezclan datos del tenant demo con los de un cliente real.
 - Tras la aprobacion, se prueba Embedded Signup con una tienda distinta de la demo y se valida su aislamiento.
+
+## Consulta recurrente del estado de App Review
+
+Esta comprobacion responde rapidamente si la aprobacion pendiente avanzo, sin confundir tres estados distintos: negocio verificado, app en modo activo y permiso avanzado aprobado.
+
+### Fuente primaria y orden de consulta
+
+1. Buscar primero el correo oficial de Meta. En la cuenta administradora usar:
+
+   ```text
+   (from:developers.facebook.com OR from:business.facebook.com OR from:facebookmail.com OR from:meta.com)
+   ("Ventas IA Ops Store" OR "App Review") -in:spam -in:trash newer_than:90d
+   ```
+
+2. Ordenar los resultados por fecha y clasificar el correo mas reciente:
+   - **`pendiente de revision` / `enviada correctamente`:** la solicitud sigue en cola.
+   - **`aprobada` / `approved`:** verificar en Meta Developers que el permiso correspondiente figure con acceso avanzado; solo entonces se habilita la conexion de tenants.
+   - **`se requiere mas informacion` / `request for information`:** abrir la solicitud indicada, responder unicamente lo que Meta pide y conservar la evidencia.
+   - **`rechazada` / `rejected`:** registrar la razon literal, ajustar video, descripcion o configuracion solicitada y reenviar solo despues de corregirla.
+3. Si Chrome conserva una sesion de Meta Developers, contrastar el resultado en `Ventas IA Ops Store` -> `Revisar` -> `Revision de la app` -> solicitud activa. El panel es la fuente de confirmacion visual; el correo permite saber rapido si hubo cambio cuando no existe una pestana abierta.
+4. Si correo y panel difieren, prevalece el estado visible mas reciente del panel y se registra la discrepancia con fecha. No crear una nueva app, una nueva WABA ni una nueva solicitud para resolverla.
+
+### Registro vigente al 22 de octubre de 2026
+
+| Elemento | Estado confirmado | Evidencia mas reciente |
+|---|---|---|
+| Verificacion de `CENTRO DE INNOVACION VISUAL S A S` | Completada | Correo de Meta Business del 19 de octubre de 2026 |
+| App `Ventas IA Ops Store` | Activa | Alerta de desarrolladores del 16 de octubre de 2026 |
+| Solicitud del permiso `whatsapp_business_messaging` | **Pendiente de revision** | Correo de Facebook Developers del 19 de octubre de 2026, 11:05 p. m. hora Colombia |
+| Solicitud de informacion, aprobacion o rechazo posterior | No encontrado al realizar la comprobacion | Busqueda de correo oficial hasta el 22 de octubre de 2026 |
+
+Que la app este activa permite operar los flujos que Meta autoriza para la app y sus recursos de prueba; no equivale a tener aprobado el permiso avanzado para que nuevos tenants conecten sus propios numeros. Tampoco la verificacion del negocio sustituye la aprobacion del permiso.
+
+### Formato de respuesta al consultar el estado
+
+Responder siempre con estas cuatro lineas para evitar ambiguedad:
+
+1. **Estado del permiso:** pendiente, aprobado, requiere informacion o rechazado.
+2. **Ultima evidencia:** fecha, origen y asunto o pantalla, sin exponer correos personales ni secretos.
+3. **Impacto en VIA:** si ya se puede o no habilitar `Conectar con Meta` para tenants.
+4. **Siguiente accion:** ninguna, responder una solicitud concreta de Meta, o activar los flags despues de validar la aprobacion.
+
+No marcar `META_WHATSAPP_ADVANCED_ACCESS_APPROVED=true` por el texto de un correo ambiguo ni por el modo activo de la app. Requiere la confirmacion explicita del acceso avanzado en la solicitud de Meta.

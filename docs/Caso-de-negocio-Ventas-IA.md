@@ -3,6 +3,8 @@
 **Versión:** 15 de octubre de 2026
 **Alcance:** Bogotá durante los primeros seis meses y expansión progresiva a Medellín, Cali, Bucaramanga y Barranquilla.
 
+> **Actualización financiera, 21 de octubre de 2026:** las proyecciones de altas, churn y clientes activos de este documento siguen siendo la fuente comercial. Sus tablas financieras con precio de COP 89.000 y costo técnico de COP 19.000 por activo son históricas y no deben usarse como la previsión vigente. El modelo canónico es [Modelo-financiero-consolidado-VIA-2026-10-21.md](Modelo-financiero-consolidado-VIA-2026-10-21.md), que conserva los seis planes, inicia con Pro a COP 99.000, separa costos verificables y reserva 10 % adicional. La propuesta de ventas y comisiones está en [Estudio-mercado-y-comisiones-VIA-2026-10-21.md](Estudio-mercado-y-comisiones-VIA-2026-10-21.md). El escenario vigente de mercado, expansion desde el mes 6 y ROI es [Estudio-mercado-ROI-VIA-2026-10-21.md](Estudio-mercado-ROI-VIA-2026-10-21.md), con su [dashboard editable](Dashboard-estrategico-VIA-2026-10-21-mercado-ROI.xlsx).
+
 ## Resumen ejecutivo
 
 Ventas IA atiende una necesidad concreta: organizar pedidos que hoy llegan por WhatsApp, consultar el catálogo real de la tienda, pedir los datos faltantes y entregar al tendero una orden clara cuando se requiere intervención humana.
