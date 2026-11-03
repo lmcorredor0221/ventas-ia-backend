@@ -9,7 +9,6 @@ import { ensureIdentityState } from '../services/authService.js';
 import { ensureUsageState } from '../services/usageService.js';
 import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
-import { collapseDuplicateOpenPendingRequests } from '../services/pendingRequestPolicy.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
 import { CLOSED_CONVERSATION_STATUSES } from '../domain/conversationStatus.js';
 
@@ -40,16 +39,44 @@ export class PostgresStore {
 
   async load() {
     await this.migrate();
-    const result = await this.pool.query('SELECT document FROM app_state WHERE id = $1', ['runtime']);
-    if (result.rows[0]?.document) {
-      this.state = result.rows[0].document;
+    const client = await this.pool.connect();
+    let document;
+    try {
+      // Read one consistent view without replaying an old runtime into the tables.
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      document = (await client.query('SELECT document FROM app_state WHERE id = $1', ['runtime'])).rows[0]?.document;
+      if (document) {
+        const conversations = await client.query('SELECT id, tenant_id, wa_id, status, payload FROM conversations ORDER BY updated_at DESC, id');
+        const requests = await client.query('SELECT id, tenant_id, conversation_id, type, status, resolved_at, payload FROM pending_requests ORDER BY created_at DESC, id');
+        const orders = await client.query('SELECT id, tenant_id, conversation_id, wa_id, status, version, payload FROM orders ORDER BY created_at DESC, id');
+        // Replace these projections, including empty tables: merging with the
+        // snapshot would resurrect deleted rows or pending versions of resolved tasks.
+        document.conversations = conversations.rows.map(row => ({ ...row.payload,
+          id: row.id, tenantId: row.tenant_id, waId: row.wa_id, status: row.status }));
+        document.pendingRequests = requests.rows.map(row => ({ ...row.payload,
+          id: row.id, tenantId: row.tenant_id, conversationId: row.conversation_id, type: row.type,
+          status: row.status, resolvedAt: row.resolved_at?.toISOString() ?? null }));
+        const ordersByTenant = new Map((document.tenants ?? []).map(tenant => [tenant.id, []]));
+        for (const row of orders.rows) {
+          if (!ordersByTenant.has(row.tenant_id)) ordersByTenant.set(row.tenant_id, []);
+          ordersByTenant.get(row.tenant_id).push({ ...row.payload, id: row.id, tenantId: row.tenant_id,
+            conversationId: row.conversation_id, waId: row.wa_id, status: row.status, version: Number(row.version) });
+        }
+        document.ordersByTenant = Object.fromEntries(ordersByTenant);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+    if (document) {
+      this.state = document;
       mergeSeedCatalog(this.state);
       ensureSaasState(this.state);
       ensureIdentityState(this.state);
       ensureUsageState(this.state);
       ensureSecretState(this.state);
       ensurePlatformState(this.state);
-      collapseDuplicateOpenPendingRequests(this.state);
       // Loading an existing runtime must not replay a stale snapshot over a
       // connection that the previous instance is still finishing during deploy.
       for (const [tenantId, connection] of Object.entries(this.state.googleConnectionsByTenant ?? {})) {
