@@ -25,6 +25,7 @@
     "billing:maintenance": "node scripts/run-with-env.mjs .env.google.local node scripts/run-billing-maintenance.mjs",
     "test:whatsapp-onboarding": "node server/tests/whatsapp-embedded-signup-contract.mjs && node server/tests/whatsapp-self-service-contract.mjs && node server/tests/whatsapp-batch-coexistence.mjs",
     "test:whatsapp-postgres": "node server/tests/whatsapp-postgres-ownership.mjs",
+    "test:whatsapp-postgres-locks": "node server/tests/whatsapp-postgres-lock-order.mjs",
     "test:google-recovery": "node server/tests/google-recovery-contract.mjs"
   },
   "dependencies": {

@@ -19,7 +19,9 @@ export async function processCoexistenceEvent(runtime, normalized) {
         if (['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED'].includes(value.event)) tenant.config.whatsapp.accessRevokedAt = new Date(time).toISOString();
         // Reconnect notification alone cannot validate a replacement token.
       });
-      await store.persistTenantCritical?.(tenantId);
+      // The WhatsApp checkpoint below persists this projection and detects
+      // stale writes. A generic tenant merge first could erase a revocation.
+      if (!store.persistWhatsAppOnboarding) await store.persistTenantCritical?.(tenantId);
     }
   } else if (field === 'smb_app_state_sync') {
     store.mutate(s => {
@@ -61,8 +63,11 @@ export async function processCoexistenceEvent(runtime, normalized) {
   } else if (field === 'smb_message_echoes') {
     for (const message of value.message_echoes ?? []) await importMessage(message.to, message, false);
   }
-  await store.persistWhatsAppOnboarding?.(tenantId);
-  await store.flush?.();
+  // PostgreSQL checkpoints this tenant and its imported conversations directly.
+  // Waiting for the full snapshot here stalls the shared inbound worker, so
+  // customer messages cannot run until all unrelated mirror tables are saved.
+  if (store.persistWhatsAppOnboarding) await store.persistWhatsAppOnboarding(tenantId);
+  else await store.flush?.();
   return { duplicate: false, result: { summary: `WhatsApp ${field} imported without agent execution` } };
 
   async function importMessage(waId, message, historical) {

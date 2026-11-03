@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import pg from 'pg';
 import { createSeedState } from '../data/seed.js';
 import { ensureSaasState } from '../services/saasControlPlane.js';
@@ -225,6 +226,7 @@ export class PostgresStore {
         await client.query('BEGIN');
         const persisted = await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE");
         mergeNewerGoogleConnections(state, persisted.rows[0]?.document);
+        mergeNewerWhatsAppCheckpoints(state, persisted.rows[0]?.document);
         await upsertTenant(client, tenant);
         const subscription = state.subscriptionsByTenant?.[tenantId];
         if (subscription) await upsertSubscription(client, tenantId, subscription);
@@ -262,25 +264,58 @@ export class PostgresStore {
   }
 
   persistWhatsAppOnboarding(tenantId) {
+    // Capture the caller's intent before queueing: save() may reconcile live state while we wait.
+    const state = this.getState();
+    const expectedVersion = whatsappCheckpointVersion(state, tenantId);
+    const payload = whatsappCheckpointPayload(state, tenantId);
+    const tenant = structuredClone(state.tenants.find(t => t.id === tenantId));
+    const binding = { config: { whatsapp: payload.whatsapp }, whatsappNumber: payload.whatsappNumber };
+    const liveMatchesCall = () => this.getState() === state
+      && whatsappCheckpointVersion(state, tenantId) === expectedVersion
+      && isDeepStrictEqual(whatsappCheckpointPayload(state, tenantId), payload);
     return this.queueWrite(async () => {
-      const state = this.getState();
-      const onboarding = state.whatsappOnboardingByTenant?.[tenantId] ?? {};
-      const secrets = Object.fromEntries(Object.entries(state.secretsByRef ?? {}).filter(([, secret]) => secret.tenantId === tenantId));
-      const tenant = state.tenants.find(t => t.id === tenantId);
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
-        await upsertTenant(client, tenant);
+        // Match save/persistTenantCritical: lock runtime before tenant and mirror rows.
+        const persisted = (await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE")).rows[0]?.document;
+        if (whatsappCheckpointVersion(persisted, tenantId) > expectedVersion) {
+          const conflict = !isDeepStrictEqual(payload, whatsappCheckpointPayload(persisted, tenantId));
+          // Reconcile only if no later local mutation would be discarded.
+          if (liveMatchesCall()) mergeNewerWhatsAppCheckpoints(state, persisted, tenantId);
+          if (conflict) throw Object.assign(new Error('WhatsApp cambió en otra instancia. Recarga el estado y reintenta la operación.'), {
+            code: 'whatsapp_checkpoint_conflict', statusCode: 409, retryable: true,
+          });
+          // The same payload is already durable; adopt its version without rewriting it.
+          await client.query('COMMIT');
+          return;
+        }
+        const version = whatsappCheckpointVersion(persisted, tenantId) + 1;
+        const { onboarding, secrets } = payload;
+        // A WhatsApp checkpoint must not replay stale activation/Google fields.
+        const currentTenant = (await client.query('SELECT payload FROM tenants WHERE id=$1 FOR UPDATE', [tenantId])).rows[0]?.payload;
+        const mirrorTenant = currentTenant ?? structuredClone(tenant);
+        applyWhatsAppBinding(mirrorTenant, binding);
+        await upsertTenant(client, mirrorTenant);
+        const runtimeTenant = structuredClone(persisted?.tenants?.find(t => t.id === tenantId) ?? tenant);
+        applyWhatsAppBinding(runtimeTenant, binding);
         await client.query(`UPDATE app_state SET document =
-          jsonb_set(jsonb_set(document, '{whatsappOnboardingByTenant}',
+          jsonb_set(jsonb_set(jsonb_set(document, '{whatsappOnboardingByTenant}',
             COALESCE(document->'whatsappOnboardingByTenant', '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb)),
-            '{secretsByRef}', COALESCE(document->'secretsByRef', '{}'::jsonb) || $3::jsonb), updated_at = now()
-          WHERE id = 'runtime'`, [tenantId, JSON.stringify(onboarding), JSON.stringify(secrets)]);
+            '{secretsByRef}', COALESCE(document->'secretsByRef', '{}'::jsonb) || $3::jsonb),
+            '{whatsappCheckpointVersionsByTenant}', COALESCE(document->'whatsappCheckpointVersionsByTenant', '{}'::jsonb)
+              || jsonb_build_object($1::text, $4::bigint)), updated_at = now()
+          WHERE id = 'runtime'`, [tenantId, JSON.stringify(onboarding), JSON.stringify(secrets), version]);
         await client.query(`UPDATE app_state SET document = jsonb_set(document, '{tenants}',
           (SELECT jsonb_agg(CASE WHEN item->>'id' = $1 THEN $2::jsonb ELSE item END ORDER BY ord)
             FROM jsonb_array_elements(document->'tenants') WITH ORDINALITY AS items(item, ord)))
-          WHERE id = 'runtime'`, [tenantId, JSON.stringify(tenant)]);
+          WHERE id = 'runtime'`, [tenantId, JSON.stringify(runtimeTenant)]);
         await client.query('COMMIT');
+        // Only the captured projection committed; later local mutations keep their old base version.
+        if (liveMatchesCall()) {
+          state.whatsappCheckpointVersionsByTenant ??= {};
+          state.whatsappCheckpointVersionsByTenant[tenantId] = version;
+        }
       } catch (error) { await client.query('ROLLBACK'); throw error; }
       finally { client.release(); }
     }, 'WhatsApp signup state');
@@ -744,6 +779,8 @@ export class PostgresStore {
       const persisted = await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE");
       mergeNewerGoogleConnections(state, persisted.rows[0]?.document);
       mergeNewerGoogleConnections(this.state, persisted.rows[0]?.document);
+      mergeNewerWhatsAppCheckpoints(state, persisted.rows[0]?.document);
+      mergeNewerWhatsAppCheckpoints(this.state, persisted.rows[0]?.document);
       await client.query(
         `
           INSERT INTO app_state (id, document, schema_version, updated_at)
@@ -889,6 +926,57 @@ function mergeNewerGoogleConnections(target, persisted) {
       target.secretsByRef[connection.refreshTokenRef] = structuredClone(secret);
     }
     applyGoogleConnectionToTenant(target, tenantId, connection);
+  }
+}
+
+function whatsappCheckpointVersion(state, tenantId) {
+  const version = state?.whatsappCheckpointVersionsByTenant?.[tenantId];
+  return Number.isSafeInteger(version) && version > 0 ? version : 0;
+}
+
+function applyWhatsAppBinding(target, source) {
+  target.config ??= {};
+  target.config.whatsapp = structuredClone(source.config?.whatsapp ?? {});
+  target.whatsappNumber = source.whatsappNumber;
+}
+
+function referencedWhatsAppSecrets(state, tenantId) {
+  const whatsapp = state.tenants?.find(t => t.id === tenantId)?.config?.whatsapp ?? {};
+  const refs = new Set([
+    state.whatsappOnboardingByTenant?.[tenantId]?.attempt?.tokenRef,
+    ...Object.entries(whatsapp).filter(([key]) => key.endsWith('Ref')).map(([, ref]) => ref),
+  ]);
+  return Object.fromEntries([...refs]
+    .filter(ref => state.secretsByRef?.[ref]?.tenantId === tenantId)
+    .map(ref => [ref, structuredClone(state.secretsByRef[ref])]));
+}
+
+function whatsappCheckpointPayload(state, tenantId) {
+  const tenant = state.tenants?.find(t => t.id === tenantId);
+  // Compare the JSON projection (undefined fields are not persisted), independent of key order.
+  return JSON.parse(JSON.stringify({
+    whatsapp: tenant?.config?.whatsapp ?? {}, whatsappNumber: tenant?.whatsappNumber ?? null,
+    onboarding: state.whatsappOnboardingByTenant?.[tenantId] ?? {},
+    secrets: referencedWhatsAppSecrets(state, tenantId),
+  }));
+}
+
+function mergeNewerWhatsAppCheckpoints(target, persisted, onlyTenantId) {
+  for (const tenantId of Object.keys(persisted?.whatsappCheckpointVersionsByTenant ?? {})) {
+    if (onlyTenantId && tenantId !== onlyTenantId) continue;
+    const version = whatsappCheckpointVersion(persisted, tenantId);
+    if (version <= whatsappCheckpointVersion(target, tenantId)) continue;
+    const tenant = target.tenants?.find(t => t.id === tenantId);
+    const savedTenant = persisted.tenants?.find(t => t.id === tenantId);
+    if (!tenant || !savedTenant) continue;
+    // Preserve only the durable WhatsApp projection, never the entire tenant.
+    applyWhatsAppBinding(tenant, savedTenant);
+    target.whatsappOnboardingByTenant ??= {};
+    target.whatsappOnboardingByTenant[tenantId] = structuredClone(persisted.whatsappOnboardingByTenant?.[tenantId] ?? {});
+    target.secretsByRef ??= {};
+    Object.assign(target.secretsByRef, referencedWhatsAppSecrets(persisted, tenantId));
+    target.whatsappCheckpointVersionsByTenant ??= {};
+    target.whatsappCheckpointVersionsByTenant[tenantId] = version;
   }
 }
 

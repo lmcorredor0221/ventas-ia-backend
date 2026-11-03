@@ -67,6 +67,33 @@ try {
   assert.equal(controlPlane.getWhatsAppOnboarding('andina').channelStatus,'revoked');
   assert.notEqual(controlPlane.getWhatsAppOnboarding('norte').channelStatus,'revoked');
   await assert.rejects(tools.sendLiveWhatsAppMessage({tenant:store.getState().tenants.find(t=>t.id==='andina'),payload:{}}),e=>e.code==='whatsapp_access_revoked');
+  // A durable tenant checkpoint must release the worker without waiting for
+  // the global snapshot, otherwise contact sync holds customer messages behind it.
+  const previousCheckpoint = store.persistWhatsAppOnboarding;
+  const previousFlush = store.flush;
+  const previousCritical = store.persistTenantCritical;
+  let checkpointCount = 0;
+  try {
+    store.persistWhatsAppOnboarding = async tenantId => {
+      assert.equal(tenantId, 'andina');
+      checkpointCount += 1;
+    };
+    store.flush = async () => { throw new Error('Global snapshot must not block the inbound worker'); };
+    await importEvent('smb_app_state_sync', {state_sync:[]});
+    assert.equal(checkpointCount, 1);
+    store.persistTenantCritical = async () => { throw new Error('Generic tenant merge must not precede a WhatsApp revocation checkpoint'); };
+    const nextRevocation = structuredClone(revoked);
+    nextRevocation.entry[0].time += 1;
+    await runtime.processInbound(normalizeWhatsAppEvents(nextRevocation, store.getState())[0]);
+    assert.equal(checkpointCount, 2);
+    assert.equal(controlPlane.getWhatsAppOnboarding('andina').channelStatus, 'revoked');
+    store.persistWhatsAppOnboarding = async () => { throw new Error('checkpoint unavailable'); };
+    await assert.rejects(importEvent('smb_app_state_sync', {state_sync:[]}), /checkpoint unavailable/);
+  } finally {
+    store.persistWhatsAppOnboarding = previousCheckpoint;
+    store.flush = previousFlush;
+    store.persistTenantCritical = previousCritical;
+  }
   console.log('PASS batch routing/ACK, signature, deduplication, contact matching, conflict rejection, history/media, human echoes, consent and revocation');
 } finally {
   await new Promise(r=>server.close(r)); await store.close?.();
