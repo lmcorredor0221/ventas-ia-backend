@@ -164,14 +164,19 @@ export class AgentRuntime {
         plannedAt: new Date().toISOString(),
       },
       lastTool: 'llm_core',
-      stage: 'planning',
-      zone: 'agent',
-      progress: Math.max(currentConversation?.progress ?? 0, 22),
+      ...(plan.intent === 'greeting' ? {} : {
+        stage: 'planning',
+        zone: 'agent',
+        progress: Math.max(currentConversation?.progress ?? 0, 22),
+      }),
     });
 
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan,
       items: plan.order?.items?.length ? plan.order.items : currentConversation?.orderDraft?.items ?? [] });
     if (commerceResult) return commerceResult;
+    if (plan.intent === 'greeting' && !normalized.mediaRef && normalized.messageType !== 'image') {
+      return this.handleGreeting({ tenantId, conversationId, normalized, plan, currentConversation });
+    }
     if (currentConversation?.commercePolicy?.awaitingContinuation) {
       if (plan.commercePolicy?.continueAllowedItems || plan.intent === 'order_confirmation') {
         return this.continueAllowedOrder({ tenantId, conversationId, normalized, customerProfile });
@@ -243,6 +248,25 @@ export class AgentRuntime {
     }
 
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
+  }
+
+  async handleGreeting({ tenantId, conversationId, normalized, plan, currentConversation }) {
+    // The same interpretation call writes the greeting in the tenant's voice.
+    // Keep any active draft, quote, pending interaction and stage untouched.
+    const text = plan.greetingReply || '¡Hola! ¿En qué te puedo ayudar?';
+    if (!currentConversation?.orderDraft && !currentConversation?.orderId) {
+      await this.patchConversation(conversationId, {
+        status: 'live', stage: 'conversation', zone: 'agent',
+        nextStep: 'Esperar la solicitud del cliente.',
+      });
+    }
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message', wa_id: normalized.waId, text,
+    });
+    this.events.emit({ type: 'agent.greeting.replied', tenantId, conversationId,
+      detail: 'Saludo atendido sin buscar productos ni modificar el pedido.',
+      metadata: { traceId: normalized.traceId, executionMode: plan.executionMode } });
+    return { summary: 'Greeting answered', plan };
   }
 
   async enforceCommercePolicy({ tenantId, conversationId, normalized, plan = {}, items = plan.order?.items ?? [] }) {
