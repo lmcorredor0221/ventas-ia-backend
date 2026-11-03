@@ -39,6 +39,21 @@ Servicio objetivo: `ventas-ia-backend-free`, `srv-db7sqqmq1p3s73elv1eg`, reposit
 
 Demo: `demo-de-tienda`, hoja `1QpR44qdL4EEpLgIPEZwoTLb43hnGjWVUObAsK3PfAZc`. Los 300 productos y metadata ya estaban cargados. La verificación debe recuperar descripción y atributos y mantener Coca-Cola 1.5 L + Chocoramo = COP 10.000.
 
+### Resultado comprobado en producción
+
+- Código publicado en `backend/main`: `6c9c10616e210c1b7dd2e01b6bae5f9f206152a4`.
+- Render: despliegue `dep-dbl5ghc9v7es73c9si60`, estado **live**, finalizado 2026-11-03 21:55:55 UTC (16:55:55 Colombia).
+- `/health/ready`: HTTP 200, producción, PostgreSQL, WhatsApp live, sin advertencias ni errores. `/api/health` a través de VIA: HTTP 200.
+- Lectura autenticada de `google_sheets_read_table` para `demo-de-tienda`: HTTP 200, `source=google_sheets_live`, **300 filas, 300 con descripción y 300 con atributos**.
+- `BOG-BEB-044`: Coca-Cola original, 1.5 L, COP 7.200. `BOG-PAN-019`: Ponque Chocoramo, 65 g, COP 2.800. Suma comprobada: **COP 10.000**.
+- Búsqueda `query="pruebas locales"`, texto de descripción: 102 resultados.
+- `sku=BOG-BEB-044` con `attributes.measure={canonicalAmount:1500,canonicalUnit:"ml"}`: un resultado, COP 7.200.
+- Mismo SKU con `canonicalAmount:500`: cero resultados. No se ignora el atributo incompatible.
+
+Se usó la sesión existente de VIA y su protección CSRF. El primer intento sin encabezado CSRF recibió 403; la comprobación se completó siguiendo el mecanismo normal de la aplicación. No se cambiaron permisos ni se expusieron tokens. Estas consultas actualizan la caché operativa y la traza de prueba; no escribieron la hoja, crearon pedidos ni enviaron WhatsApp.
+
+El frontend no requirió cambios ni un nuevo despliegue para esta entrega. El commit documental posterior solo registra esta comprobación; el código ejecutado sigue siendo `6c9c106`.
+
 ## Límites
 
 - Las inferencias libres del modelo pueden seguir necesitando aclaración humana. Esta entrega no incorpora RAG, ReAct ni el refactor completo del intérprete/resolutor histórico.
