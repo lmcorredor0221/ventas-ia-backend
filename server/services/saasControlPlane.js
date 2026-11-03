@@ -506,7 +506,7 @@ export class SaasControlPlane {
         tenant.lifecycle = { ...(tenant.lifecycle ?? {}), googleStatus: 'connected', updatedAt: new Date().toISOString() };
       }
     });
-    this.persistTenantCritical(tenantId);
+    await this.persistTenantCritical(tenantId);
     this.completeOnboardingStep(tenantId, 'google_oauth');
     this.recordBillingFunnel(tenantId, 'google_connected', { mode: connection.mode });
     this.events.emit({ type: 'google.oauth.connected', tenantId, detail: 'Google conectado', metadata: { mode: connection.mode } });
@@ -1960,7 +1960,7 @@ export class SaasControlPlane {
   }
 
   persistTenantCritical(tenantId) {
-    this.store.persistTenantCritical?.(tenantId);
+    return this.store.persistTenantCritical?.(tenantId);
   }
 
   audit(tenantId, action, resource, metadata = {}) {

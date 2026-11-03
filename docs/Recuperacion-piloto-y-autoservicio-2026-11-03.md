@@ -78,3 +78,15 @@ No se declara listo el autoservicio externo solo por un popup, una aprobación a
 ### Límites operativos observados
 
 El arranque de Render tardó aproximadamente 2–4 minutos antes de escuchar el puerto. La instancia anterior siguió sirviendo hasta el relevo. Las pruebas funcionales no acreditan baja latencia en arranque frío ni capacidad multiinstancia. El build informó dos alertas npm (una moderada y una alta); requieren evaluación de dependencias separada, no se ejecutó `npm audit fix` a ciegas durante esta recuperación.
+
+## Corrección de renovación concurrente con despliegue
+
+La consulta posterior al relevo mostró `connectedAt=17:41:39` otra vez, después de haber confirmado `18:06:03`. Se identificó una escritura del snapshot antiguo durante el arranque. Se corrigió específicamente la persistencia de conexiones Google:
+
+- Abrir un runtime existente ya no reescribe todas las tablas antes de escuchar el puerto.
+- El callback espera el checkpoint transaccional de la conexión y del secreto cifrado en PostgreSQL; no anuncia éxito antes de persistirlos.
+- Una proyección vieja conserva la conexión/revocación Google más reciente mediante bloqueo de fila y comparación de fechas, junto con su secreto cifrado y configuración del tenant.
+- Cada snapshot usa una copia coherente del estado, no una referencia que cambia mientras se escriben las tablas.
+- Prueba real `node server/tests/google-postgres-restart.mjs`: dos instancias, OAuth nuevo, escritura antigua posterior, reinicio y revocación posterior. PASS; el runtime público local quedó intacto. También pasaron nuevamente arquitectura, recuperación Google, contrato Google y propiedad de teléfono PostgreSQL.
+
+Este arreglo protege la renovación Google encontrada; no convierte el resto del runtime en una arquitectura multiwriter. Mantener una sola instancia operativa y probar otros tipos de mutaciones durante despliegues antes de escalar réplicas.

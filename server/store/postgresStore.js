@@ -49,7 +49,11 @@ export class PostgresStore {
       ensureSecretState(this.state);
       ensurePlatformState(this.state);
       collapseDuplicateOpenPendingRequests(this.state);
-      await this.save();
+      // Loading an existing runtime must not replay a stale snapshot over a
+      // connection that the previous instance is still finishing during deploy.
+      for (const [tenantId, connection] of Object.entries(this.state.googleConnectionsByTenant ?? {})) {
+        applyGoogleConnectionToTenant(this.state, tenantId, connection);
+      }
       return this.state;
     }
     this.state = createSeedState();
@@ -219,11 +223,21 @@ export class PostgresStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
+        const persisted = await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE");
+        mergeNewerGoogleConnections(state, persisted.rows[0]?.document);
         await upsertTenant(client, tenant);
         const subscription = state.subscriptionsByTenant?.[tenantId];
         if (subscription) await upsertSubscription(client, tenantId, subscription);
         const connection = state.googleConnectionsByTenant?.[tenantId];
-        if (connection) await upsertGoogleConnection(client, tenantId, connection);
+        if (connection) {
+          await upsertGoogleConnection(client, tenantId, connection);
+          const secret = state.secretsByRef?.[connection.refreshTokenRef];
+          await client.query(`UPDATE app_state SET document =
+            jsonb_set(jsonb_set(document, '{googleConnectionsByTenant}',
+              COALESCE(document->'googleConnectionsByTenant','{}'::jsonb) || jsonb_build_object($1::text,$2::jsonb)),
+              '{secretsByRef}', COALESCE(document->'secretsByRef','{}'::jsonb) || $3::jsonb), updated_at=now()
+            WHERE id='runtime'`, [tenantId, JSON.stringify(connection), JSON.stringify(secret ? {[connection.refreshTokenRef]:secret} : {})]);
+        }
         const workspace = state.googleWorkspacesByTenant?.[tenantId];
         if (workspace) await upsertGoogleWorkspace(client, tenantId, workspace);
         await client.query('COMMIT');
@@ -721,10 +735,15 @@ export class PostgresStore {
   }
 
   async save() {
-    const state = this.getState();
+    // Freeze one coherent projection. Mutations arriving during SQL writes are
+    // persisted by their own critical write / next scheduled snapshot.
+    const state = structuredClone(this.getState());
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      const persisted = await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE");
+      mergeNewerGoogleConnections(state, persisted.rows[0]?.document);
+      mergeNewerGoogleConnections(this.state, persisted.rows[0]?.document);
       await client.query(
         `
           INSERT INTO app_state (id, document, schema_version, updated_at)
@@ -841,6 +860,35 @@ export class PostgresStore {
     } finally {
       client.release();
     }
+  }
+}
+
+function googleConnectionVersion(connection) {
+  return Math.max(Date.parse(connection?.connectedAt) || 0, Date.parse(connection?.lastErrorAt) || 0);
+}
+
+function applyGoogleConnectionToTenant(state, tenantId, connection) {
+  const tenant = state.tenants?.find(item => item.id === tenantId);
+  if (!tenant) return;
+  tenant.config ??= {};
+  tenant.config.googleOAuth = {status:connection.status, mode:connection.mode,
+    accountEmail:connection.accountEmail, scopes:connection.scopes, refreshTokenRef:connection.refreshTokenRef};
+  if (tenant.config.googleSheets) tenant.config.googleSheets.refreshTokenRef = connection.refreshTokenRef;
+  if (tenant.config.googleDrive) tenant.config.googleDrive.refreshTokenRef = connection.refreshTokenRef;
+  tenant.lifecycle = {...tenant.lifecycle, googleStatus:connection.status};
+}
+
+function mergeNewerGoogleConnections(target, persisted) {
+  for (const [tenantId, connection] of Object.entries(persisted?.googleConnectionsByTenant ?? {})) {
+    if (googleConnectionVersion(connection) <= googleConnectionVersion(target.googleConnectionsByTenant?.[tenantId])) continue;
+    target.googleConnectionsByTenant ??= {};
+    target.googleConnectionsByTenant[tenantId] = structuredClone(connection);
+    const secret = persisted.secretsByRef?.[connection.refreshTokenRef];
+    if (secret) {
+      target.secretsByRef ??= {};
+      target.secretsByRef[connection.refreshTokenRef] = structuredClone(secret);
+    }
+    applyGoogleConnectionToTenant(target, tenantId, connection);
   }
 }
 
