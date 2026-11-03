@@ -92,4 +92,13 @@ Los tiempos son del proveedor en pruebas locales, no latencia E2E de WhatsApp. L
 
 ## Publicación
 
-Pendiente de registrar los identificadores del despliegue y la comprobación de salud posteriores a la publicación.
+- Backend incorporado a `backend/main`: `1e512a35cc5535a5a3740caac3bb4080e69aa50e`.
+- Render: `dep-dbl6m9gm7kps739e4s0g`, estado **live** desde 2026-11-03 23:16:27 UTC (18:16:27 Colombia).
+- `/health/ready`: `ok:true`, producción, PostgreSQL, WhatsApp live, sin errores ni advertencias; comprobado a las 23:16:49 UTC.
+- Frontend incorporado a `frontend/main`: `3ef70a7692bee8ce2aae52b484492cd18ce912a9`.
+- Vercel: `dpl_vrkhXu7APpejSWCtNtdUm4qLGQ4F`, **Ready**, producción; alias `https://via.leanagentbuilder.com` y commit Git verificados. Publicación del 3 de noviembre a las 18:17 Colombia.
+- Dominio público y script `/assets/index-gpnflbyG.js`: HTTP 200; contiene el campo «Nombre del asistente», «Guardar nombre» y el predeterminado Rocío. Compilación de producción identificada por Vercel con el commit anterior.
+- Proxy `https://via.leanagentbuilder.com/api/health`: `ok:true` a las 23:17:09 UTC.
+- Se utilizaron las CLI autenticadas después de que el conector de Render pidiera reconexión y el de Vercel no autorizara el proyecto. No se cambiaron permisos ni secretos para publicar.
+
+Estas verificaciones confirman la publicación y disponibilidad del código. La entrega de un saludo nuevo por WhatsApp real queda pendiente de observación; no se envió ningún mensaje al comprador durante esta validación.
