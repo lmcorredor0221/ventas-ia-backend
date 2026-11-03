@@ -63,3 +63,18 @@ PASS: `test:backend`, `test:architecture`, `test:whatsapp-onboarding`, `test:goo
 8. Mantener un único escritor. Bloqueo de onboarding en memoria y consumidor serial no justifican todavía múltiples réplicas. Render Free conserva riesgo de arranque frío.
 
 No se declara listo el autoservicio externo solo por un popup, una aprobación aislada o un HTTP 200.
+
+## Resultado del despliegue — actualización 13:12 Colombia
+
+- Backend publicado en `main`: `b9853cb96dd06e58f9eaf68a283ea6e6d979c388`. Render `dep-dbl21f6tlv9c739jfs1g` Live a las 13:01:32; segundo despliegue con el secreto que el usuario guardó: `dep-dbl24jei0phs73bjsi5g`, Live a las 13:09:35. Node real 24.22.2. Readiness HTTP 200, PostgreSQL, sin errores/advertencias de configuración.
+- Frontend publicado en `main`: `6415ddc3c6cea565fa0407c26509a693c9e53958`. Vercel `dpl_2zHTvXAz8U1UejtZyQFoc1MbVFws`, READY/production. Archivo público `index-IEz_qCoY.js` contiene coexistencia, reconexión y resultado de renovación. También se corrigió un error de presentación: el aviso general mostraba una notificación vieja en vez del error actual de WhatsApp.
+- Migración 014 aplicada. Consulta previa sin teléfonos duplicados; no se purgaron datos.
+- Los ocho trabajos históricos de Sheets quedaron `processed`, un intento cada uno y `last_error=null`. Esto acredita acceso real de lectura/escritura a la hoja existente con su autorización conservada.
+- Google reconectado de nuevo **después** de publicar, a las 18:06:03.530 UTC. Los permisos heredados explican que esa cuenta aún muestre advertencia de aplicación no verificada; no se amplió el consentimiento. La prueba de alta con solo `drive.file` debe hacerse con cuenta nueva o tras revocación expresamente autorizada.
+- Google pide verificar propiedad de `https://via.leanagentbuilder.com/`. Se preparó un archivo HTML de Search Console para `lmcorredor@gmail.com`; su publicación y verificación esperan confirmación específica. El panel indica esperar 24 horas después de acreditar propiedad antes de reintentar la marca.
+- Meta rechazó el token desplegado a las **13:10:06** con `OAuthException 190`, subcódigo `467`: **la sesión es inválida porque el usuario cerró sesión**. La validación falló en `/me/permissions`; no se almacenó como renovación exitosa del tenant. No atribuirlo a `public_profile` ni afirmar simplemente caducidad por tiempo. Se dejaron abiertas las pantallas para que el titular genere/guarde otro token manteniendo la sesión de Facebook.
+- Los tres campos de coexistencia siguen pendientes de confirmación para ampliar los eventos recibidos por el webhook. No están activados todavía.
+
+### Límites operativos observados
+
+El arranque de Render tardó aproximadamente 2–4 minutos antes de escuchar el puerto. La instancia anterior siguió sirviendo hasta el relevo. Las pruebas funcionales no acreditan baja latencia en arranque frío ni capacidad multiinstancia. El build informó dos alertas npm (una moderada y una alta); requieren evaluación de dependencias separada, no se ejecutó `npm audit fix` a ciegas durante esta recuperación.
