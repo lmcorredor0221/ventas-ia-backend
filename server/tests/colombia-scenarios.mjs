@@ -26,17 +26,25 @@ try {
 
     const steps = scenario.steps ?? [{ text: scenario.text, expect: scenario.expect }];
     for (const [stepIndex, step] of steps.entries()) {
+      const current = store.getState().conversations.find(c => c.tenantId === 'andina' && c.waId === waId);
+      const choice = step.offerPurpose ? Object.values(store.getState().interactionOffersById ?? {})
+        .filter(o => o.conversationId === current?.id && o.purpose === step.offerPurpose && o.status === 'active').at(-1)?.options[0] : null;
+      if (step.offerPurpose) assert.ok(choice, `${scenario.id}: falta la opción ${step.offerPurpose}`);
       const run = await postJson(`${base}/api/agent/run`, {
         tenantId: 'andina',
         waId,
         profileName: scenario.customer === 'known' ? `Cliente ${index + 1}` : '',
         text: step.text,
-        messageType: step.messageType ?? scenario.messageType,
+        messageType: choice ? 'interactive' : step.messageType ?? scenario.messageType,
+        interactive: choice ? { type: 'button_reply', optionId: choice.id, title: choice.title } : undefined,
         mediaRef: step.mediaRef ?? scenario.mediaRef,
         messageId: `msg-${scenario.id}-${stepIndex}`,
       });
 
-      assertStep({ scenario, step, run, waId });
+      if (choice) {
+        assert.equal(run.conversation.orderDraft.checkout.phase, step.expect.checkoutPhase);
+        assert.ok(!run.conversation.orderId, 'Continuar el carrito no registra el pedido');
+      } else assertStep({ scenario, step, run, waId });
       results.push(`${scenario.id}#${stepIndex + 1}:${run.result.plan.intent}`);
       traces.push(buildTrace({ scenario, step, run, waId, stepIndex }));
     }
@@ -93,7 +101,10 @@ function assertStep({ scenario, step, run, waId }) {
   if (expectation.replyIncludes) {
     const paymentPending = conversation.orderDraft?.delivery && !conversation.orderDraft?.paymentMethod;
     for (const fragment of expectation.replyIncludes) {
-      const expectedFragment = paymentPending && fragment === 'Confirmas el pedido' ? 'cómo prefieres pagar' : fragment;
+      const expectedFragment = fragment === 'Confirmas el pedido'
+        ? conversation.orderDraft?.checkout?.phase === 'review' ? 'agregar algo más'
+          : paymentPending ? 'cómo prefieres pagar' : fragment
+        : fragment;
       assert.ok(reply.includes(expectedFragment), `${scenario.id}: la respuesta no incluye "${expectedFragment}". Respuesta: ${reply}`);
     }
   }

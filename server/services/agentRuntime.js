@@ -5,6 +5,7 @@ import { isClosedConversation, isDispatchedConversation } from '../domain/conver
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
+import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null }) {
@@ -629,6 +630,10 @@ export class AgentRuntime {
     if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    const checkout = checkoutProgress({
+      draft: { items: effectiveOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
+      previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete,
+    });
     const requiresHumanResolution = needsHumanProductResolution(missingFields);
     const reply = requiresHumanResolution
       ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile })
@@ -639,13 +644,11 @@ export class AgentRuntime {
         subtotal,
         paymentMethods,
         paymentMethod: selectedPaymentMethod?.id ?? null,
+        checkout,
       });
-    const canQuote = missingFields.length === 0;
-    const paymentOffer = !requiresHumanResolution && !selectedPaymentMethod && missingFields.includes('payment_method')
-      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
-      : null;
-    const confirmationOffer = canQuote && !requiresHumanResolution && !paymentOffer
-      ? await this.createOrderConfirmationOffer({ tenantId, conversationId })
+    const canQuote = checkout.phase === 'confirmation';
+    const checkoutOffer = !requiresHumanResolution
+      ? await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout })
       : null;
     const customerReply = await this.composeCustomerReply({
       tenantId,
@@ -653,16 +656,14 @@ export class AgentRuntime {
       fallbackText: reply,
       facts: {
         kind: canQuote ? 'order_quote' : 'order_clarification',
+        checkoutPhase: checkout.phase,
         products: effectiveOrderItems.map((item) => item.product ?? item),
         subtotal,
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
-    const paymentInteractive = paymentOffer?.interactive
-      ? { ...paymentOffer.interactive, body: customerReply }
-      : undefined;
-    const confirmationInteractive = confirmationOffer?.interactive
-      ? { ...confirmationOffer.interactive, body: customerReply }
+    const checkoutInteractive = checkoutOffer?.interactive
+      ? { ...checkoutOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -690,6 +691,7 @@ export class AgentRuntime {
         paymentMethodLabel: selectedPaymentMethod?.label ?? null,
         driveRefs: drive.source_refs ?? [],
         driveStatus: drive.status,
+        checkout,
       },
     });
 
@@ -725,7 +727,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentInteractive ?? confirmationInteractive,
+      interactive: checkoutInteractive,
     });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
@@ -777,8 +779,10 @@ export class AgentRuntime {
     }
     const selectedPaymentMethod = resolvePaymentMethod(orderDraft.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(normalized.text, paymentMethods);
-    if (orderDraft.delivery && !selectedPaymentMethod) {
+    const checkout = checkoutProgress({ draft: { ...orderDraft, paymentMethod: selectedPaymentMethod?.id }, previous: orderDraft.checkout });
+    if (checkout.phase !== 'confirmation') {
       return this.handleOrderClarification({
+        preserveProductAmbiguity: true,
         tenantId,
         conversationId,
         normalized,
@@ -788,7 +792,8 @@ export class AgentRuntime {
           intent: 'order_clarification',
           order: {
             ...orderDraft,
-            missingFields: [...new Set([...(orderDraft.missingFields ?? []), 'payment_method'])],
+            collectionComplete: true,
+            missingFields: [...new Set([...(orderDraft.missingFields ?? []), ...(orderDraft.delivery && !selectedPaymentMethod ? ['payment_method'] : [])])],
           },
         },
       });
@@ -872,7 +877,7 @@ export class AgentRuntime {
     return { summary: 'Confirmed order registered and handed off', plan };
   }
 
-  async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
+  async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile, preserveProductAmbiguity = false }) {
     const conversation = await this.getConversation(conversationId);
     const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: draft.items });
@@ -927,7 +932,7 @@ export class AgentRuntime {
         return !item?.quantity;
       }
       if (field.startsWith('presentation:')) {
-        return !confirmsPresentation(normalized.text, field.replace('presentation:', ''));
+        return preserveProductAmbiguity || !confirmsPresentation(normalized.text, field.replace('presentation:', ''));
       }
       return true;
     });
@@ -943,8 +948,11 @@ export class AgentRuntime {
       });
     }
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    if (draft.delivery && !draft.paymentMethod && !draft.missingFields.includes('payment_method')) draft.missingFields.push('payment_method');
+    draft.checkout = checkoutProgress({ draft, previous: conversation?.orderDraft?.checkout, collectionComplete: plan.order?.collectionComplete });
+    delete draft.collectionComplete; // A semantic signal belongs only to this turn, not future additions.
 
-    const canQuote = draft.missingFields.length === 0;
+    const canQuote = draft.checkout.phase === 'confirmation';
     const reply = buildOrderReply({
       orderItems: draft.items ?? [],
       missingFields: draft.missingFields,
@@ -952,29 +960,23 @@ export class AgentRuntime {
       subtotal: draft.subtotal,
       paymentMethods,
       paymentMethod: draft.paymentMethod,
+      checkout: draft.checkout,
     });
-    const paymentOffer = !draft.paymentMethod && draft.missingFields.includes('payment_method')
-      ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods })
-      : null;
-    const confirmationOffer = canQuote && !paymentOffer
-      ? await this.createOrderConfirmationOffer({ tenantId, conversationId })
-      : null;
+    const checkoutOffer = await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout: draft.checkout });
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
       facts: {
         kind: canQuote ? 'order_quote' : 'order_clarification',
+        checkoutPhase: draft.checkout.phase,
         products: draft.items ?? [],
         subtotal: draft.subtotal,
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
-    const paymentInteractive = paymentOffer?.interactive
-      ? { ...paymentOffer.interactive, body: customerReply }
-      : undefined;
-    const confirmationInteractive = confirmationOffer?.interactive
-      ? { ...confirmationOffer.interactive, body: customerReply }
+    const checkoutInteractive = checkoutOffer?.interactive
+      ? { ...checkoutOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -997,7 +999,7 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-      interactive: paymentInteractive ?? confirmationInteractive,
+      interactive: checkoutInteractive,
     });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
@@ -1459,6 +1461,21 @@ export class AgentRuntime {
     return this.store.getState().conversations.find((item) => item.id === conversationId);
   }
 
+  async createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout }) {
+    if (checkout.phase === 'payment') return this.createPaymentOffer({ tenantId, conversationId, paymentMethods });
+    if (checkout.phase === 'confirmation') return this.createOrderConfirmationOffer({ tenantId, conversationId, basket: checkout.basketKey });
+    if (checkout.phase !== 'review' || !this.store.createInteractionOffer) return null;
+    const id = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const options = [
+      { id: `vi:${id}:1`, title: 'Continuar pedido', action: 'continue_checkout', value: checkout.basketKey },
+      { id: `vi:${id}:2`, title: 'Agregar productos', action: 'adjust_order' },
+      { id: `vi:${id}:3`, title: 'Hablar con la tienda', action: 'human_handoff' },
+    ];
+    const offer = await this.store.createInteractionOffer({ id, tenantId, conversationId, purpose: 'cart_review', options,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() });
+    return { offer, interactive: { kind: 'button', body: '¿Quieres agregar algo más o continuar con este pedido?', buttons: options.map(({ id, title }) => ({ id, title })) } };
+  }
+
   async createPaymentOffer({ tenantId, conversationId, paymentMethods }) {
     if (!this.store.createInteractionOffer || !paymentMethods.length) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
@@ -1491,12 +1508,12 @@ export class AgentRuntime {
     };
   }
 
-  async createOrderConfirmationOffer({ tenantId, conversationId }) {
+  async createOrderConfirmationOffer({ tenantId, conversationId, basket }) {
     if (!this.store.createInteractionOffer) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const options = [
-      { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order' },
+      { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order', value: basket ?? basketKey((await this.getConversation(conversationId))?.orderDraft) },
       { id: `vi:${offerId}:2`, title: 'Ajustar pedido', action: 'adjust_order' },
       { id: `vi:${offerId}:3`, title: 'Hablar con la tienda', action: 'human_handoff' },
     ];
@@ -1542,6 +1559,18 @@ export class AgentRuntime {
     if (commerceResult) return commerceResult;
     if (current?.commercePolicy?.awaitingContinuation) return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
       reason: 'El pedido cambió. Usa «Continuar sin ellos» para revisar únicamente los productos permitidos.' });
+    if (['continue_checkout', 'confirm_order'].includes(result.option?.action)
+      && result.option.value !== basketKey(current?.orderDraft)) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: 'El pedido cambió desde ese resumen. Revisa el último total y usa sus opciones para continuar.' });
+    }
+    if (result.option?.action === 'continue_checkout') {
+      const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+        wa_id: normalized.waId, profile_name: normalized.profileName,
+      });
+      return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
+        plan: { intent: 'order_clarification', order: { collectionComplete: true } } });
+    }
     if (result.option?.action === 'confirm_order') {
       return this.confirmOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
     }
@@ -1554,38 +1583,14 @@ export class AgentRuntime {
     if (result.option?.action !== 'set_payment_method') {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
     }
-    const conversation = await this.getConversation(conversationId);
-    const tenant = await this.getTenant(tenantId);
-    const paymentMethods = paymentMethodsForTenant(tenant);
-    const draft = structuredClone(conversation?.orderDraft ?? {});
-    draft.paymentMethod = result.option.value;
-    draft.paymentMethodLabel = paymentMethodLabel(result.option.value, paymentMethods);
-    draft.missingFields = (draft.missingFields ?? []).filter((field) => field !== 'payment_method');
-    const fallbackText = `Listo, queda ${draft.paymentMethodLabel} como forma de pago. ${draft.missingFields.length ? 'Aún necesito completar los datos pendientes para continuar.' : `El subtotal es ${formatCurrency(draft.subtotal ?? 0)}. ¿Confirmas el pedido?`}`;
-    await this.patchConversation(conversationId, {
-      orderDraft: draft,
-      stage: draft.missingFields.length ? 'clarification' : 'quote',
-      zone: draft.missingFields.length ? 'agent' : 'quote',
-      nextStep: draft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
+    const methods = paymentMethodsForTenant(await this.getTenant(tenantId));
+    if (!methods.some(method => method.id === result.option.value)) return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+      reason: 'La tienda actualizó sus medios de pago. Escríbeme cómo quieres continuar.' });
+    const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+      wa_id: normalized.waId, profile_name: normalized.profileName,
     });
-    const text = await this.composeCustomerReply({
-      tenantId,
-      conversationId,
-      fallbackText,
-      facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [draft.paymentMethodLabel] },
-    });
-    const confirmationOffer = draft.missingFields.length
-      ? null
-      : await this.createOrderConfirmationOffer({ tenantId, conversationId });
-    const confirmationInteractive = confirmationOffer?.interactive
-      ? { ...confirmationOffer.interactive, body: text }
-      : undefined;
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
-      action: 'send_session_message',
-      wa_id: normalized.waId,
-      text,
-      interactive: confirmationInteractive,
-    });
+    await this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
+      plan: { intent: 'order_clarification', order: { paymentMethod: result.option.value } } });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
   }
 
@@ -1611,7 +1616,9 @@ export class AgentRuntime {
   }
 
   async requestOrderAdjustment({ tenantId, conversationId, normalized, option }) {
+    const current = await this.getConversation(conversationId);
     await this.patchConversation(conversationId, {
+      orderDraft: { ...current?.orderDraft, checkout: { phase: 'review', reviewedKey: null } },
       stage: 'clarification',
       zone: 'agent',
       status: 'live',
@@ -2089,8 +2096,8 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
   });
 }
 
-function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod }) {
-  const uniqueMissing = [...new Set(missingFields)];
+function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod, checkout }) {
+  const uniqueMissing = [...new Set(missingFields)].filter(field => field !== 'payment_method' || checkout?.phase === 'payment');
   const foundLines = orderItems
     .filter((item) => item.product && !hasMissingPresentation(item, uniqueMissing))
     .map((item) => {
@@ -2141,6 +2148,9 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
   }
   const address = customerProfile?.defaultAddress ? ` a tu direccion guardada (${customerProfile.defaultAddress})` : '';
   const payment = paymentMethodLabel(paymentMethod, paymentMethods);
+  if (checkout?.phase === 'review') {
+    return `Tengo en tu pedido: ${foundLines.join(', ')}. Subtotal de productos: ${formatCurrency(subtotal)}.${payment ? ` Tengo anotado ${payment} como preferencia de pago.` : ''} ¿Quieres agregar algo más o continuar con este pedido?`;
+  }
   return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal de productos: ${formatCurrency(subtotal)}.${payment ? ` Pago: ${payment}.` : ''} ¿Confirmas el pedido?`;
 }
 

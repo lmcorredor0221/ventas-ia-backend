@@ -11,7 +11,7 @@
     "dev": "node server/index.js",
     "worker": "node server/worker.js",
     "test": "npm run test:backend",
-    "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/agent-runtime-greeting.mjs && node server/tests/agent-identity-context.mjs && node server/tests/agent-runtime-quote-continuity.mjs && node server/tests/agent-runtime-concurrency.mjs && node server/tests/agent-runtime-failure-contract.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/llm-json-recovery.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs && node server/tests/whatsapp-bsuid-contract.mjs && node server/tests/whatsapp-embedded-signup-contract.mjs && node server/tests/whatsapp-commerce-policy.mjs",
+    "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/agent-runtime-greeting.mjs && node server/tests/agent-identity-context.mjs && node server/tests/agent-runtime-quote-continuity.mjs && npm run test:checkout && node server/tests/agent-runtime-concurrency.mjs && node server/tests/agent-runtime-failure-contract.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/llm-json-recovery.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs && node server/tests/whatsapp-bsuid-contract.mjs && node server/tests/whatsapp-embedded-signup-contract.mjs && node server/tests/whatsapp-commerce-policy.mjs",
     "test:identity": "node server/tests/agent-identity-context.mjs",
     "test:greeting": "node server/tests/agent-runtime-greeting.mjs",
     "test:whatsapp-commerce": "node server/tests/whatsapp-commerce-policy.mjs",
@@ -32,7 +32,8 @@
     "test:whatsapp-postgres-locks": "node server/tests/whatsapp-postgres-lock-order.mjs",
     "test:google-recovery": "node server/tests/google-recovery-contract.mjs",
     "test:catalog": "node server/tests/catalog-import.mjs && node server/tests/catalog-enriched-contract.mjs && node server/tests/catalog-enriched-runtime.mjs && node server/tests/catalog-retrieval-contract.mjs",
-    "test:whatsapp-bsuid": "node server/tests/whatsapp-bsuid-contract.mjs"
+    "test:whatsapp-bsuid": "node server/tests/whatsapp-bsuid-contract.mjs",
+    "test:checkout": "node server/tests/checkout-sequence.mjs && node server/tests/checkout-interpretation.mjs"
   },
   "dependencies": {
     "cors": "^2.8.6",

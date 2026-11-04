@@ -49,6 +49,10 @@ try {
       missingFields: ['customer_name', 'delivery_address', 'payment_method'] },
   });
   assert.equal(conversation(args.conversationId).orderDraft.subtotal, 10000);
+  await runtime.handleOrderClarification({ ...args, plan: { ...args.plan, order: { delivery: true, items: structuredClone(sparseItems) } } });
+  const review = Object.values(store.getState().interactionOffersById).find((item) => item.conversationId === args.conversationId && item.purpose === 'cart_review');
+  assert.ok(review, 'Show the resolved basket before asking for payment');
+  await runtime.handleInteractiveReply({ ...args, normalized: { ...args.normalized, text: 'Continuar pedido', interactive: { optionId: review.options[0].id } } });
   const paymentOffer = Object.values(store.getState().interactionOffersById).find((item) => item.conversationId === args.conversationId && item.purpose === 'payment_method');
   const breb = paymentOffer.options.find((item) => item.value === 'breb');
   await runtime.handleInteractiveReply({ ...args, normalized: { ...args.normalized, text: 'Bre-B', interactive: { optionId: breb.id } } });

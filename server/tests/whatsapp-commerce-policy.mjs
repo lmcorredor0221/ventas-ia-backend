@@ -106,6 +106,9 @@ try {
   assert.equal(conv(args.conversationId).orderDraft.subtotal, 7200);
   assert.ok(!conv(args.conversationId).orderDraft.items.some(i => i.product?.sku === 'BEER'));
   assert.deepEqual(conv(args.conversationId).orderDraft.missingFields, [], 'Mixed-order continuation must preserve explicitly supplied customer details');
+  const review = Object.values(store.getState().interactionOffersById).find(o => o.conversationId === args.conversationId && o.purpose === 'cart_review');
+  assert.ok(review, 'Review the permitted basket before its final confirmation');
+  await runtime.handleInteractiveReply({ ...args, normalized: { ...args.normalized, text: 'Continuar pedido', interactive: { optionId: review.options[0].id } } });
   const freshConfirmation = Object.values(store.getState().interactionOffersById).find(o => o.conversationId === args.conversationId && o.purpose === 'order_confirmation' && o.id !== staleConfirmation.offer.id);
   assert.ok(freshConfirmation);
   await runtime.handleInteractiveReply({ ...args, normalized: { ...args.normalized, text: 'Confirmar pedido', interactive: { optionId: freshConfirmation.options[0].id } } });

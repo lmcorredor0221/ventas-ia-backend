@@ -784,6 +784,7 @@ function buildReplyPrompt({ facts, fallbackText, config }) {
     `Perfil de voz: ${normalizeVoiceProfile(config.tone)}. Usa cercania colombiana solo si encaja; nunca caricaturices ni repitas muletillas.`,
     'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
     'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
+    'Respeta facts.checkoutPhase: collecting resuelve solo datos/productos pendientes, review muestra la canasta y pregunta si desea agregar o continuar, payment pregunta el medio de pago, confirmation solicita confirmación final. No adelantes el pago ni la confirmación si la fase no lo permite. Si el pago ya está anotado antes, es solo una preferencia.',
     'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
     JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
   ].join('\n');
@@ -871,6 +872,7 @@ function greetingPrompt(config = {}) {
     'En Colombia expresiones como quiubo/qué hubo, qué más, buenas, bien o qué, cómo va todo y qué más pues pueden abrir contacto. Veci, parce y sumercé pueden ser vocativos, no productos ni el nombre del comprador. Comprende variantes informales y errores de escritura sin exigir coincidencias exactas.',
     'Son ejemplos, no reglas de palabras: «qué más tienes de gaseosas» pide opciones; «qué hubo con mi pedido» pide seguimiento; «quiubo, regálame una leche» inicia una compra. Mira también recentMessages: una expresión breve puede responder a la pregunta anterior o modificar un pedido. No conviertas datos del cliente, pago, confirmaciones, negaciones o cambios en un saludo.',
     'Si existe un carrito y el cliente contesta la pregunta anterior sobre presentación, cantidad, nombre, dirección o preferencia de pago, usa order_clarification y conserva las líneas y datos del carrito que no cambió. Completar un dato pendiente no inicia otro pedido ni lo confirma. Solo usa delivery_order para una nueva solicitud de compra.',
+    'Interpreta por contexto si el cliente terminó de agregar productos. Usa order.collectionComplete:true únicamente cuando lo expresa (por ejemplo, eso es todo o sigamos con este pedido), no porque indicó un producto, aclaró una marca, dio su dirección o eligió el pago. No copies esta señal del turno anterior. Usa false solo si pide seguir agregando o esperar; en cualquier otro mensaje omítelo o usa null. Terminar de agregar usa order_clarification; order_confirmation exige aceptar explícitamente el resumen final, después de consolidar productos y forma de pago.',
     'Para greeting: order.items y candidateItems vacíos, sin búsqueda de catálogo ni escalamiento. No copies el carrito existente al plan ni lo modifiques. Incluye greetingReply con una respuesta natural y breve al saludo, invitando a contar qué necesita; no cotices, confirmes pedidos, afirmes disponibilidad ni prometas entregas.',
     'Una pregunta solo sobre tu nombre o quién atiende también usa greeting y responde con tu identidad configurada. En el primer saludo (conversationContext.hasAgentReply=false) preséntate brevemente con tu nombre y como asistente virtual. Después no repitas la presentación salvo que pregunten quién eres. No confundas tu nombre usado como vocativo con customerDetails.name.',
     'Si el saludo acompaña una solicitud, prioriza esa solicitud: un saludo con productos sigue el flujo de compra o consulta; pedir domicilio sin productos es delivery_order con order_items pendiente. Un saludo nunca confirma ni cancela el carrito existente.',
@@ -1229,6 +1231,8 @@ function coercePlanWithConversation(plan, { text, conversation, paymentMethods }
       intent: 'order_clarification',
       order: {
         ...conversation.orderDraft,
+        ...plan.order,
+        collectionComplete: plan.order?.collectionComplete ?? null,
         paymentMethod: inferPaymentMethod(normalized, paymentMethods),
       },
       recommendedTools: ['whatsapp_business_messaging'],

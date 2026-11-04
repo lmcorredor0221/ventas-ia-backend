@@ -365,7 +365,8 @@ try {
   assert.equal(quantityRun.result.summary, 'Order still needs clarification');
   assert.ok(quantityRun.conversation.orderDraft.missingFields.includes('payment_method'));
   assert.match(quantityRun.conversation.messages.at(-1).text, /Subtotal de productos/i);
-  assert.match(quantityRun.conversation.messages.at(-1).text, /Efectivo.*Tarjeta.*Bre-B/i);
+  assert.doesNotMatch(quantityRun.conversation.messages.at(-1).text, /Efectivo.*Tarjeta.*Bre-B/i);
+  assert.equal(quantityRun.conversation.orderDraft.checkout.phase, 'review');
 
   const paymentMethodRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -373,11 +374,20 @@ try {
     profileName: 'Prueba Local',
     text: 'Efectivo',
   });
-  assert.equal(paymentMethodRun.result.summary, 'Order clarified and quote sent');
+  assert.equal(paymentMethodRun.result.summary, 'Order still needs clarification');
+  assert.equal(paymentMethodRun.conversation.orderDraft.checkout.phase, 'review', 'Volunteering payment does not finish the basket');
   assert.equal(paymentMethodRun.conversation.orderDraft.missingFields.length, 0);
   assert.equal(paymentMethodRun.conversation.orderDraft.paymentMethod, 'cash');
   assert.match(paymentMethodRun.conversation.messages.at(-1).text, /Subtotal de productos/i);
 
+  const basketReview = Object.values(store.getState().interactionOffersById ?? {})
+    .filter((offer) => offer.conversationId === quantityRun.conversation.id && offer.purpose === 'cart_review' && offer.status === 'active').at(-1);
+  assert.ok(basketReview, 'La canasta resuelta debe revisarse antes de confirmar');
+  await postJson(`${base}/api/agent/run`, {
+    tenantId: 'andina', waId: '573009998877', profileName: 'Prueba Local', messageType: 'interactive',
+    text: basketReview.options[0].title,
+    interactive: { type: 'button_reply', optionId: basketReview.options[0].id, title: basketReview.options[0].title },
+  });
   const confirmationOffer = Object.values(store.getState().interactionOffersById ?? {})
     .find((offer) => offer.conversationId === quantityRun.conversation.id && offer.purpose === 'order_confirmation' && offer.status === 'active');
   assert.ok(confirmationOffer, 'Al completar la cotización debe aparecer una confirmación interactiva');
@@ -508,6 +518,12 @@ try {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+  });
+  await runtime.handleOrderClarification({
+    tenantId: 'andina', conversationId: 'wa-confirmed-name-smoke',
+    normalized: { waId: '573001112257', text: 'Eso es todo' },
+    customerProfile: { name: 'Nombre comercial', defaultAddress: 'Calle 10 # 20-30' },
+    plan: { intent: 'order_clarification', order: { collectionComplete: true } },
   });
   await runtime.handleOrderConfirmation({
     tenantId: 'andina',
@@ -678,7 +694,8 @@ try {
     profileName: '',
     text: 'Luis Corredor Castillo, Calle 153 # 114B-58 Int 2 Casa 10, Bogotá. Efectivo.',
   });
-  assert.equal(naturalCustomerDetailsRun.result.summary, 'Order clarified and quote sent');
+  assert.equal(naturalCustomerDetailsRun.result.summary, 'Order still needs clarification');
+  assert.equal(naturalCustomerDetailsRun.conversation.orderDraft.checkout.phase, 'review');
   assert.equal(naturalCustomerDetailsRun.conversation.orderDraft.missingFields.length, 0);
   assert.equal(naturalCustomerDetailsRun.conversation.orderDraft.paymentMethod, 'cash');
   const capturedNaturalCustomer = store.getState().customerProfilesByTenant.andina['573001112233'];

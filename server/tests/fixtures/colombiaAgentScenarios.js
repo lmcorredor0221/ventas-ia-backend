@@ -343,6 +343,9 @@ export const colombiaAgentScenarioSet = [
         },
       },
       {
+        text: 'Continuar pedido', offerPurpose: 'cart_review', expect: { checkoutPhase: 'payment' },
+      },
+      {
         text: 'Pago en efectivo',
         expect: {
           intent: 'order_clarification',
@@ -474,6 +477,9 @@ export const colombiaAgentScenarioSet = [
           missingFields: [],
           replyIncludes: ['1 x Pan tajado Bimbo', 'Confirmas el pedido'],
         },
+      },
+      {
+        text: 'Continuar pedido', offerPurpose: 'cart_review', expect: { checkoutPhase: 'payment' },
       },
       {
         text: 'Pago por Bre-B',
@@ -671,6 +677,9 @@ export const colombiaAgentScenarioSet = [
           missingFields: [],
           replyIncludes: ['1 x Yogurt Alpina fresa', 'Confirmas el pedido'],
         },
+      },
+      {
+        text: 'Continuar pedido', offerPurpose: 'cart_review', expect: { checkoutPhase: 'payment' },
       },
       {
         text: 'Pago con tarjeta',
