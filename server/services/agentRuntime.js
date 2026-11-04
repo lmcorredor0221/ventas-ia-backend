@@ -1419,6 +1419,7 @@ export class AgentRuntime {
     this.store.mutate((state) => {
       for (const conversation of state.conversations) {
         if (conversation.manualMode !== 'whatsapp_external' || conversation.status !== 'manual_active') continue;
+        if (conversation.orderId) continue; // Fulfillment ends through the order's dispatch/cancellation flow.
         const lastActivity = Date.parse(conversation.manualLastActivityAt ?? conversation.updatedAt ?? conversation.createdAt ?? 0);
         if (!Number.isFinite(lastActivity) || now - lastActivity < inactivityMs) continue;
         const closedAt = new Date(now).toISOString();

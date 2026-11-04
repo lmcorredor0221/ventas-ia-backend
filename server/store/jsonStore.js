@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { applyManualOrderCommit } from './manualOrderCommit.js';
 import path from 'node:path';
 import { createSeedState } from '../data/seed.js';
 import { ensureSaasState } from '../services/saasControlPlane.js';
@@ -45,6 +46,19 @@ export class JsonStore {
     const result = mutator(state);
     this.save();
     return result;
+  }
+
+  commitManualOrder(commit) {
+    const { order, period } = commit;
+    const existing = this.getState().ordersByTenant?.[order.tenantId]?.find(item => item.conversationId === order.conversationId);
+    if (existing) return { order: existing, created: false };
+    const next = structuredClone(this.getState());
+    const usageValue = Number(next.usageCountersByTenant?.[order.tenantId]?.[period]?.deliveries_confirmed ?? 0) + 1;
+    applyManualOrderCommit(next, { ...commit, usageValue });
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    fs.writeFileSync(this.filePath, JSON.stringify(next, null, 2));
+    this.state = next;
+    return { order, created: true };
   }
 
   claimWhatsAppPhone(tenantId, phoneNumberId) {

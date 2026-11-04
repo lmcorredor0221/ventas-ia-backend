@@ -13,6 +13,8 @@
     "test": "npm run test:backend",
     "test:backend": "node server/tests/backend-smoke.mjs && node server/tests/agent-runtime-greeting.mjs && node server/tests/agent-identity-context.mjs && node server/tests/agent-runtime-quote-continuity.mjs && npm run test:checkout && node server/tests/agent-runtime-concurrency.mjs && node server/tests/agent-runtime-failure-contract.mjs && node server/tests/colombia-scenarios.mjs && node server/tests/llm-provider.mjs && node server/tests/llm-json-recovery.mjs && node server/tests/auth-smoke.mjs && node server/tests/google-live-contract.mjs && node server/tests/whatsapp-live-contract.mjs && node server/tests/whatsapp-bsuid-contract.mjs && node server/tests/whatsapp-embedded-signup-contract.mjs && node server/tests/whatsapp-commerce-policy.mjs",
     "test:identity": "node server/tests/agent-identity-context.mjs",
+    "test:manual": "node server/tests/manual-order.mjs",
+    "test:manual:postgres": "node server/tests/manual-order-postgres.mjs",
     "test:greeting": "node server/tests/agent-runtime-greeting.mjs",
     "test:whatsapp-commerce": "node server/tests/whatsapp-commerce-policy.mjs",
     "test:colombia": "node server/tests/colombia-scenarios.mjs",

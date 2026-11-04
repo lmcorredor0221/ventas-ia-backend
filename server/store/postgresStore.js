@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import pg from 'pg';
+import { applyManualOrderCommit } from './manualOrderCommit.js';
+import { limitsForTenant } from '../services/usageService.js';
 import { createSeedState } from '../data/seed.js';
 import { ensureSaasState } from '../services/saasControlPlane.js';
 import { ensureIdentityState } from '../services/authService.js';
@@ -63,6 +65,15 @@ export class PostgresStore {
             conversationId: row.conversation_id, waId: row.wa_id, status: row.status, version: Number(row.version) });
         }
         document.ordersByTenant = Object.fromEntries(ordersByTenant);
+        // Critical order commits also persist quota before the deferred snapshot.
+        // Replaying older snapshot counters would undercount after a restart.
+        const usage = await client.query('SELECT tenant_id, period, metric, value FROM usage_counters');
+        document.usageCountersByTenant = {};
+        for (const row of usage.rows) {
+          document.usageCountersByTenant[row.tenant_id] ??= {};
+          document.usageCountersByTenant[row.tenant_id][row.period] ??= {};
+          document.usageCountersByTenant[row.tenant_id][row.period][row.metric] = Number(row.value);
+        }
       }
       await client.query('COMMIT');
     } catch (error) {
@@ -434,6 +445,52 @@ export class PostgresStore {
         client.release();
       }
     }, 'order and outbox write');
+  }
+
+  commitManualOrder(commit) {
+    return this.queueWrite(async () => {
+      const { order, conversationPatch, entries, period } = commit;
+      const { tenantId, conversationId } = order;
+      const client = await this.pool.connect();
+      let usageValue;
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`manual-order:${tenantId}`]);
+        const existing = await client.query('SELECT payload FROM orders WHERE tenant_id=$1 AND conversation_id=$2 LIMIT 1', [tenantId, conversationId]);
+        if (existing.rows[0]) {
+          await client.query('COMMIT');
+          return { order: existing.rows[0].payload, created: false };
+        }
+        const row = await client.query('SELECT payload FROM conversations WHERE id=$1 AND tenant_id=$2 FOR UPDATE', [conversationId, tenantId]);
+        if (!row.rows[0]) throw Object.assign(new Error('Conversación no encontrada.'), { statusCode: 404 });
+        const conversation = row.rows[0].payload;
+        if (conversation.orderId || (String(conversation.status).startsWith('closed') && conversation.closeReason !== 'manual_inactivity')) {
+          throw Object.assign(new Error('La conversación cambió. Actualiza antes de confirmar.'), { statusCode: 409 });
+        }
+        const counter = await client.query("SELECT value FROM usage_counters WHERE tenant_id=$1 AND period=$2 AND metric='deliveries_confirmed' FOR UPDATE", [tenantId, period]);
+        usageValue = Math.max(Number(counter.rows[0]?.value ?? 0), Number(this.state.usageCountersByTenant?.[tenantId]?.[period]?.deliveries_confirmed ?? 0)) + 1;
+        const limit = limitsForTenant(this.state.tenants.find(item => item.id === tenantId)).includedDeliveries;
+        if (limit && usageValue > limit) throw Object.assign(new Error('Alcanzaste los domicilios incluidos en tu plan.'), { statusCode: 402, code: 'tenant_usage_limit_exceeded' });
+        await upsertOrder(client, tenantId, order, { strictVersion: true });
+        await upsertConversation(client, { ...conversation, ...conversationPatch });
+        const pending = await client.query("SELECT payload FROM pending_requests WHERE tenant_id=$1 AND conversation_id=$2 AND status='pending' FOR UPDATE", [tenantId, conversationId]);
+        for (const request of pending.rows) await upsertPendingRequest(client, { ...request.payload, status: 'resolved', resolvedAt: order.createdAt,
+          approverId: order.confirmedBy, resolution: 'manual_order_confirmed', resolvedOrderId: order.id });
+        for (const entry of entries) await insertOutboxEntry(client, entry);
+        await upsertUsageCounter(client, tenantId, period, 'deliveries_confirmed', usageValue);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally { client.release(); }
+      // No cache mutations or Google writes precede the successful commit.
+      // A live agent may have incremented the in-memory counter while this
+      // transaction awaited I/O. Its queued persistence must retain both orders.
+      usageValue = Math.max(usageValue, Number(this.state.usageCountersByTenant?.[tenantId]?.[period]?.deliveries_confirmed ?? 0) + 1);
+      applyManualOrderCommit(this.state, { ...commit, usageValue });
+      this.queueSave();
+      return { order, created: true };
+    }, 'manual order transaction');
   }
 
   persistCustomerProfile(tenantId, waId) {

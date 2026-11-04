@@ -23,6 +23,7 @@ import { createWhatsAppRouter } from './routes/whatsapp.js';
 import { createMercadoPagoRouter } from './routes/mercadoPago.js';
 import { createAdminRouter } from './routes/admin.js';
 import { OrderService } from './services/orderService.js';
+import { ManualOrderService } from './services/manualOrderService.js';
 import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js';
 import { IntegrationOutbox } from './services/integrationOutbox.js';
 
@@ -116,6 +117,7 @@ function createExpressRuntime({ config, store }) {
   });
   tools.setOutbox?.(integrationOutbox);
   const orders = new OrderService({ store, events, tools, outbox: integrationOutbox });
+  const manualOrders = new ManualOrderService({ store, events, tools, usage, outbox: integrationOutbox });
   const planner = new LLMPlanner({ store, events, usage, config });
   runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders });
   if (config.backgroundWorkersEnabled) {
@@ -173,7 +175,7 @@ function createExpressRuntime({ config, store }) {
   app.use('/api/billing', createBillingRouter({ controlPlane, auth }));
   app.use('/api/saas', createSaasRouter({ controlPlane, auth }));
   app.use('/api/admin', createAdminRouter({ store, usage, auth, controlPlane }));
-  app.use('/api', createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }));
+  app.use('/api', createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth }));
   app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane, config }));
   app.use('/webhooks', createMercadoPagoRouter({ controlPlane, store }));
 

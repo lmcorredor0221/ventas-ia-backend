@@ -2,7 +2,7 @@ import express from 'express';
 import { mergeTenantConfig, sanitizeOwnerConfigPatch } from '../services/tenantConfigPolicy.js';
 import { isClosedConversation } from '../domain/conversationStatus.js';
 
-export function createApiRouter({ store, events, runtime, tools, orders, controlPlane, usage, auth }) {
+export function createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth }) {
   const router = express.Router();
 
   router.get('/tenants', async (req, res, next) => {
@@ -51,6 +51,27 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     } catch (error) {
       next(error);
     }
+  });
+
+  router.get('/conversations/:id/manual-order', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada.' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
+      return res.json(await manualOrders.context(conversation.tenantId, conversation.id));
+    } catch (error) { next(error); }
+  });
+
+  router.post('/conversations/:id/manual-order', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada.' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
+      const result = await manualOrders.confirm(conversation.tenantId, conversation.id, req.body ?? {}, req.auth?.user?.id ?? 'local-owner');
+      if (result.created) auth.recordTenantAction(req, { tenantId: conversation.tenantId, action: 'order.manual_confirmed', resource: result.order.id,
+        metadata: { conversationId: conversation.id, subtotal: result.order.subtotal } });
+      return res.status(result.created ? 201 : 200).json(result);
+    } catch (error) { next(error); }
   });
 
   router.delete('/conversations/:id', async (req, res, next) => {
