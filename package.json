@@ -8,6 +8,7 @@
     "dev:google": "node scripts/run-with-env.mjs .env.google.local node ./node_modules/vite/bin/vite.js --host 127.0.0.1",
     "build:google": "node scripts/run-with-env.mjs .env.google.local node ./node_modules/vite/bin/vite.js build",
     "backend": "node server/index.js",
+    "start": "node server/index.js",
     "worker": "node server/worker.js",
     "keepalive": "node scripts/render-keepalive.mjs",
     "backend:google": "node scripts/run-with-env.mjs .env.google.local node server/index.js",
