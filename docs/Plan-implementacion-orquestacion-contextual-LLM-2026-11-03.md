@@ -1,12 +1,12 @@
 # Plan de implementación: orquestación contextual con LLM
 
 **Fecha:** 3 de noviembre de 2026  
-**Estado:** P1, P2, P3, P4, P5, P6 y P7 implementadas/validadas localmente en el worktree semántico; P8–P9 pendientes
+**Estado:** P1, P2, P3, P4, P5, P6 y P7 implementadas/validadas localmente; P8 ejecutada con fallos funcionales reproducibles; P9 pendiente
 **Checkpoint previo:** `7fd2c61` — `chore: checkpoint pilot docs and runtime tooling`  
-**Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `20a258e`  
+**Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `b09886e`
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
 
-**Última ejecución:** `b5d62e6` — `test: close human handoff continuity phase`. El trabajo está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
+**Última ejecución:** `b09886e` — `test: execute local meta deepseek e2e phase`. P8 ejecutó 40 casos sobre un clon PostgreSQL, con Meta simulada y DeepSeek real: 19 aprobados y 21 fallidos. El trabajo está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
@@ -152,7 +152,7 @@ Reglas del contrato:
 | P5 | Resolución de catálogo | Mantener búsqueda por tenant; diferenciar ambigüedad resoluble de no resoluble y conservar atributos/presentación | **Cerrada localmente** (`caaf7f0`) | Leche con calificativo ofrece opciones cuando procede; ambigüedad genérica escala; atributos y descripción quedan como evidencia |
 | P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | **Cerrada localmente** (`1c0da80`) | Carrera, retry secuencial y retry concurrente cubiertos; ninguna respuesta automática obsoleta se envía |
 | P7 | Humano y continuidad | Handoff explícito, bloqueo de IA mientras está activo y retorno controlado tras resolución | **Cerrada localmente** (commit `b5d62e6`, evidencia P7) | Handoff, pausa manual, confirmación en `preparing`, despacho/cierre, reanudación aprobada y nuevo caso validados |
-| P8 | Validación E2E | Reejecutar SuperMarket y matriz semántica con DeepSeek real y Meta simulada | Pendiente | Criterios de aceptación completos, sin tocar datos fuente |
+| P8 | Validación E2E | Reejecutar SuperMarket y matriz semántica con DeepSeek real y Meta simulada | **Ejecutada, no aprobada** (`b09886e`) | 40 casos ejecutados; 19 aprobados, 21 fallidos; fuente PostgreSQL inmutable; acuse máximo 48 ms; evidencia P8 |
 | P9 | Piloto controlado | Activación gradual por tenant y métrica; rollback por feature flag | Pendiente | Sin regresión de latencia, costo ni integridad |
 
 ### Orden recomendado de implementación
@@ -260,6 +260,7 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-03 | P1 instrumentación | Commit `85eec39` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; sin merge ni despliegue |
 | 2026-11-04 | P6 revalidación y outbox idempotente | Commit `1c0da80`, `docs/Evidencia-P6-revalidacion-outbox-2026-11-04.md`, `server/tests/response-revalidation.mjs`, `npm test` | Cerrado localmente; carrera y duplicados controlados; sin merge ni despliegue |
 | 2026-11-04 | P7 continuidad humana | Commit `b5d62e6`; `server/tests/human-continuity.mjs`, `docs/Evidencia-P7-continuidad-humana-2026-11-04.md`, `npm run test:architecture` | Validado localmente; la lógica ya existente cubre pausa, resolución, alistamiento, despacho y nuevo caso; sin merge ni despliegue |
+| 2026-11-04 | P8 E2E local Meta + DeepSeek | Commit `b09886e`; `server/tests/e2e-local-meta-deepseek.mjs`, `docs/Evidencia-P8-e2e-local-2026-11-04.md`, `npm test` | Ejecutados 40 casos con 96 llamadas reales a DeepSeek y 353.075 tokens; 19 aprobados, 21 fallidos. Meta/Graph/Google simulados; `ventas_ia_dev` sin cambios; no apto aún para P9 |
 | 2026-11-03 | P2 contrato semántico | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; `semantic-frame.v2`, sin merge ni despliegue |
 | 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. El lock distribuido queda pendiente de P9; la revalidación antes de enviar se cerró en P6 |
 | 2026-11-03 | P4 memoria y estado conversacional | Commit `546c04c`, `docs/Evidencia-P4-memoria-estado-conversacional-2026-11-03.md`, `server/tests/conversation-context.mjs` | Validado localmente: contrato v1, borrador versionado, cursor, pendientes y ofertas activas; sin merge ni despliegue |
@@ -267,5 +268,5 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 
 ### Próximo hito autorizado
 
-El siguiente hito es **P6 — revalidación y outbox**. Antes de fusionar o desplegar los commits semánticos, se debe comparar el diff completo contra la rama principal. P6 debe revalidar el cursor después de interpretar y antes de enviar, suprimir respuestas obsoletas y conservar idempotencia sin romper la continuidad del checkout.
+El siguiente hito es **P9 — corrección y regresión controlada**. Debe corregir la resolución contextual de variantes y categorías que falló en P8, separar fallos de redacción de fallos funcionales, reejecutar los casos afectados sobre un clon nuevo y volver a evaluar el umbral de aceptación. No se debe fusionar ni desplegar mientras P8 siga en 19/40.
 
