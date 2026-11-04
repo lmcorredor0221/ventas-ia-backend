@@ -1,10 +1,12 @@
 # Plan de implementación: orquestación contextual con LLM
 
 **Fecha:** 3 de noviembre de 2026  
-**Estado:** plan documentado; implementación funcional aún no iniciada  
+**Estado:** P1 implementada en el worktree semántico; P2–P9 pendientes  
 **Checkpoint previo:** `7fd2c61` — `chore: checkpoint pilot docs and runtime tooling`  
 **Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `20a258e`  
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
+
+**Última ejecución:** `85eec39` — `feat: instrument contextual conversation decisions`. Este commit está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
@@ -143,7 +145,7 @@ Reglas del contrato:
 | Fase | Objetivo | Cambios principales | Estado | Criterio de salida |
 |---|---|---|---|---|
 | P0 | Punto de recuperación | Commit de documentación, evidencias y herramientas existentes | **Cerrada** | `7fd2c61`, build y arquitectura aprobados |
-| P1 | Instrumentación sin cambiar conducta | Registrar batch, cursor, latencia, tokens, decisión LLM, override, resolución y respuesta suprimida | Pendiente | Telemetría comparable en pruebas locales |
+| P1 | Instrumentación sin cambiar conducta | Registrar contexto base, decisión LLM, override y consumo separado del compositor | **Cerrada en worktree semántico** (`85eec39`) | Prueba `server/tests/contextual-observability.mjs` y contratos de arquitectura aprobados |
 | P2 | Contrato semántico | Formalizar `semantic-frame.v2`, delta/snapshot, `replyTo`, propuesta de acción y confianza | Pendiente | Validación de esquema y compatibilidad con `semantic-frame.v1` |
 | P3 | Consolidación de ráfagas | Implementar lease por conversación y ventana corta/adaptativa; no esperar indefinidamente | Pendiente | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden |
 | P4 | Memoria y estado | Separar contexto estable, borrador versionado, pregunta pendiente, ofertas activas y cursor de mensajes | Pendiente | Corrección de nombre/dirección/productos/pago en mensajes separados |
@@ -255,8 +257,9 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-03 | Verificación de baseline | `npm run build`; `npm run test:architecture` | Aprobados |
 | 2026-11-03 | Checkpoint antes de implementar | Commit `7fd2c61` | Cerrado; sin cambios funcionales del plan |
 | 2026-11-03 | Plan y tablero documentados | Este documento | Cerrado; listo para revisión/ejecución por fases |
+| 2026-11-03 | P1 instrumentación | Commit `85eec39` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; sin merge ni despliegue |
 
 ### Próximo hito autorizado
 
-Implementar **P1 — instrumentación sin cambio de conducta**. La salida esperada es una telemetría comparable del flujo actual, sin consolidar todavía mensajes ni cambiar la respuesta del agente. Si P1 no permite observar cursor, batch, decisión LLM y override, no se debe avanzar a P3.
+El siguiente hito es **P2 — contrato semántico `v2`**. Antes de fusionar o desplegar `85eec39`, se debe comparar el diff completo contra la rama principal y ejecutar la validación de compatibilidad. P3 (consolidación de mensajes) no debe comenzar hasta que P2 formalice `delta` frente a `snapshot`, `replyTo`, versión del borrador y acción propuesta.
 
