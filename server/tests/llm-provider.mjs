@@ -92,7 +92,14 @@ try {
       provider: 'whatsapp',
     },
     customerProfile: null,
-    conversation: null,
+    conversation: {
+      status: 'live',
+      stage: 'clarification',
+      messages: [
+        { id: 'msg-history-1', role: 'user', text: 'Me llamo Luis', createdAt: '2026-11-04T12:00:00Z' },
+        { id: 'msg-history-2', role: 'assistant', text: '¿Qué productos necesitas?', createdAt: '2026-11-04T12:00:02Z' },
+      ],
+    },
   });
 
   assert.equal(capturedUrl, 'https://api.deepseek.com/chat/completions');
@@ -105,7 +112,9 @@ try {
   assert.equal(body.temperature, 0);
   assert.equal(body.max_tokens, 900);
   assert.deepEqual(body.response_format, { type: 'json_object' });
-  assert.ok(body.messages[1].content.includes('semantic-frame.v1'));
+  assert.ok(body.messages[1].content.includes('semantic-frame.v2'));
+  assert.ok(body.messages[1].content.includes('greeting'));
+  assert.ok(body.messages[1].content.includes('Me llamo Luis'));
   assert.equal(body.messages[1].content.includes('catalogHints'), false);
 
   assert.equal(plan.executionMode, 'provider_api');
@@ -150,6 +159,21 @@ try {
       aliases: product.aliases,
     }));
   });
+
+  const greetingPlan = await planner.plan({
+    tenantId: 'andina',
+    conversationId: 'conv-llm-greeting',
+    normalized: {
+      text: 'Buenas veci',
+      waId: '573001112233',
+      provider: 'whatsapp',
+    },
+    customerProfile: null,
+    conversation: null,
+  });
+  assert.equal(greetingPlan.intent, 'greeting');
+  assert.equal(greetingPlan.order.items.length, 0);
+  assert.deepEqual(greetingPlan.toolPlan, []);
 
   const simulatedPlan = await planner.plan({
     tenantId: 'andina',

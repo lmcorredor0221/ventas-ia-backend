@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { platformLlmConfig } from './platformService.js';
 import { semanticFrameFromPlan, semanticFrameToLegacyPlan } from '../domain/semanticContracts.js';
+import { SemanticInterpreter } from './semanticInterpreter.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -75,76 +76,67 @@ export class LLMPlanner {
     this.events = events;
     this.usage = usage;
     this.config = config;
+    this.interpreter = new SemanticInterpreter({
+      provider: (input) => this.generateProviderPlan(input),
+      fallback: (input) => this.generateFallbackPlan(input),
+      normalize: (plan, context) => semanticFrameFromPlan(plan, context),
+      onFallback: ({ input, error }) => {
+        this.events.emit({
+          type: 'llm.plan.fallback',
+          tenantId: input.tenantId,
+          conversationId: input.conversationId,
+          detail: `${input.context?.provider ?? 'llm'} unavailable: ${error.message}`,
+          metadata: {
+            provider: input.context?.provider ?? null,
+            model: input.context?.config?.model ?? null,
+            simulator: input.context?.config?.simulator ?? null,
+          },
+        });
+      },
+    });
   }
 
   async plan({ tenantId, conversationId, normalized, customerProfile, conversation }) {
     const startedAt = Date.now();
-    const tenant = await this.getTenant(tenantId);
-    const platformConfig = platformLlmConfig(this.store.getState());
-    const config = {
-      timeoutMs: this.config?.llmRequestTimeoutMs,
-      maxTokens: this.config?.llmMaxTokens,
-      ...platformConfig,
-      responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
-      tone: tenant?.config?.agentPolicy?.tone,
-    };
-    if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
-    const products = await this.listProducts(tenantId);
+    const context = await this.getPlannerContext(tenantId);
     const text = normalized.text ?? '';
-    const provider = config.provider ?? 'deepseek';
-    let executionMode = 'mock_structured_fallback';
-    let parsed;
-    let providerMetadata = null;
-    try {
-      if (provider === 'deepseek' && config.simulator === 'codex_cli') {
-        const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) });
-        parsed = {
-          ...cliResult.plan,
-          simulatedBy: 'codex_cli',
-          simulationScope: 'desktop_test_only',
-          reasoningNotes: buildCodexReasoningNotes({ text, plan: cliResult.plan, customerProfile }),
-        };
-        providerMetadata = cliResult.providerMetadata;
-        executionMode = 'codex_cli_simulated_deepseek';
-      } else if (provider === 'deepseek' && config.simulator === 'codex') {
-        parsed = this.codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products });
-        providerMetadata = { simulated: true, simulator: 'codex' };
-        executionMode = 'codex_simulated_deepseek';
-      } else {
-        const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
-        parsed = apiResult.plan;
-        providerMetadata = apiResult.providerMetadata;
-        executionMode = 'provider_api';
-      }
-    } catch (error) {
-      parsed = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
-      executionMode = provider === 'mock' ? 'mock_structured' : 'mock_structured_fallback';
+    const interpretation = await this.interpreter.interpret({
+      tenantId,
+      conversationId,
+      normalized,
+      text,
+      customerProfile,
+      conversation,
+      context,
+    });
+    // Solo el frame saneado cruza hacia el orquestador. El resultado crudo del
+    // proveedor no puede transportar SKU, precio, stock ni toolPlan.
+    const semanticFrame = interpretation.semanticFrame;
+    const compatiblePlan = semanticFrameToLegacyPlan(semanticFrame);
+    const coerced = coercePlanWithConversation(compatiblePlan, { text, conversation });
+    if (coerced.intent !== compatiblePlan.intent) {
       this.events.emit({
-        type: 'llm.plan.fallback',
+        type: 'llm.context.override',
         tenantId,
         conversationId,
-        detail: `${provider} unavailable: ${error.message}`,
-        metadata: { provider, model: config.model, simulator: config.simulator },
+        detail: `Compatibility guard changed ${compatiblePlan.intent} to ${coerced.intent}`,
+        metadata: {
+          llmIntent: compatiblePlan.intent,
+          finalIntent: coerced.intent,
+          reason: 'legacy_compatibility_guard',
+          messageId: normalized.messageId ?? null,
+        },
       });
     }
-    // El modelo interpreta lenguaje y conserva la incertidumbre. La ruta que
-    // decide catalogo, precio, stock y herramientas recibe un adaptador sin
-    // SKU ni filtros sugeridos por el modelo.
-    const semanticFrame = semanticFrameFromPlan(parsed, {
-      text,
-      messageId: normalized.messageId,
-      conversation,
-    });
-    const compatiblePlan = semanticFrameToLegacyPlan(semanticFrame, { sourcePlan: parsed });
-    const coerced = coercePlanWithConversation(compatiblePlan, { text, conversation });
     const enriched = enrichPlannerOutput(coerced, text);
     const plan = {
       schemaVersion: 'ventas-ia-llm-plan.v2',
-      provider,
-      model: config.model ?? defaultModel(provider),
-      mode: config.mode ?? 'json_schema',
-      executionMode,
+      provider: context.provider,
+      model: context.config.model ?? defaultModel(context.provider),
+      mode: context.config.mode ?? 'json_schema',
+      executionMode: interpretation.executionMode,
       confidence: enriched.confidence,
+      ...(interpretation.diagnostics ?? {}),
       ...enriched,
       semanticFrame: {
         ...semanticFrame,
@@ -162,20 +154,102 @@ export class LLMPlanner {
         recommendedTools: plan.recommendedTools,
         missingFields: plan.missingFields,
         semanticFrameVersion: plan.semanticFrame?.schemaVersion,
-        providerMetadata,
-        durationMs: Date.now() - startedAt,
+        providerMetadata: interpretation.providerMetadata,
+        durationMs: interpretation.durationMs ?? Date.now() - startedAt,
+      },
+    });
+    this.events.emit({
+      type: 'llm.interpretation.created',
+      tenantId,
+      conversationId,
+      detail: `${semanticFrame.intent} contextual frame created`,
+      metadata: {
+        schemaVersion: semanticFrame.schemaVersion,
+        confidence: semanticFrame.confidence,
+        itemCount: semanticFrame.items?.length ?? 0,
+        customerFieldsPresent: Object.entries(semanticFrame.customerDelta ?? {})
+          .filter(([, value]) => value !== null && value !== undefined && value !== '')
+          .map(([key]) => key),
+        executionMode: interpretation.executionMode,
+        providerMetadata: interpretation.providerMetadata,
+        durationMs: interpretation.durationMs ?? Date.now() - startedAt,
       },
     });
     this.usage?.recordLlmPlan(tenantId, {
-      providerMetadata,
+      providerMetadata: interpretation.providerMetadata,
       inputText: text,
       outputPlan: plan,
-      executionMode,
+      executionMode: interpretation.executionMode,
       conversationId,
       stage: 'planner',
       durationMs: Date.now() - startedAt,
     });
     return plan;
+  }
+
+  async getPlannerContext(tenantId) {
+    const tenant = await this.getTenant(tenantId);
+    const platformConfig = platformLlmConfig(this.store.getState());
+    const config = {
+      timeoutMs: this.config?.llmRequestTimeoutMs,
+      maxTokens: this.config?.llmMaxTokens,
+      ...platformConfig,
+      responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
+      tone: tenant?.config?.agentPolicy?.tone,
+      assistantName: tenant?.config?.agentPolicy?.assistantName ?? 'Rocío',
+    };
+    if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
+    return { tenant, config, provider: config.provider ?? 'deepseek' };
+  }
+
+  async generateProviderPlan({ tenantId, text, customerProfile, conversation, context }) {
+    const { config, provider } = context;
+    // Catalog data is an internal compatibility dependency for the local
+    // simulator/fallback only. It is not part of the interpreter contract or
+    // the production provider prompt.
+    const products = await this.listProducts(tenantId);
+    if (provider === 'deepseek' && config.simulator === 'codex_cli') {
+      const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) });
+      return {
+        plan: {
+          ...cliResult.plan,
+          simulatedBy: 'codex_cli',
+          simulationScope: 'desktop_test_only',
+          reasoningNotes: buildCodexReasoningNotes({ text, plan: cliResult.plan, customerProfile }),
+        },
+        providerMetadata: cliResult.providerMetadata,
+        executionMode: 'codex_cli_simulated_deepseek',
+        diagnostics: {
+          simulatedBy: 'codex_cli',
+          simulationScope: 'desktop_test_only',
+          reasoningNotes: buildCodexReasoningNotes({ text, plan: cliResult.plan, customerProfile }),
+        },
+      };
+    }
+    if (provider === 'deepseek' && config.simulator === 'codex') {
+      const parsed = this.codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products });
+      return {
+        plan: parsed,
+        providerMetadata: { simulated: true, simulator: 'codex' },
+        executionMode: 'codex_simulated_deepseek',
+        diagnostics: {
+          simulatedBy: 'codex',
+          simulationScope: 'desktop_test_only',
+          reasoningNotes: buildCodexReasoningNotes({ text, plan: parsed, customerProfile }),
+        },
+      };
+    }
+    const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
+    return { plan: apiResult.plan, providerMetadata: apiResult.providerMetadata, executionMode: 'provider_api' };
+  }
+
+  async generateFallbackPlan({ tenantId, text, customerProfile, conversation, context }) {
+    const products = await this.listProducts(tenantId);
+    return {
+      plan: this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products }),
+      providerMetadata: null,
+      executionMode: context.provider === 'mock' ? 'mock_structured' : 'mock_structured_fallback',
+    };
   }
 
   async apiStructuredParse({ text, customerProfile, conversation, config, products }) {
@@ -198,6 +272,7 @@ export class LLMPlanner {
       ...platformConfig,
       responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
       tone: tenant?.config?.agentPolicy?.tone ?? 'tendero_colombiano',
+      assistantName: tenant?.config?.agentPolicy?.assistantName ?? 'Rocío',
     };
     if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
     const provider = config.provider ?? 'deepseek';
@@ -256,6 +331,26 @@ export class LLMPlanner {
 
   mockStructuredParse({ tenantId, text, customerProfile, conversation, products: providedProducts }) {
     const normalized = normalize(text);
+
+    if (isGreetingOnly(normalized)) {
+      return {
+        intent: 'greeting',
+        order: { delivery: false, items: [] },
+        recommendedTools: ['whatsapp_business_messaging'],
+        missingFields: [],
+        confidence: 0.96,
+      };
+    }
+
+    if (isGeneralConversationQuestion(normalized)) {
+      return {
+        intent: 'general_query',
+        order: { delivery: false, items: [] },
+        recommendedTools: ['whatsapp_business_messaging'],
+        missingFields: [],
+        confidence: 0.86,
+      };
+    }
 
     if (conversation?.orderDraft && isRemovalRequest(normalized)) {
       return {
@@ -789,17 +884,19 @@ function looksLikeNewOrder(text) {
 function buildPlannerPrompt({ text, customerProfile, conversation, config = {} }) {
   return [
     'Eres el interprete semantico de un agente comercial por WhatsApp.',
-    'Devuelve solo JSON valido con el contrato semantic-frame.v1: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, confidence.',
+    'Devuelve solo JSON valido con el contrato semantic-frame.v2: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, replyTo, messageInterpretations, cartMutation, collectionComplete, proposedAction, ambiguities, confidence y reasoningSummary.',
     'No incluyas markdown, explicaciones ni texto fuera del JSON.',
-    'Intents permitidos: delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
+    'Intents permitidos: greeting, general_query, delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     `Contexto cultural de interpretacion: ${normalizeVoiceProfile(config.tone)}. Interpreta modismos colombianos, errores de escritura probables, marcas incompletas, cantidades, sabores, ocasiones y senales como personal, familiar, grande o para compartir.`,
     'Cada items[] debe contener rawText literal, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. No elimines ningun producto mencionado.',
     'rawText conserva exactamente lo solicitado. productHypothesis es una hipotesis, nunca un SKU. presentationSignal puede ser una medida explicita o una senal contextual, nunca una referencia comercial definitiva.',
     'customerDelta solo puede incluir name, address y paymentPreference expresamente comunicados por el cliente. No inventes datos.',
     'No incluyas SKU, precio, stock, subtotal, candidatos de catalogo, aliases, toolPlan, filtros, herramientas, recommendedTools ni una eleccion final de producto.',
     'No asumas disponibilidad. Si el termino es incierto, conserva rawText, plantea la mejor hipotesis y baja confidence o explica ambiguity.',
+    'replyTo solo debe referenciar los messageId recibidos en este turno; messageInterpretations debe explicar cada mensaje de la rafaga en una etiqueta breve. cartMutation.mode es delta salvo que el cliente reconstruya explicitamente todo el pedido. proposedAction es una propuesta, no una herramienta ni un hecho comercial. reasoningSummary debe ser una sola frase breve, sin cadena de pensamiento privada.',
+    'Si el cliente solo saluda (por ejemplo hola, buenas, buenas tardes, hola veci) usa greeting y no busques productos. Si hace una pregunta general sobre la tienda sin pedir productos usa general_query.',
     'Si el cliente pregunta "tiene", "hay" o "maneja", usa catalog_query aunque mencione productos concretos. Si reclama un faltante, entrega equivocada, demora o dano, usa human_handoff.',
-    'Sin domicilio, cantidad, presupuesto ni una accion directa de compra (por ejemplo "me manda" o "me regala"), una consulta abierta como "me colabora con mecato" o "jabon para lavar ropa" usa catalog_query; no pidas pago para una consulta.',
+    'Sin domicilio, cantidad, presupuesto ni una accion directa de compra, una consulta abierta como "me colabora con mecato" o "jabon para lavar ropa" usa catalog_query; no pidas pago para una consulta. Expresiones como "necesito arroz, aceite y huevos", "quiero llevar X", "me haces un mercado" o una lista de productos solicitada para comprar son accion directa de compra y usan delivery_order aunque el cliente todavía no haya dicho domicilio o cantidades; en ese caso conserva los items y marca los campos faltantes.',
     'Si el cliente pide "5000 de X", usa budgetAmount 5000; no lo conviertas en 5000 unidades.',
     JSON.stringify({
       text,
@@ -809,6 +906,7 @@ function buildPlannerPrompt({ text, customerProfile, conversation, config = {} }
         preferredPaymentMethod: customerProfile.preferences?.preferredPaymentMethod ?? null,
       } : null,
       existingOrder: semanticOrderContext(conversation?.orderDraft),
+      conversationContext: semanticConversationContext(conversation),
     }),
   ].join('\n');
 }
@@ -830,12 +928,31 @@ function semanticOrderContext(draft) {
   };
 }
 
+function semanticConversationContext(conversation) {
+  if (!conversation) return null;
+  const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+  return {
+    status: conversation.status ?? null,
+    stage: conversation.stage ?? null,
+    zone: conversation.zone ?? null,
+    nextStep: conversation.nextStep ?? null,
+    lastTool: conversation.lastTool ?? null,
+    recentMessages: messages.slice(-12).map((message) => ({
+      id: message.id ?? null,
+      role: message.role ?? null,
+      text: String(message.text ?? '').slice(0, 600),
+      createdAt: message.createdAt ?? null,
+    })),
+  };
+}
+
 function buildReplyPrompt({ facts, fallbackText, config }) {
   const requiredTerms = replyRequiredTerms(facts, fallbackText);
   return [
     'Redacta la respuesta final para un comprador de una tienda colombiana por WhatsApp.',
     'Devuelve solo JSON valido con la propiedad reply.',
     `Perfil de voz: ${normalizeVoiceProfile(config.tone)}. Usa cercania colombiana solo si encaja; nunca caricaturices ni repitas muletillas.`,
+    `Nombre del asistente de esta tienda: ${String(config.assistantName ?? 'Rocío').trim() || 'Rocío'}. Preséntalo solo cuando el contexto lo requiera; no lo inventes ni lo repitas en cada mensaje.`,
     'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
     'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
     'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
@@ -891,7 +1008,7 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
     'Eres un planner de pedidos por WhatsApp para una tienda de barrio en Colombia.',
     'Tu tarea es inferir heurísticamente la canasta: corrige errores ortográficos probables, modismos, marcas incompletas, presentaciones, cantidades y pedidos por valor.',
     'No confirmes disponibilidad ni propongas herramientas: solo interpreta lenguaje.',
-    'Contrato JSON semantic-frame.v1: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, confidence.',
+    'Contrato JSON semantic-frame.v2: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, replyTo, messageInterpretations, cartMutation, collectionComplete, proposedAction, ambiguities, confidence y reasoningSummary.',
     'Para cada item usa rawText original, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. Trata familiar, personal y grande como hipotesis contextuales, no como medidas fijas.',
     'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
@@ -901,6 +1018,7 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
       text,
       customerProfile,
       existingOrder: semanticOrderContext(conversation?.orderDraft),
+      conversationContext: semanticConversationContext(conversation),
     }),
   ].join('\n');
 }
@@ -1159,7 +1277,7 @@ async function callGeminiReply({ config, apiKey, prompt }) {
 }
 
 function normalizeProviderPlan(plan) {
-  if (plan?.schemaVersion === 'semantic-frame.v1' || Array.isArray(plan?.items)) return plan;
+  if (['semantic-frame.v1', 'semantic-frame.v2'].includes(plan?.schemaVersion) || Array.isArray(plan?.items)) return plan;
   const customerUnderstanding = normalizeCustomerUnderstanding(plan.customerUnderstanding);
   const intent = normalizeProviderIntent(plan.intent);
   return enrichPlannerOutput({
@@ -1245,6 +1363,31 @@ function isPaymentProofOrConfirmation(text) {
     'pagado',
     'recibo',
     'soporte',
+  ]);
+}
+
+function isGreetingOnly(text) {
+  const normalized = normalize(text);
+  if (!normalized) return false;
+  if (looksLikePurchaseRequest(normalized) || isAvailabilityOrOptionsQuestion(normalized)) return false;
+  const greeting = /^(hola|holi|buenas|buenos dias|buenas tardes|buenas noches|hey|hello|que tal|como estas|como va|hola veci|buenas veci|hola vecino|hola vecina)(?:\s+(?:veci|vecino|vecina|amigo|amiga))?[.!?]*$/;
+  return greeting.test(normalized);
+}
+
+function isGeneralConversationQuestion(text) {
+  const normalized = normalize(text);
+  if (!normalized || isGreetingOnly(normalized)) return false;
+  if (looksLikePurchaseRequest(normalized) || isAvailabilityOrOptionsQuestion(normalized)) return false;
+  return containsAny(normalized, [
+    'como funciona',
+    'cual es el horario',
+    'cuales son los horarios',
+    'donde estan',
+    'donde queda',
+    'hacen domicilios',
+    'cuanto demora el domicilio',
+    'medios de pago',
+    'formas de pago',
   ]);
 }
 

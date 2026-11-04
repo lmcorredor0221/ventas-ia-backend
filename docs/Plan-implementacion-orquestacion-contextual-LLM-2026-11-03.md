@@ -1,18 +1,36 @@
 # Plan de implementación: orquestación contextual con LLM
 
 **Fecha:** 3 de noviembre de 2026  
-**Estado:** P1, P2, P3, P4, P5, P6 y P7 implementadas/validadas localmente; P8 ejecutada con fallos funcionales reproducibles; P9 pendiente
+**Estado:** P1, P2, P3, P4, P5, P6 y P7 implementadas/validadas; integración selectiva sobre la rama operativa completada; P8/P9 cerradas con replay E2E local 40/40; P9 de producción/piloto controlado pendiente
 **Checkpoint previo:** `7fd2c61` — `chore: checkpoint pilot docs and runtime tooling`  
 **Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `b09886e`
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
 
-**Última ejecución:** `b09886e` — `test: execute local meta deepseek e2e phase`. P8 ejecutó 40 casos sobre un clon PostgreSQL, con Meta simulada y DeepSeek real: 19 aprobados y 21 fallidos. El trabajo está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
+**Última ejecución:** `20261104152951_d4af6f21` — replay P9 sobre un clon PostgreSQL, con Meta simulada y DeepSeek real: 40/40 casos aprobados, 181 llamadas y 112.025 tokens. La fuente `ventas_ia_dev` quedó intacta. Aún no se ha hecho commit, push ni despliegue de estos cambios.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
+## Seguimiento de integración — 4 de noviembre de 2026
+
+La rama operativa `codex/backend-plan-payload-20261020` y el worktree `codex/integracion-semantica-20261103` no comparten ancestro Git (`git merge-base` no devuelve una base común) y difieren ampliamente. Por eso no se hizo una fusión masiva: habría riesgo de borrar archivos y cambios operativos que no pertenecen a este plan.
+
+Se integró de forma selectiva y compatible:
+
+- `server/services/semanticInterpreter.js` establece una frontera explícita: recibe el contexto lingüístico, ejecuta el proveedor o fallback y entrega únicamente un `semantic-frame.v2` saneado. SKU, precio, stock y `toolPlan` no cruzan esa frontera.
+- `LLMPlanner` conserva la API `plan()` utilizada por el runtime, pero delega la interpretación al nuevo componente. El acceso al catálogo queda como dependencia interna del simulador/fallback local; el prompt del proveedor real no recibe el catálogo ni hechos comerciales.
+- `greeting` y `general_query` son intenciones formales. Ya no se envía un saludo a búsqueda de catálogo; el runtime responde conversacionalmente y deja la siguiente necesidad para el cliente.
+- `agentPolicy.assistantName` queda aislado por tenant, editable por el propietario dentro de la política permitida y disponible para el saludo y el compositor; el valor por defecto es `Rocío`.
+- Se registran `llm.interpretation.created` y `llm.context.override`. El segundo hace visible cualquier guardia de compatibilidad que cambie la intención del LLM; no se oculta la sustitución.
+- Se añadieron contratos automatizados para la frontera del intérprete y la clasificación de saludos. `npm run test:architecture` queda como verificación de regresión.
+- Se añadió consolidación corta opt-in en el worker: `WHATSAPP_INBOUND_BATCHING_ENABLED=true`, ventana máxima configurable y límite de mensajes configurable. Agrupa únicamente texto del mismo tenant, número y cliente; botones, multimedia y coexistencia siguen su ruta inmediata. Los mensajes se conservan individualmente en `inbound_messages` y comparten el resultado de la ejecución.
+- La coordinación de esa ventana usa un lock local y, cuando el almacenamiento PostgreSQL está activo, un lease distribuido en `inbound_batch_leases`; el worker libera el lease al terminar y reintenta mediante la outbox si otra instancia lo posee. En JSON la protección sigue siendo local al proceso.
+- Las respuestas automáticas pasan por una revalidación de cursor antes del envío: si la conversación avanzó o existe un inbound posterior aún pendiente, se emite `llm.response.suppressed` y no se envía una respuesta obsoleta. Los mensajes humanos mantienen su ruta independiente.
+
+La matriz E2E y la revalidación de cursor ya fueron validadas sobre esta base. El contrato `delta/snapshot`, el lease PostgreSQL, la revalidación de cursor y la selección contextual de candidatos quedan cubiertos localmente. El despliegue/piloto sigue separado: requiere revisión del diff, commit, push, build de release, configuración de secretos y activación gradual por tenant.
+
 ## 1. Resultado de la revisión actual
 
-La separación semántica ya existe parcialmente: `llmPlanner.js` produce un `semantic-frame.v1`, `semanticContracts.js` resuelve candidatos del catálogo y `agentRuntime.js` conserva el carrito, el checkout y el handoff humano. El problema pendiente no es incorporar otro agente, sino evitar que el runtime fragmente mensajes consecutivos o reemplace silenciosamente la interpretación del LLM con correcciones heurísticas.
+La separación semántica ya existe parcialmente: `llmPlanner.js` produce un `semantic-frame.v2`, `semanticContracts.js` resuelve candidatos del catálogo y `agentRuntime.js` conserva el carrito, el checkout y el handoff humano. El problema pendiente no es incorporar otro agente, sino evitar que el runtime fragmente mensajes consecutivos o reemplace silenciosamente la interpretación del LLM con correcciones heurísticas.
 
 ### Brechas verificadas
 
@@ -146,14 +164,14 @@ Reglas del contrato:
 |---|---|---|---|---|
 | P0 | Punto de recuperación | Commit de documentación, evidencias y herramientas existentes | **Cerrada** | `7fd2c61`, build y arquitectura aprobados |
 | P1 | Instrumentación sin cambiar conducta | Registrar contexto base, decisión LLM, override y consumo separado del compositor | **Cerrada en worktree semántico** (`85eec39`) | Prueba `server/tests/contextual-observability.mjs` y contratos de arquitectura aprobados |
-| P2 | Contrato semántico | Formalizar `semantic-frame.v2`, delta/snapshot, `replyTo`, propuesta de acción y confianza | **Cerrada en worktree semántico** (`8611180`) | Contratos semánticos, proveedor, escenarios Colombia y arquitectura aprobados |
-| P3 | Consolidación de ráfagas | Ventana corta opt-in, agrupación por tenant/número/cliente, preservación de mensajes y bypass de interacciones | **Cerrada local en worker de una instancia** (`d0711e3`) | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden; botones/media no esperan; retry queda disponible; la revalidación de respuestas quedó cerrada en P6 |
+| P2 | Contrato semántico | Formalizar `semantic-frame.v2`, delta/snapshot, `replyTo`, propuesta de acción y confianza | **Integrada selectivamente en la rama operativa** | Contrato saneado, compatibilidad v1 de lectura, proveedor y pruebas de arquitectura aprobadas |
+| P3 | Consolidación de ráfagas | Ventana corta opt-in, agrupación por tenant/número/cliente, preservación de mensajes y bypass de interacciones | **Integrada y validada con smoke PostgreSQL aislado** | 2–5 mensajes consecutivos generan una sola interpretación; varias instancias no procesan simultáneamente la misma clave; botones/media no esperan; retry queda disponible |
 | P4 | Memoria y estado | Separar contexto estable, borrador versionado, pregunta pendiente, ofertas activas y cursor de mensajes | **Cerrada localmente** (`546c04c`) | Contrato `conversation-context.v1`, borrador versionado, cursor y ofertas activas validados |
 | P5 | Resolución de catálogo | Mantener búsqueda por tenant; diferenciar ambigüedad resoluble de no resoluble y conservar atributos/presentación | **Cerrada localmente** (`caaf7f0`) | Leche con calificativo ofrece opciones cuando procede; ambigüedad genérica escala; atributos y descripción quedan como evidencia |
-| P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | **Cerrada localmente** (`1c0da80`) | Carrera, retry secuencial y retry concurrente cubiertos; ninguna respuesta automática obsoleta se envía |
+| P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | **Integrada selectivamente en la rama operativa** | Contrato local cubre cursor avanzado; falta validar replay E2E y completar deduplicación de respuesta en outbox |
 | P7 | Humano y continuidad | Handoff explícito, bloqueo de IA mientras está activo y retorno controlado tras resolución | **Cerrada localmente** (commit `b5d62e6`, evidencia P7) | Handoff, pausa manual, confirmación en `preparing`, despacho/cierre, reanudación aprobada y nuevo caso validados |
-| P8 | Validación E2E | Reejecutar SuperMarket y matriz semántica con DeepSeek real y Meta simulada | **Ejecutada, no aprobada** (`b09886e`) | 40 casos ejecutados; 19 aprobados, 21 fallidos; fuente PostgreSQL inmutable; acuse máximo 48 ms; evidencia P8 |
-| P9 | Piloto controlado | Activación gradual por tenant y métrica; rollback por feature flag | Pendiente | Sin regresión de latencia, costo ni integridad |
+| P8 | Validación E2E | Reejecutar SuperMarket y matriz semántica con DeepSeek real y Meta simulada | **Cerrada localmente** | 40/40 casos aprobados; fuente PostgreSQL inmutable; Meta simulada; DeepSeek real; acuse p95 16 ms y worker p95 5.132 ms |
+| P9 | Piloto controlado | Activación gradual por tenant y métrica; rollback por feature flag | **Pendiente de release** | Revisión del diff, commit/push, despliegue controlado y validación del tenant demo |
 
 ### Orden recomendado de implementación
 
@@ -261,6 +279,12 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-04 | P6 revalidación y outbox idempotente | Commit `1c0da80`, `docs/Evidencia-P6-revalidacion-outbox-2026-11-04.md`, `server/tests/response-revalidation.mjs`, `npm test` | Cerrado localmente; carrera y duplicados controlados; sin merge ni despliegue |
 | 2026-11-04 | P7 continuidad humana | Commit `b5d62e6`; `server/tests/human-continuity.mjs`, `docs/Evidencia-P7-continuidad-humana-2026-11-04.md`, `npm run test:architecture` | Validado localmente; la lógica ya existente cubre pausa, resolución, alistamiento, despacho y nuevo caso; sin merge ni despliegue |
 | 2026-11-04 | P8 E2E local Meta + DeepSeek | Commit `b09886e`; `server/tests/e2e-local-meta-deepseek.mjs`, `docs/Evidencia-P8-e2e-local-2026-11-04.md`, `npm test` | Ejecutados 40 casos con 96 llamadas reales a DeepSeek y 353.075 tokens; 19 aprobados, 21 fallidos. Meta/Graph/Google simulados; `ventas_ia_dev` sin cambios; no apto aún para P9 |
+| 2026-11-04 | Integración selectiva P2/P3 | `semantic-frame.v2`, `inbound_batch_leases`, `WHATSAPP_INBOUND_BATCH_LEASE_MS`, contratos de interpretación y batching | Código integrado; smoke PostgreSQL aprobado en `ventas_ia_contract_20261104`; `ventas_ia_dev` quedó intacta; E2E DeepSeek pendiente | Sin commit, push ni despliegue en esta etapa |
+| 2026-11-04 | Integración selectiva P6 | `sendCustomerMessage`, evento `llm.response.suppressed`, `server/tests/response-revalidation-contract.mjs` | Respuesta obsoleta suprimida localmente; falta replay E2E con ráfaga/concurrencia | Sin commit, push ni despliegue en esta etapa |
+| 2026-11-04 | Preflight P9 E2E | `docs/Evidencia-P9-preflight-e2e-2026-11-04.md`, `.env.e2e.local.example`, `server/tests/e2e-local-deepseek-40.mjs` | Bloqueado de forma segura: falta `.env.e2e.local` y `DEEPSEEK_API_KEY`; no se simuló DeepSeek ni se alteró la base local | Requiere configurar la clave local fuera del chat y ejecutar `npm run test:e2e:local` |
+| 2026-11-04 | Replay P9 inicial con DeepSeek real | `test-results/e2e-local/20261104135036_4c2986fd/` | 40/40 casos ejecutados; 38 aprobados, 2 brechas identificadas; fuente intacta | Correcciones focalizadas requeridas |
+| 2026-11-04 | Corrección focalizada P9 | `server/services/llmPlanner.js`, `server/services/agentRuntime.js`, `server/tests/e2e-local-deepseek-40.mjs` | Se corrigió la clasificación de listas de compra, la comparación semántica de campos faltantes y el ranking contextual de categorías amplias; la lógica no fija productos concretos | Replay completo ejecutado |
+| 2026-11-04 | Replay P9 final | `docs/Evidencia-P9-e2e-deepseek-2026-11-04.md`, `test-results/e2e-local/20261104152951_d4af6f21/` | 40/40 aprobados; 181 llamadas DeepSeek, 112.025 tokens; p95 acuse 16 ms, p95 worker 5.132 ms; flujo de tendero y nuevo pedido posterior aprobados | P9 local cerrada; falta release/piloto controlado |
 | 2026-11-03 | P2 contrato semántico | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; `semantic-frame.v2`, sin merge ni despliegue |
 | 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. El lock distribuido queda pendiente de P9; la revalidación antes de enviar se cerró en P6 |
 | 2026-11-03 | P4 memoria y estado conversacional | Commit `546c04c`, `docs/Evidencia-P4-memoria-estado-conversacional-2026-11-03.md`, `server/tests/conversation-context.mjs` | Validado localmente: contrato v1, borrador versionado, cursor, pendientes y ofertas activas; sin merge ni despliegue |
@@ -268,5 +292,5 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 
 ### Próximo hito autorizado
 
-El siguiente hito es **P9 — corrección y regresión controlada**. Debe corregir la resolución contextual de variantes y categorías que falló en P8, separar fallos de redacción de fallos funcionales, reejecutar los casos afectados sobre un clon nuevo y volver a evaluar el umbral de aceptación. No se debe fusionar ni desplegar mientras P8 siga en 19/40.
+El siguiente hito es **release/piloto controlado**. La evidencia local ya confirma 40/40; antes de producción todavía deben revisarse los cambios no comprometidos, ejecutar build y contratos en el estado final, crear el commit, hacer push, desplegar y validar el tenant demo con sus secretos y feature flags. No se debe interpretar la aprobación E2E local como despliegue automático.
 

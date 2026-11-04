@@ -59,6 +59,7 @@ export function createSeedState() {
           ],
         },
         agentPolicy: {
+          assistantName: 'Rocío',
           tone: 'tendero_colombiano',
           responseLanguage: 'es-CO',
           missingQuantity: 'ask',

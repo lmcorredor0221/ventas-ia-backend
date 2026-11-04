@@ -1,7 +1,7 @@
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
-  ['agentPolicy', new Set(['tone'])],
+  ['agentPolicy', new Set(['tone', 'assistantName'])],
   ['orderPolicy', new Set(['paymentMethods'])],
 ]);
 
@@ -13,7 +13,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['googleSheets', new Set(['spreadsheetIdRef', 'range', 'catalogRange', 'customerProfilesRange', 'ordersRange', 'primaryKey', 'refreshPolicy'])],
   ['googleDrive', new Set(['rootFolderRef', 'customerProfileFolderRef', 'filePolicyRef', 'refreshMode', 'allowedMimeTypes'])],
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
-  ['agentPolicy', new Set(['tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
+  ['agentPolicy', new Set(['tone', 'assistantName', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
   ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
   ['secretsPolicy', null],
 ]);
@@ -83,6 +83,13 @@ export function mergeTenantConfig(base, patch) {
 }
 
 function normalizeOwnerField(section, field, value) {
+  if (section === 'agentPolicy' && field === 'assistantName') {
+    const assistantName = String(value ?? '').trim().replace(/\s+/g, ' ');
+    if (!assistantName || assistantName.length > 60) {
+      throw configError('agentPolicy.assistantName debe tener entre 1 y 60 caracteres.');
+    }
+    return assistantName;
+  }
   if (section === 'agentPolicy' && field === 'tone') {
     const normalizedTone = String(value ?? '').trim();
     if (!['tendero_colombiano', 'formal_neutral'].includes(normalizedTone)) {

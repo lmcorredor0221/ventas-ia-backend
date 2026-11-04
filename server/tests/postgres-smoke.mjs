@@ -61,10 +61,11 @@ try {
     'billing_funnel_events',
     'integration_outbox',
     'inbound_messages',
+    'inbound_batch_leases',
     'interaction_offers',
     'schema_migrations',
   ]]);
-  assert.equal(tables.rows.length, 32);
+  assert.equal(tables.rows.length, 33);
 
   const seeded = await store.pool.query(`
     SELECT

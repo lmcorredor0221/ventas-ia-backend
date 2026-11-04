@@ -80,7 +80,7 @@ function assertStep({ scenario, step, run, waId }) {
   assert.equal(plan.simulatedBy, 'codex', `${scenario.id}: debe dejar trazabilidad de simulacion`);
   assert.equal(plan.reasoningMode, 'shopkeeper_guided_sale', `${scenario.id}: debe razonar como tendero`);
   assert.ok(plan.customerUnderstanding?.rawNeed !== undefined, `${scenario.id}: debe conservar entendimiento del cliente`);
-  assert.equal(plan.semanticFrame?.schemaVersion, 'semantic-frame.v1', `${scenario.id}: debe conservar frame semantico`);
+  assert.equal(plan.semanticFrame?.schemaVersion, 'semantic-frame.v2', `${scenario.id}: debe conservar frame semantico`);
   assert.ok(Array.isArray(plan.semanticFrame?.items), `${scenario.id}: el frame debe conservar necesidades`);
   assert.ok(plan.responseStrategy, `${scenario.id}: debe declarar estrategia de respuesta`);
   assert.equal(plan.intent, expectation.intent, `${scenario.id}: intent incorrecto`);

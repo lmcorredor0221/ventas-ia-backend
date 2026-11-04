@@ -18,6 +18,7 @@ export class AgentRuntime {
     this.config = config;
     this.orders = orders;
     this.manualSweepTimer = null;
+    this.inboundBatchLocks = new Map();
   }
 
   start() {
@@ -37,27 +38,29 @@ export class AgentRuntime {
     this.manualSweepTimer = null;
   }
 
-  async processInbound(normalized, { skipIdempotency = false } = {}) {
+  async processInbound(normalized, { skipIdempotency = false, batchMessages = null } = {}) {
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
     normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
+    const inboundPayloads = normalizeBatchMessages(normalized, batchMessages);
     await this.closeExpiredManualCases();
     const conversation = await this.ensureConversation(tenantId, normalized);
     if (conversation.traceId !== normalized.traceId) {
       await this.patchConversation(conversation.id, { traceId: normalized.traceId });
     }
 
-    if (!skipIdempotency && await this.isDuplicate(normalized.messageId)) {
+    if (inboundPayloads.length === 1 && !skipIdempotency && await this.isDuplicate(normalized.messageId)) {
       return { duplicate: true, conversation };
     }
 
     if (conversation.manualMode === 'whatsapp_external' || conversation.status === 'manual_active') {
-      const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
-      if (!claimed) return { duplicate: true, conversation };
-      await this.addMessage(conversation.id, {
-        role: 'user',
-        text: normalized.text || `[${normalized.messageType}]`,
-        providerMessageId: normalized.messageId,
+      const claimed = await this.claimInboundPayloads(inboundPayloads, {
+        skipIdempotency,
+        tenantId,
+        conversationId: conversation.id,
+        provider: normalized.provider,
       });
+      if (!claimed) return { duplicate: true, conversation };
+      await this.addInboundMessages(conversation.id, inboundPayloads);
       await this.patchConversation(conversation.id, { manualLastActivityAt: new Date().toISOString() });
       return {
         duplicate: false,
@@ -68,16 +71,29 @@ export class AgentRuntime {
     }
 
     await this.usage?.assertCanProcessInteraction(tenantId, { conversationId: conversation.id });
-    const claimed = skipIdempotency || await this.claimProcessed(normalized.messageId, { tenantId, conversationId: conversation.id, provider: normalized.provider });
-    if (!claimed) return { duplicate: true, conversation };
-    this.usage?.recordAgentInteraction(tenantId, {
+    const claimed = await this.claimInboundPayloads(inboundPayloads, {
+      skipIdempotency,
+      tenantId,
       conversationId: conversation.id,
       provider: normalized.provider,
-      messageType: normalized.messageType,
     });
+    if (!claimed) return { duplicate: true, conversation };
+    for (const payload of inboundPayloads) {
+      this.usage?.recordAgentInteraction(tenantId, {
+        conversationId: conversation.id,
+        provider: payload.provider ?? normalized.provider,
+        messageType: payload.messageType ?? normalized.messageType,
+      });
+    }
 
-    this.events.emit({ type: 'agent.started', tenantId, conversationId: conversation.id, detail: 'Inbound WhatsApp message received', metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
-    await this.addMessage(conversation.id, { role: 'user', text: normalized.text || `[${normalized.messageType}]`, providerMessageId: normalized.messageId });
+    this.events.emit({
+      type: 'agent.started',
+      tenantId,
+      conversationId: conversation.id,
+      detail: 'Inbound WhatsApp message received',
+      metadata: { traceId: normalized.traceId, messageId: normalized.messageId, batchSize: inboundPayloads.length },
+    });
+    await this.addInboundMessages(conversation.id, inboundPayloads);
 
     try {
       const result = await this.routeConversation(tenantId, conversation.id, normalized);
@@ -94,18 +110,135 @@ export class AgentRuntime {
     const inbound = await this.store.getInboundMessage?.(messageId);
     if (!inbound) throw new Error(`Inbound message ${messageId} not found`);
     if (inbound.status === 'completed') return { duplicate: true, inbound };
-    await this.store.markInboundMessageProcessing?.(messageId);
+    const batchKey = this.config.whatsappInboundBatchingEnabled
+      ? this.inboundBatchKey(inbound)
+      : `message:${messageId}`;
+    const previous = this.inboundBatchLocks.get(batchKey) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(async () => {
+      const currentInbound = await this.store.getInboundMessage?.(messageId);
+      if (!currentInbound || currentInbound.status === 'completed') {
+        return { duplicate: true, inbound: currentInbound ?? inbound };
+      }
+      let distributedLeaseAcquired = false;
+      let batchMessages = [];
+      try {
+        if (this.config.whatsappInboundBatchingEnabled && this.store.acquireInboundBatchLease) {
+          distributedLeaseAcquired = await this.store.acquireInboundBatchLease(batchKey, {
+            leaseMs: this.config.whatsappInboundBatchLeaseMs,
+          });
+          if (!distributedLeaseAcquired) {
+            const error = new Error(`Inbound batch lease busy for ${batchKey}`);
+            error.code = 'inbound_batch_lease_busy';
+            error.retryable = true;
+            throw error;
+          }
+        }
+        const batch = this.config.whatsappInboundBatchingEnabled
+          ? await this.collectInboundBatch(currentInbound)
+          : [currentInbound];
+        batchMessages = [];
+        for (const candidate of batch) {
+          const latest = await this.store.getInboundMessage?.(candidate.messageId);
+          if (latest && latest.status !== 'completed') batchMessages.push(latest);
+        }
+        if (!batchMessages.length) return { duplicate: true, inbound: currentInbound };
+        for (const candidate of batchMessages) {
+          await this.store.markInboundMessageProcessing?.(candidate.messageId);
+        }
+        const normalized = mergeInboundBatch(batchMessages, {
+          consolidationWaitMs: Number(this.config.whatsappInboundBatchingEnabled ? this.config.whatsappInboundBatchWindowMs ?? 0 : 0),
+        });
+        const result = await this.processInbound(normalized, {
+          skipIdempotency: true,
+          batchMessages: batchMessages.map((candidate) => candidate.payload),
+        });
+        const completion = {
+          duplicate: Boolean(result.duplicate),
+          conversationId: result.conversation?.id ?? null,
+          summary: result.result?.summary ?? null,
+          batchId: normalized.batchId ?? null,
+          batchSize: batchMessages.length,
+          processedMessageIds: batchMessages.map((candidate) => candidate.messageId),
+        };
+        for (const candidate of batchMessages) {
+          await this.store.completeInboundMessage?.(candidate.messageId, completion);
+        }
+        return result;
+      } catch (error) {
+        if (error.code !== 'inbound_batch_lease_busy') {
+          for (const candidate of batchMessages) await this.store.failInboundMessage?.(candidate.messageId, error);
+        }
+        throw error;
+      } finally {
+        if (distributedLeaseAcquired) {
+          await this.store.releaseInboundBatchLease?.(batchKey);
+        }
+      }
+    });
+    this.inboundBatchLocks.set(batchKey, current);
     try {
-      const result = await this.processInbound(inbound.payload, { skipIdempotency: true });
-      await this.store.completeInboundMessage?.(messageId, {
-        duplicate: Boolean(result.duplicate),
-        conversationId: result.conversation?.id ?? null,
-        summary: result.result?.summary ?? null,
+      return await current;
+    } finally {
+      if (this.inboundBatchLocks.get(batchKey) === current) this.inboundBatchLocks.delete(batchKey);
+    }
+  }
+
+  async collectInboundBatch(target) {
+    if (!this.canBatchInbound(target)) return [target];
+    const windowMs = Math.max(0, Math.min(Number(this.config.whatsappInboundBatchWindowMs ?? 350), 2_000));
+    if (windowMs > 0) await new Promise((resolve) => setTimeout(resolve, windowMs));
+    const receivedAt = Date.parse(target.receivedAt ?? '') || Date.now();
+    const messages = await this.store.listInboundMessages?.({
+      tenantId: target.tenantId,
+      waId: target.waId,
+      phoneNumberId: target.phoneNumberId,
+      statuses: ['queued', 'retrying'],
+      receivedAtFrom: new Date(receivedAt).toISOString(),
+      receivedAtTo: new Date(receivedAt + windowMs).toISOString(),
+      limit: Math.max(1, Number(this.config.whatsappInboundBatchMaxMessages ?? 8)),
+    }) ?? [];
+    const byId = new Map(messages.map((message) => [message.messageId, message]));
+    byId.set(target.messageId, target);
+    return [...byId.values()]
+      .filter((message) => this.canBatchInbound(message))
+      .sort((left, right) => String(left.receivedAt).localeCompare(String(right.receivedAt))
+        || String(left.messageId).localeCompare(String(right.messageId)))
+      .slice(0, Math.max(1, Number(this.config.whatsappInboundBatchMaxMessages ?? 8)));
+  }
+
+  inboundBatchKey(inbound) {
+    return `${inbound.tenantId}:${inbound.phoneNumberId ?? ''}:${inbound.waId}`;
+  }
+
+  canBatchInbound(inbound) {
+    const payload = inbound?.payload ?? inbound;
+    return Boolean(payload?.messageId)
+      && payload.messageType === 'text'
+      && !payload.interactive?.optionId
+      && !payload.mediaRef
+      && !payload.coexistenceEvent;
+  }
+
+  async claimInboundPayloads(payloads, { skipIdempotency = false, tenantId, conversationId, provider } = {}) {
+    if (skipIdempotency) return true;
+    for (const payload of payloads) {
+      const claimed = await this.claimProcessed(payload.messageId, {
+        tenantId,
+        conversationId,
+        provider: payload.provider ?? provider,
       });
-      return result;
-    } catch (error) {
-      await this.store.failInboundMessage?.(messageId, error);
-      throw error;
+      if (!claimed) return false;
+    }
+    return true;
+  }
+
+  async addInboundMessages(conversationId, payloads) {
+    for (const payload of payloads) {
+      await this.addMessage(conversationId, {
+        role: 'user',
+        text: payload.text || `[${payload.messageType}]`,
+        providerMessageId: payload.messageId,
+      });
     }
   }
 
@@ -132,6 +265,10 @@ export class AgentRuntime {
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
 
+    if (plan.intent === 'greeting' || plan.intent === 'general_query') {
+      return this.handleContextualConversation({ tenantId, conversationId, normalized, plan });
+    }
+
     if (customerLookup.status === 'connection_required' && ['catalog_query', 'delivery_order', 'order_confirmation', 'order_clarification'].includes(plan.intent)) {
       return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
     }
@@ -142,13 +279,13 @@ export class AgentRuntime {
         assigned_team: 'ventas',
         context_snapshot: { summary: normalized.text || 'Caso requiere apoyo humano.', normalized, plan },
       });
-      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
         action: 'send_session_message',
         wa_id: normalized.waId,
         text: normalized.messageType === 'image' || normalized.mediaRef
           ? 'Recibimos tu imagen. Un asesor la revisara y retomaremos la cotizacion con el producto identificado.'
           : 'Te conecto con un asesor. Dejamos tu solicitud registrada para continuar sin perder el contexto.',
-      });
+      } });
       return { summary: 'Human handoff requested', plan };
     }
 
@@ -161,11 +298,11 @@ export class AgentRuntime {
           consequence: 'Al aprobar, el agente enviara cotizacion ajustada y esperara confirmacion.',
         },
       });
-      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
         action: 'send_session_message',
         wa_id: normalized.waId,
         text: 'Estoy validando el descuento con el equipo comercial. Te aviso apenas quede aprobado.',
-      });
+      } });
       return { summary: 'Discount approval requested', plan };
     }
 
@@ -196,6 +333,45 @@ export class AgentRuntime {
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
   }
 
+  async handleContextualConversation({ tenantId, conversationId, normalized, plan }) {
+    const tenant = await this.getTenant(tenantId);
+    const assistantName = tenant?.config?.agentPolicy?.assistantName
+      ?? tenant?.config?.agentPolicy?.agentName
+      ?? null;
+    const fallbackText = plan.intent === 'greeting'
+      ? assistantName
+        ? `¡Hola! Soy ${assistantName}, el asistente de la tienda. ¿En qué te ayudo?`
+        : '¡Hola! Soy el asistente de la tienda. ¿En qué te ayudo?'
+      : 'Claro, cuéntame qué necesitas y te ayudo con la tienda.';
+    const text = await this.composeCustomerReply({
+      tenantId,
+      conversationId,
+      fallbackText,
+      facts: {
+        kind: plan.intent,
+        customerMessage: normalized.text,
+        requiredTerms: assistantName ? [assistantName] : [],
+      },
+    });
+
+    await this.patchConversation(conversationId, {
+      stage: 'conversation',
+      zone: 'agent',
+      status: 'live',
+      value: 'Consulta conversacional',
+      progress: 30,
+      need: normalized.text,
+      nextStep: 'Esperar la siguiente necesidad del cliente.',
+      lastTool: 'llm_core',
+    });
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+    } });
+    return { summary: plan.intent === 'greeting' ? 'Contextual greeting sent' : 'Contextual general reply sent', plan };
+  }
+
   async handleGoogleUnavailable({ tenantId, conversationId, normalized, plan }) {
     const message = 'No puedo confirmar el catalogo en este momento porque la tienda no esta conectada a Google. Dejo tu solicitud en manos del tendero para validarla y continuar contigo.';
     await this.patchConversation(conversationId, {
@@ -220,17 +396,23 @@ export class AgentRuntime {
         action: 'connect_google_or_validate_order_manually',
       },
     });
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: message,
-    });
+    } });
     return { summary: 'Google unavailable; human handoff requested', plan };
   }
 
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
     const text = normalized.text ?? '';
-    const catalogItems = plan.order?.items ?? [];
+    // En una consulta de catalogo el planner puede dejar el pedido legado
+    // vacio y conservar los items unicamente en el marco semantico. El
+    // resolutor debe consumir ese marco para no perder categoria, ambiguedad
+    // o evidencia de la expresion del cliente antes de buscar.
+    const catalogItems = plan.order?.items?.length
+      ? plan.order.items
+      : (plan.semanticFrame?.items ?? []);
     const catalogSearches = catalogSearchesFromPlan(plan, catalogItems, text);
 
     if (catalogSearches.length > 1) {
@@ -284,11 +466,11 @@ export class AgentRuntime {
         lastTool: 'google_sheets_read_table',
       });
 
-      await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
         action: 'send_session_message',
         wa_id: normalized.waId,
         text: customerReply,
-      });
+      } });
 
       return { summary: hasMatches ? 'Catalog guided options sent' : 'Catalog search needs review', plan };
     }
@@ -347,11 +529,11 @@ export class AgentRuntime {
       lastTool: 'google_sheets_read_table',
     });
 
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
-    });
+    } });
 
     return { summary: selected ? 'Catalog quote sent' : 'Catalog search needs review', plan };
   }
@@ -550,12 +732,12 @@ export class AgentRuntime {
     const confirmationOffer = !requiresHumanResolution && !productSelectionOffer && canQuote
       ? await this.createConfirmationOffer({ tenantId, conversationId, body: customerReply, draftVersion: nextDraft.version })
       : null;
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
       ...((productSelectionOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productSelectionOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
-    });
+    } });
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
   }
@@ -694,11 +876,11 @@ export class AgentRuntime {
       orderId: order.order.id,
     });
 
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
-    });
+    } });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
       orderId: order.order.id,
@@ -820,12 +1002,12 @@ export class AgentRuntime {
     const confirmationOffer = canQuote
       ? await this.createConfirmationOffer({ tenantId, conversationId, body: customerReply, draftVersion: nextDraft.version })
       : null;
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
       ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
-    });
+    } });
 
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
   }
@@ -1361,11 +1543,11 @@ export class AgentRuntime {
           status: 'live',
           nextStep: 'Esperar el ajuste que indique el cliente.',
         });
-        await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+        await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
           action: 'send_session_message',
           wa_id: normalized.waId,
           text: 'Claro, dime qué producto, cantidad, dirección o forma de pago quieres ajustar.',
-        });
+        } });
         return { summary: 'Interactive order adjustment requested', interaction: result.option };
       }
       if (result.option?.action === 'human_handoff') {
@@ -1375,11 +1557,11 @@ export class AgentRuntime {
           assigned_team: 'ventas',
           context_snapshot: { action: 'order_confirmation_support', interaction: result.option },
         });
-        await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+        await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
           action: 'send_session_message',
           wa_id: normalized.waId,
           text: 'Listo, te conecto con la tienda para revisar el pedido contigo.',
-        });
+        } });
         return { summary: 'Interactive human handoff requested', interaction: result.option };
       }
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
@@ -1416,12 +1598,12 @@ export class AgentRuntime {
     const confirmationOffer = nextDraft.missingFields.length
       ? null
       : await this.createConfirmationOffer({ tenantId, conversationId, body: text, draftVersion: nextDraft.version });
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text,
       ...(confirmationOffer ? { interactive: confirmationOffer.interactive } : {}),
-    });
+    } });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
   }
 
@@ -1506,21 +1688,21 @@ export class AgentRuntime {
     const confirmationOffer = canQuote
       ? await this.createConfirmationOffer({ tenantId, conversationId, body: text, draftVersion: nextDraft.version })
       : null;
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text,
       ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
-    });
+    } });
     return { summary: 'Interactive product variant selected', interaction: result.option };
   }
 
   async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {
-    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: reason,
-    });
+    } });
     return { summary: 'Interactive selection rejected safely' };
   }
 
@@ -1535,6 +1717,48 @@ export class AgentRuntime {
     });
     const composed = await this.planner.composeReply({ tenantId, conversationId, facts, fallbackText });
     return composed.text ?? fallbackText;
+  }
+
+  async sendCustomerMessage({ tenantId, conversationId, normalized, payload }) {
+    const messageIds = new Set([
+      ...(Array.isArray(normalized?.batchMessageIds) ? normalized.batchMessageIds : []),
+      normalized?.messageId,
+    ].filter(Boolean));
+    const conversation = await this.getConversation(conversationId);
+    const latestUserMessage = [...(conversation?.messages ?? [])]
+      .reverse()
+      .find((message) => message.role === 'user');
+    const latestProviderMessageId = latestUserMessage?.providerMessageId ?? null;
+    const staleByConversation = latestProviderMessageId && !messageIds.has(latestProviderMessageId);
+    const receivedAtFrom = normalized?.receivedAt
+      ?? (normalized?.timestamp ? new Date(Number(normalized.timestamp)).toISOString() : null);
+    const newerInbound = normalized?.waId && this.store.listInboundMessages
+      ? await this.store.listInboundMessages({
+        tenantId,
+        waId: normalized.waId,
+        phoneNumberId: normalized.phoneNumberId ?? null,
+        statuses: ['queued', 'processing', 'retrying'],
+        receivedAtFrom,
+        limit: 16,
+      })
+      : [];
+    const staleByInbound = newerInbound.some((inbound) => inbound.messageId && !messageIds.has(inbound.messageId));
+    if (payload?.action === 'send_session_message' && (staleByConversation || staleByInbound)) {
+      this.events.emit({
+        type: 'llm.response.suppressed',
+        tenantId,
+        conversationId,
+        detail: 'Automatic response suppressed because newer customer input exists',
+        metadata: {
+          messageIds: [...messageIds],
+          latestProviderMessageId,
+          newerInboundIds: newerInbound.map((inbound) => inbound.messageId).filter(Boolean),
+          reason: staleByInbound ? 'newer_inbound_message' : 'conversation_cursor_advanced',
+        },
+      });
+      return { suppressed: true, reason: staleByInbound ? 'newer_inbound_message' : 'conversation_cursor_advanced' };
+    }
+    return this.tools.call('whatsapp_business_messaging', tenantId, conversationId, payload);
   }
 
   async getTenant(tenantId) {
@@ -1569,6 +1793,36 @@ export class AgentRuntime {
     await this.markProcessed(messageId, payload);
     return true;
   }
+}
+
+function normalizeBatchMessages(normalized, batchMessages) {
+  const source = Array.isArray(batchMessages) && batchMessages.length ? batchMessages : [normalized];
+  return source
+    .map((candidate) => candidate?.payload ?? candidate)
+    .filter(Boolean)
+    .map((payload) => ({ ...payload }));
+}
+
+function mergeInboundBatch(messages, { consolidationWaitMs = 0 } = {}) {
+  const payloads = messages
+    .map((candidate) => candidate?.payload ?? candidate)
+    .filter(Boolean)
+    .sort((left, right) => String(left.receivedAt ?? '').localeCompare(String(right.receivedAt ?? ''))
+      || String(left.messageId ?? '').localeCompare(String(right.messageId ?? '')));
+  const first = payloads[0] ?? {};
+  const last = payloads[payloads.length - 1] ?? first;
+  const ids = payloads.map((payload) => payload.messageId).filter(Boolean);
+  return {
+    ...first,
+    ...last,
+    text: payloads.map((payload) => String(payload.text ?? '').trim()).filter(Boolean).join('\n'),
+    messageId: last.messageId ?? first.messageId,
+    traceId: `wa:batch:${ids[0] ?? 'unknown'}:${ids[ids.length - 1] ?? 'unknown'}`,
+    batchId: `wa-batch:${ids.join(':')}`,
+    batchMessageIds: ids,
+    consolidationWaitMs,
+    messageType: payloads.length > 1 ? 'text' : (last.messageType ?? first.messageType ?? 'text'),
+  };
 }
 
 function isClosedCase(conversation) {
@@ -1635,11 +1889,42 @@ function catalogSearchesFromPlan(plan, catalogItems, text) {
   if (plannedSearches.length) return dedupeCatalogSearches(plannedSearches);
   const fallbackItems = catalogItems.length ? catalogItems : [{ catalogQuery: text, rawName: text }];
   return fallbackItems.map((item, index) => {
+    const semanticItem = plan.semanticFrame?.items?.find((candidate) => (
+      (candidate.rawItemId && candidate.rawItemId === item.rawItemId)
+      || (candidate.rawText && normalizeText(candidate.rawText) === normalizeText(item.rawText ?? item.rawName))
+    )) ?? plan.semanticFrame?.items?.[index] ?? {};
+    const lookupItem = {
+      ...semanticItem,
+      ...item,
+      ambiguity: item.ambiguity ?? item.ambiguityReason ?? semanticItem.ambiguity,
+      categoryHint: item.categoryHint ?? semanticItem.categoryHint,
+      retrievalText: item.retrievalText ?? semanticItem.retrievalText,
+    };
+    const customerLookupText = lookupItem.retrievalText
+      ?? lookupItem.rawText
+      ?? lookupItem.rawName
+      ?? lookupItem.catalogQuery
+      ?? text;
+    const customerTaxonomy = inferCatalogFilter(customerLookupText);
     // La hipotesis del LLM orienta el significado, pero no puede reemplazar
     // las palabras del cliente al recuperar el catalogo. Asi "Savital" sigue
     // buscando Savital aunque el modelo lo clasifique equivocadamente.
-    const query = catalogSearchTextForItem(item) || item.catalogQuery || item.rawName || text;
-    const inferred = item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(query);
+    // Cuando el propio interprete marco una consulta ambigua de categoria,
+    // la herramienta debe explorar la categoria completa. Usar la hipotesis
+    // para filtrar por una sola alias (p. ej. "tintico") ocultaria otras
+    // presentaciones validas y no es una decision de producto del runtime.
+    const broadCategoryLookup = plan.intent === 'catalog_query'
+      && customerTaxonomy.category
+      && lookupItem.ambiguity
+      && !lookupItem.retrievalText
+      && !lookupItem.brandHint
+      && !lookupItem.skuHint;
+    const query = broadCategoryLookup
+      ? customerTaxonomy.category
+      : catalogSearchTextForItem(lookupItem) || lookupItem.catalogQuery || lookupItem.rawName || text;
+    const inferred = broadCategoryLookup
+      ? customerTaxonomy
+      : (lookupItem.skuHint ? { sku: lookupItem.skuHint } : inferCatalogFilter(query));
     return {
       query,
       filters: inferred.query || item.skuHint || isCategoryQuery(query) ? inferred : { ...inferred, query },
@@ -1701,7 +1986,9 @@ function isCategorySearch({ query, filters = {}, text }) {
   // El LLM suele adjuntar una categoria para acotar una consulta concreta.
   // Eso no convierte "jabon para ropa" en una navegacion generica: la
   // respuesta debe priorizar su coincidencia, no opciones alfabeticas.
-  return isCategoryQuery(query) || (isCategoryQuery(text) && catalogQueryTokens(query).length <= 2);
+  return (Boolean(filters.category) && !filters.query)
+    || isCategoryQuery(query)
+    || (isCategoryQuery(text) && catalogQueryTokens(query).length <= 2);
 }
 
 function selectCatalogOptions(rows = [], limit = 4, context = {}) {
@@ -1764,8 +2051,15 @@ function catalogRecommendationBudget({ plan, text } = {}) {
   return (thousands[words[1]] ?? 0) * 1000 || null;
 }
 
-function catalogOptionRelevance(row, { query, text } = {}, budget = null) {
-  const normalizedText = normalizeText([query, text].filter(Boolean).join(' '));
+function catalogOptionRelevance(row, { query, text, plan } = {}, budget = null) {
+  const semanticItems = plan?.semanticFrame?.items ?? [];
+  const semanticEvidence = semanticItems.flatMap((item) => [
+    item?.rawText,
+    item?.occasion,
+    item?.categoryHint,
+    item?.presentationSignal,
+  ]).filter(Boolean).join(' ');
+  const normalizedText = normalizeText([query, text, semanticEvidence].filter(Boolean).join(' '));
   const productTerms = normalizeText([
     row.name,
     row.brand,

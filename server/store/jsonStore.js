@@ -11,6 +11,8 @@ export class JsonStore {
   constructor(filePath) {
     this.filePath = path.resolve(filePath);
     this.state = null;
+    this.instanceId = `json-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    this.inboundBatchLeases = new Map();
   }
 
   load() {
@@ -130,6 +132,41 @@ export class JsonStore {
   getInboundMessage(messageId) {
     const record = this.getState().inboundMessagesById?.[messageId];
     return record ? { ...record } : null;
+  }
+
+  listInboundMessages({ tenantId, waId, phoneNumberId = null, statuses = ['queued'], receivedAtFrom = null, receivedAtTo = null, limit = 8 } = {}) {
+    const allowedStatuses = new Set(Array.isArray(statuses) ? statuses : [statuses]);
+    const from = receivedAtFrom ? Date.parse(receivedAtFrom) : Number.NEGATIVE_INFINITY;
+    const to = receivedAtTo ? Date.parse(receivedAtTo) : Number.POSITIVE_INFINITY;
+    return Object.values(this.getState().inboundMessagesById ?? {})
+      .filter((record) => {
+        const receivedAt = Date.parse(record.receivedAt ?? '');
+        return record.tenantId === tenantId
+          && record.waId === waId
+          && (record.phoneNumberId ?? null) === (phoneNumberId ?? null)
+          && allowedStatuses.has(record.status)
+          && receivedAt >= from
+          && receivedAt <= to;
+      })
+      .sort((left, right) => String(left.receivedAt).localeCompare(String(right.receivedAt))
+        || String(left.messageId).localeCompare(String(right.messageId)))
+      .slice(0, Math.max(1, Number(limit ?? 8)))
+      .map((record) => ({ ...record }));
+  }
+
+  acquireInboundBatchLease(lockKey, { ownerId = this.instanceId, leaseMs = 30_000 } = {}) {
+    if (!lockKey) return true;
+    const now = Date.now();
+    const current = this.inboundBatchLeases.get(lockKey);
+    if (current && current.leaseUntil > now && current.ownerId !== ownerId) return false;
+    this.inboundBatchLeases.set(lockKey, { ownerId, leaseUntil: now + Math.max(1_000, Number(leaseMs) || 30_000) });
+    return true;
+  }
+
+  releaseInboundBatchLease(lockKey, { ownerId = this.instanceId } = {}) {
+    const current = this.inboundBatchLeases.get(lockKey);
+    if (current?.ownerId === ownerId) this.inboundBatchLeases.delete(lockKey);
+    return true;
   }
 
   markInboundMessageProcessing(messageId) {

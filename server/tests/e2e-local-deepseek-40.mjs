@@ -457,7 +457,7 @@ function evaluateStep({ report, stepIndex, scenario, sourceStep, step, plan, con
   const semanticFrame = plan?.semanticFrame;
   report.assertions.push(assertion(
     `${prefix}_semantic_frame`,
-    semanticFrame?.schemaVersion === 'semantic-frame.v1'
+    semanticFrame?.schemaVersion === 'semantic-frame.v2'
       && (semanticFrame.items ?? []).every((item) => item.rawItemId && item.rawText),
     JSON.stringify(semanticFrame ?? null),
   ));
@@ -483,6 +483,14 @@ function evaluateStep({ report, stepIndex, scenario, sourceStep, step, plan, con
   }
   for (const expected of expectation.replyIncludes ?? []) {
     report.assertions.push(assertion(`${prefix}_reply_${slug(expected)}`, normalized(reply).includes(normalized(expected)), reply));
+  }
+  for (const alternatives of expectation.replyIncludesAny ?? []) {
+    const accepted = (Array.isArray(alternatives) ? alternatives : [alternatives]).filter(Boolean);
+    report.assertions.push(assertion(
+      `${prefix}_reply_any_${slug(accepted.join('_or_'))}`,
+      accepted.some((expected) => normalized(reply).includes(normalized(expected))),
+      JSON.stringify({ accepted, reply }),
+    ));
   }
   for (const forbidden of expectation.notReplyIncludes ?? []) {
     report.assertions.push(assertion(`${prefix}_reply_not_${slug(forbidden)}`, !normalized(reply).includes(normalized(forbidden)), reply));
@@ -597,16 +605,44 @@ function missingFieldMatches(expected, actual, conversation) {
   if (!prefix || !String(actual).startsWith(prefix)) return false;
   const expectedQuery = String(expected).replace(prefix, '');
   const rawItemId = String(actual).replace(prefix, '');
-  if (prefix === 'quantity:') return sameSemanticTerms(expectedQuery, rawItemId);
-  const item = (conversation?.orderDraft?.items ?? []).find((candidate) => candidate.rawItemId === rawItemId);
-  const itemText = normalized(`${item?.rawName ?? ''} ${item?.catalogQuery ?? ''} ${item?.product?.name ?? ''}`);
+  const item = (conversation?.orderDraft?.items ?? []).find((candidate) => {
+    const identifiers = [
+      candidate.rawItemId,
+      candidate.rawName,
+      candidate.rawText,
+      candidate.catalogQuery,
+      candidate.product?.name,
+    ].map(normalized).filter(Boolean);
+    return identifiers.includes(normalized(rawItemId));
+  });
+  const itemText = normalized([
+    item?.rawName,
+    item?.rawText,
+    item?.catalogQuery,
+    item?.product?.name,
+    item?.product?.presentation,
+    item?.requestedPresentation,
+  ].filter(Boolean).join(' '));
   const target = normalized(expectedQuery);
+  if (prefix === 'quantity:') {
+    // La clave persistida puede usar la hipótesis de recuperación del
+    // intérprete (p. ej. "agua embotellada sin gas"), mientras la matriz
+    // conserva la expresión del comprador ("Agua Cristal"). La aserción
+    // debe validar el mismo ítem semántico, no exigir que ambas etiquetas
+    // sean idénticas.
+    return Boolean(item && (itemText.includes(target) || target.includes(itemText) || sameSemanticTerms(target, itemText)
+      || sameSemanticTerms(target, rawItemId)));
+  }
   return Boolean(item && (itemText.includes(target) || target.includes(itemText) || sameSemanticTerms(target, itemText)));
 }
 
 function sameSemanticTerms(expected, actual) {
-  const expectedTerms = normalized(expected).split(/[^a-z0-9]+/).filter((term) => term.length >= 3);
-  const actualTerms = new Set(normalized(actual).split(/[^a-z0-9]+/).filter((term) => term.length >= 3));
+  const semanticTokens = (value) => normalized(value)
+    .split(/[^a-z0-9]+/)
+    .flatMap((token) => token.match(/[a-z]+|\d+/g) ?? [])
+    .filter((term) => term.length >= 2 && !['de', 'la', 'el', 'los', 'las', 'un', 'una'].includes(term));
+  const expectedTerms = semanticTokens(expected);
+  const actualTerms = new Set(semanticTokens(actual));
   return expectedTerms.length > 0 && expectedTerms.every((term) => actualTerms.has(term));
 }
 

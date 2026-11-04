@@ -64,7 +64,7 @@ const frame = semanticFrameFromPlan(legacy, {
   messageId: 'wamid.contract.1',
 });
 
-assert.equal(frame.schemaVersion, 'semantic-frame.v1');
+assert.equal(frame.schemaVersion, 'semantic-frame.v2');
 assert.equal(frame.items.length, 1);
 assert.equal(frame.items[0].rawText, 'dos chocramos');
 assert.equal(frame.items[0].productHypothesis, 'chocoramo');

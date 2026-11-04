@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { createSeedState } from '../data/seed.js';
@@ -29,6 +30,7 @@ export class PostgresStore {
     this.snapshotSaveDeferred = null;
     this.snapshotSaving = false;
     this.snapshotDirty = false;
+    this.instanceId = `postgres-${process.pid}-${randomUUID()}`;
   }
 
   async load() {
@@ -461,6 +463,50 @@ export class PostgresStore {
   async getInboundMessage(messageId) {
     const result = await this.pool.query('SELECT * FROM inbound_messages WHERE message_id = $1', [messageId]);
     return inboundMessageRow(result.rows[0]);
+  }
+
+  async listInboundMessages({ tenantId, waId, phoneNumberId = null, statuses = ['queued'], receivedAtFrom = null, receivedAtTo = null, limit = 8 } = {}) {
+    const result = await this.pool.query(
+      `SELECT *
+         FROM inbound_messages
+        WHERE tenant_id = $1
+          AND wa_id = $2
+          AND phone_number_id IS NOT DISTINCT FROM $3
+          AND status = ANY($4::text[])
+          AND ($5::timestamptz IS NULL OR received_at >= $5::timestamptz)
+          AND ($6::timestamptz IS NULL OR received_at <= $6::timestamptz)
+        ORDER BY received_at ASC, message_id ASC
+        LIMIT $7`,
+      [tenantId, waId, phoneNumberId, Array.isArray(statuses) ? statuses : [statuses], receivedAtFrom, receivedAtTo, Math.max(1, Number(limit ?? 8))],
+    );
+    return result.rows.map(inboundMessageRow);
+  }
+
+  async acquireInboundBatchLease(lockKey, { ownerId = this.instanceId, leaseMs = 30_000 } = {}) {
+    if (!lockKey) return true;
+    const leaseUntil = new Date(Date.now() + Math.max(1_000, Number(leaseMs) || 30_000)).toISOString();
+    const result = await this.pool.query(
+      `INSERT INTO inbound_batch_leases (lock_key, owner_id, lease_until, updated_at)
+       VALUES ($1, $2, $3::timestamptz, now())
+       ON CONFLICT (lock_key) DO UPDATE
+         SET owner_id = EXCLUDED.owner_id,
+             lease_until = EXCLUDED.lease_until,
+             updated_at = now()
+       WHERE inbound_batch_leases.lease_until <= now()
+          OR inbound_batch_leases.owner_id = EXCLUDED.owner_id
+       RETURNING lock_key`,
+      [lockKey, ownerId, leaseUntil],
+    );
+    return result.rowCount > 0;
+  }
+
+  async releaseInboundBatchLease(lockKey, { ownerId = this.instanceId } = {}) {
+    if (!lockKey) return true;
+    await this.pool.query(
+      'DELETE FROM inbound_batch_leases WHERE lock_key = $1 AND owner_id = $2',
+      [lockKey, ownerId],
+    );
+    return true;
   }
 
   markInboundMessageProcessing(messageId) {

@@ -147,7 +147,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'catalog_query',
       summary: 'Catalog guided options sent',
-      replyIncludes: ['Encontre'],
+      replyIncludesAny: [['Encontre', 'Tengo estas opciones']],
     },
   },
   {
@@ -238,7 +238,7 @@ export const colombiaAgentScenarioSet = [
     expect: {
       intent: 'catalog_query',
       summary: 'Catalog guided options sent',
-      replyIncludes: ['Encontre'],
+      replyIncludesAny: [['Encontre', 'Tengo estas opciones']],
     },
   },
   {

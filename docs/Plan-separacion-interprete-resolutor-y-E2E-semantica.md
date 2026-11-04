@@ -75,7 +75,7 @@ El planner actual se reemplazara gradualmente por un interprete semantico. Conse
 
 ```json
 {
-  "schemaVersion": "semantic-frame.v1",
+  "schemaVersion": "semantic-frame.v2",
   "intent": "delivery_order",
   "conversationAct": "new_request",
   "delivery": true,

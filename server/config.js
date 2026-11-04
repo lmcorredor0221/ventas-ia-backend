@@ -34,6 +34,10 @@ export const RUNTIME_CONFIG = {
   manualCaseSweepIntervalMs: Number(process.env.MANUAL_CASE_SWEEP_INTERVAL_MS ?? 30_000),
   caseContinuationWindowMinutes: Number(process.env.CASE_CONTINUATION_WINDOW_MINUTES ?? 30),
   integrationOutboxEnabled: process.env.INTEGRATION_OUTBOX_ENABLED === 'true',
+  whatsappInboundBatchingEnabled: process.env.WHATSAPP_INBOUND_BATCHING_ENABLED === 'true',
+  whatsappInboundBatchWindowMs: Number(process.env.WHATSAPP_INBOUND_BATCH_WINDOW_MS ?? 350),
+  whatsappInboundBatchMaxMessages: Number(process.env.WHATSAPP_INBOUND_BATCH_MAX_MESSAGES ?? 8),
+  whatsappInboundBatchLeaseMs: Number(process.env.WHATSAPP_INBOUND_BATCH_LEASE_MS ?? 30_000),
   integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 5000),
   integrationOutboxBatchSize: Number(process.env.INTEGRATION_OUTBOX_BATCH_SIZE ?? 10),
   // Receive Meta webhooks durably before doing catalog, LLM or Google work.

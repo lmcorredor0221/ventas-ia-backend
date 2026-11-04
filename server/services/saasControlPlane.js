@@ -1985,6 +1985,7 @@ function tenantConfigFor(tenantId) {
     agentPolicy: {
       // Legacy tenants may still store tendero_bogotano. The product-facing
       // profile is Colombian rather than city-specific.
+      assistantName: 'Rocío',
       tone: 'tendero_colombiano',
       responseLanguage: 'es-CO',
       missingQuantity: 'ask',

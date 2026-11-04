@@ -1,4 +1,4 @@
-const FRAME_VERSION = 'semantic-frame.v1';
+const FRAME_VERSION = 'semantic-frame.v2';
 const CANDIDATE_VERSION = 'candidate-set.v1';
 const RESOLUTION_VERSION = 'resolution-set.v1';
 const GENERIC_PRESENTATION_TOKENS = new Set([
@@ -10,6 +10,8 @@ const QUANTITY_WORD_TOKENS = new Set([
 ]);
 
 const INTENTS = new Set([
+  'greeting',
+  'general_query',
   'catalog_query',
   'delivery_order',
   'order_clarification',
@@ -19,7 +21,7 @@ const INTENTS = new Set([
   'human_handoff',
 ]);
 
-export function semanticFrameFromPlan(plan = {}, { text = '', messageId = null, conversation = null } = {}) {
+export function semanticFrameFromPlan(plan = {}, { text = '', messageId = null, messageIds = [], conversation = null } = {}) {
   const semantic = plan.semanticFrame && typeof plan.semanticFrame === 'object'
     ? plan.semanticFrame
     : plan;
@@ -42,6 +44,9 @@ export function semanticFrameFromPlan(plan = {}, { text = '', messageId = null, 
   const missingCustomerFields = normalizeMissingCustomerFields(
     semantic.missingCustomerFields ?? semantic.missingFields ?? [],
   );
+  const replyTo = normalizeReplyTo(messageIds, messageId, semantic.replyTo);
+  const cartMutation = normalizeCartMutation(semantic.cartMutation, semantic.conversationAct, intent);
+  const ambiguities = normalizeAmbiguities(semantic.ambiguities, normalizedItems);
 
   return {
     schemaVersion: FRAME_VERSION,
@@ -51,6 +56,13 @@ export function semanticFrameFromPlan(plan = {}, { text = '', messageId = null, 
     customerDelta,
     items,
     missingCustomerFields,
+    replyTo,
+    messageInterpretations: normalizeMessageInterpretations(semantic.messageInterpretations, replyTo),
+    cartMutation,
+    collectionComplete: typeof semantic.collectionComplete === 'boolean' ? semantic.collectionComplete : null,
+    proposedAction: normalizeProposedAction(semantic.proposedAction, intent, missingCustomerFields, ambiguities),
+    ambiguities,
+    reasoningSummary: normalizeReasoningSummary(semantic.reasoningSummary),
     confidence: normalizeConfidence(semantic.confidence, items),
   };
 }
@@ -447,10 +459,93 @@ function normalizeIntent(value) {
 function normalizeConversationAct(value, intent, conversation) {
   const normalized = normalize(value).replace(/\s+/g, '_');
   if (['new_request', 'add_item', 'clarify', 'confirm', 'support'].includes(normalized)) return normalized;
+  if (intent === 'greeting' || intent === 'general_query') return 'new_request';
   if (intent === 'order_confirmation') return 'confirm';
   if (intent === 'order_clarification' || conversation?.orderDraft) return 'clarify';
   if (intent === 'human_handoff') return 'support';
   return 'new_request';
+}
+
+function normalizeReplyTo(messageIds, messageId, fallback) {
+  const supplied = Array.isArray(messageIds) ? messageIds : [];
+  const ids = supplied.length ? supplied : (messageId ? [messageId] : fallback);
+  return unique((Array.isArray(ids) ? ids : [ids])
+    .map((id) => String(id ?? '').trim())
+    .filter((id) => id.length > 0 && id.length <= 200));
+}
+
+function normalizeMessageInterpretations(value, replyTo) {
+  if (!Array.isArray(value)) return [];
+  const allowed = new Set(replyTo);
+  return value
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => ({
+      messageId: nullableString(entry.messageId),
+      role: nullableString(entry.role),
+      confidence: normalizeConfidence(entry.confidence),
+    }))
+    .filter((entry) => entry.messageId && (!allowed.size || allowed.has(entry.messageId)))
+    .slice(0, 16);
+}
+
+function normalizeCartMutation(value, conversationAct, intent) {
+  const mode = normalize(value?.mode);
+  const normalizedMode = ['delta', 'snapshot'].includes(mode) ? mode : 'delta';
+  const reason = nullableString(value?.reason)
+    ?? (conversationAct === 'add_item' ? 'customer_added_items' : null)
+    ?? (intent === 'order_confirmation' ? 'confirmation_turn' : null);
+  return { mode: normalizedMode, reason };
+}
+
+function normalizeProposedAction(value, intent, missingFields, ambiguities) {
+  const allowed = new Set([
+    'answer',
+    'search_catalog',
+    'ask_for_products',
+    'ask_customer_field',
+    'ask_clarification',
+    'offer_options',
+    'confirm_order',
+    'human_handoff',
+    'no_action',
+  ]);
+  const proposed = normalize(value).replace(/\s+/g, '_');
+  if (allowed.has(proposed)) return proposed;
+  if (intent === 'greeting' || intent === 'general_query') return 'answer';
+  if (intent === 'human_handoff') return 'human_handoff';
+  if (intent === 'order_confirmation') return 'confirm_order';
+  if (ambiguities.length) return 'ask_clarification';
+  if (missingFields.length) return 'ask_customer_field';
+  if (intent === 'catalog_query') return 'search_catalog';
+  return 'answer';
+}
+
+function normalizeAmbiguities(value, items) {
+  const entries = Array.isArray(value) ? value : [];
+  const fromItems = items
+    .filter((item) => item.ambiguity)
+    .map((item) => ({
+      rawItemId: item.rawItemId,
+      detail: item.ambiguity,
+      options: [],
+    }));
+  return [...entries, ...fromItems]
+    .filter((entry) => entry && typeof entry === 'object' || typeof entry === 'string')
+    .map((entry) => {
+      if (typeof entry === 'string') return { rawItemId: null, detail: entry.slice(0, 240), options: [] };
+      return {
+        rawItemId: nullableString(entry.rawItemId),
+        detail: nullableString(entry.detail ?? entry.reason ?? entry.message),
+        options: Array.isArray(entry.options) ? entry.options.map((option) => String(option ?? '').trim()).filter(Boolean).slice(0, 8) : [],
+      };
+    })
+    .filter((entry) => entry.detail)
+    .slice(0, 16);
+}
+
+function normalizeReasoningSummary(value) {
+  const summary = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return summary ? summary.slice(0, 280) : null;
 }
 
 function normalizeConfidence(value, items = []) {

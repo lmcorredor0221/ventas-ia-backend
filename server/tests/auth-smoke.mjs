@@ -73,7 +73,7 @@ try {
   assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:P1000');
 
   const ownerConversationConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
-    agentPolicy: { tone: 'formal_neutral' },
+    agentPolicy: { tone: 'formal_neutral', assistantName: 'Rocío Demo' },
     orderPolicy: {
       paymentMethods: [
         { id: 'cash', label: 'Efectivo', enabled: true },
@@ -84,6 +84,7 @@ try {
   }, { cookie, csrfToken });
   const configuredTenant = ownerConversationConfig.body.tenant ?? ownerConversationConfig.body;
   assert.equal(configuredTenant.config.agentPolicy.tone, 'formal_neutral');
+  assert.equal(configuredTenant.config.agentPolicy.assistantName, 'Rocío Demo');
   assert.equal(configuredTenant.config.orderPolicy.paymentMethods[2].enabled, false);
 
   await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
