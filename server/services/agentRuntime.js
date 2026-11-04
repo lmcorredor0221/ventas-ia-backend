@@ -1,4 +1,5 @@
 import { appendAuditEvent } from './authService.js';
+import { requireWhatsAppRecipient } from '../domain/whatsappIdentity.js';
 import { processCoexistenceEvent } from './whatsappCoexistence.js';
 import { isClosedConversation, isDispatchedConversation } from '../domain/conversationStatus.js';
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
@@ -37,6 +38,7 @@ export class AgentRuntime {
 
   async processInbound(normalized, { skipIdempotency = false } = {}) {
     if (normalized.coexistenceEvent) return processCoexistenceEvent(this, normalized);
+    normalized.waId = requireWhatsAppRecipient(normalized.waId);
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
     normalized.traceId ??= normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`;
     await this.closeExpiredManualCases();
@@ -1262,6 +1264,7 @@ export class AgentRuntime {
   }
 
   async ensureConversation(tenantId, normalized) {
+    normalized.waId = requireWhatsAppRecipient(normalized.waId);
     const key = `${tenantId}:${normalized.waId}`;
     const inFlight = this.conversationEnsureLocks.get(key);
     if (inFlight) return inFlight;
@@ -1323,6 +1326,7 @@ export class AgentRuntime {
       id: `wa-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
       waId: normalized.waId,
+      whatsappUserId: normalized.whatsappUserId ?? null,
       customer: normalized.profileName ?? normalized.waId,
       avatar: initials(normalized.profileName ?? normalized.waId),
       stage: 'inbound',

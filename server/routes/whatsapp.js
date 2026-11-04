@@ -87,6 +87,15 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
           }));
           return { ok: true, ignored: true, reason: 'delivery_status' };
         }
+        if (!normalized.coexistenceEvent && !normalized.waId) {
+          recordWebhookEvent(store, webhookRecordFromRequest(req, {
+            tenantId: normalized.tenantId, externalId: normalized.messageId,
+            eventType: normalized.messageType, status: 'rejected', httpStatus: 200,
+            errorCode: 'whatsapp_recipient_missing',
+            errorMessage: 'Inbound message has neither phone number nor business-scoped user ID',
+          }));
+          return { ok: true, ignored: true, reason: 'whatsapp_recipient_missing' };
+        }
         if (!normalized.coexistenceEvent) controlPlane?.requireTenantOperational(normalized.tenantId);
         if (config.asyncInboundEnabled) {
           const queued = await store.enqueueInboundMessage(normalized);
@@ -192,7 +201,7 @@ function normalizeWhatsAppPayload(payload, state) {
       provider: 'meta_whatsapp_cloud_api',
       tenantId: tenant?.id ?? null,
       workspaceId: tenant?.id ?? null,
-      waId: status.recipient_id,
+      waId: status.recipient_id || status.recipient_user_id || status.recipient_parent_user_id,
       phoneNumberId,
       messageId: status.id,
       traceId: `wa:${status.id}`,
@@ -208,12 +217,17 @@ function normalizeWhatsAppPayload(payload, state) {
   const type = message.type;
   const interactive = type === 'interactive' ? message.interactive : null;
   const interactionReply = interactive?.button_reply ?? interactive?.list_reply ?? null;
+  const contact = change?.contacts?.find(c =>
+    (message.from && c.wa_id === message.from)
+    || (message.from_user_id && c.user_id === message.from_user_id)
+    || (message.from_parent_user_id && c.parent_user_id === message.from_parent_user_id));
   return {
     provider: 'meta_whatsapp_cloud_api',
     tenantId: tenant?.id ?? null,
     workspaceId: tenant?.id ?? null,
-    waId: message.from,
-    profileName: change?.contacts?.find(c => c.wa_id === message.from)?.profile?.name,
+    waId: message.from || message.from_user_id || message.from_parent_user_id,
+    whatsappUserId: message.from_user_id ?? null,
+    profileName: contact?.profile?.name ?? contact?.profile?.username,
     phoneNumberId,
     messageId: message.id,
     traceId: `wa:${message.id}`,

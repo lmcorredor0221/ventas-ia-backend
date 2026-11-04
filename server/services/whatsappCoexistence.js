@@ -28,8 +28,8 @@ export async function processCoexistenceEvent(runtime, normalized) {
       s.whatsappOnboardingByTenant[tenantId] ??= { tenantId };
       const contacts = s.whatsappOnboardingByTenant[tenantId].contacts ??= {};
       for (const entry of value.state_sync ?? []) {
-        if (entry.type !== 'contact' || !entry.contact?.phone_number || !['add','remove'].includes(entry.action)) continue;
-        const waId = entry.contact.phone_number;
+        const waId = entry.contact?.phone_number || entry.contact?.user_id || entry.contact?.parent_user_id;
+        if (entry.type !== 'contact' || !waId || !['add','remove'].includes(entry.action)) continue;
         const changedAt = Number(entry.metadata?.timestamp ?? 0);
         if (changedAt < (contacts[waId]?.changedAt ?? 0)) continue;
         contacts[waId] = entry.action === 'remove' ? { removed: true, changedAt }
@@ -61,7 +61,7 @@ export async function processCoexistenceEvent(runtime, normalized) {
       });
     }
   } else if (field === 'smb_message_echoes') {
-    for (const message of value.message_echoes ?? []) await importMessage(message.to, message, false);
+    for (const message of value.message_echoes ?? []) await importMessage(message.to || message.to_user_id || message.to_parent_user_id, message, false);
   }
   // PostgreSQL checkpoints this tenant and its imported conversations directly.
   // Waiting for the full snapshot here stalls the shared inbound worker, so
@@ -89,7 +89,7 @@ export async function processCoexistenceEvent(runtime, normalized) {
     const duplicate = conversation.messages.find(m => m.providerMessageId === message.id);
     const time = Number(message.timestamp) * 1000;
     const imported = { id: duplicate?.id ?? crypto.randomUUID(), providerMessageId: message.id,
-      role: !historical || message.from !== conversation.waId ? 'human' : 'user',
+      role: !historical || (message.from || message.from_user_id || message.from_parent_user_id) !== conversation.waId ? 'human' : 'user',
       text: (message.type === 'text' ? message.text?.body : message[message.type]?.caption) ?? `[${message.type}]`,
       messageType: message.type, mediaRef: message[message.type]?.id ?? null, historical,
       createdAt: Number.isFinite(time) ? new Date(time).toISOString() : now };

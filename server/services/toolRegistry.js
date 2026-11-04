@@ -1,4 +1,5 @@
 import { parseAttributes, normalizePresentation } from './catalogImportService.js';
+import { whatsAppRecipientFields } from '../domain/whatsappIdentity.js';
 import { enrichedCatalogRange, attributesSearchText, matchesCatalogAttributes } from '../domain/catalogMetadata.js';
 import { appendAuditEvent } from './authService.js';
 import { assertCommerceOrderAllowed, catalogCommerceCategory } from '../domain/whatsappCommercePolicy.js';
@@ -838,10 +839,11 @@ function orderToSheetRow(order) {
 }
 
 function buildWhatsAppMessagePayload(payload) {
+  const recipient = whatsAppRecipientFields(payload.wa_id);
   if (payload.template_name) {
     return {
       messaging_product: 'whatsapp',
-      to: payload.wa_id,
+      ...recipient,
       type: 'template',
       template: {
         name: payload.template_name,
@@ -858,7 +860,7 @@ function buildWhatsAppMessagePayload(payload) {
     if (buttons.length) {
       return {
         messaging_product: 'whatsapp',
-        to: payload.wa_id,
+        ...recipient,
         type: 'interactive',
         interactive: {
           type: 'button',
@@ -877,7 +879,7 @@ function buildWhatsAppMessagePayload(payload) {
     if (rows.length) {
       return {
         messaging_product: 'whatsapp',
-        to: payload.wa_id,
+        ...recipient,
         type: 'interactive',
         interactive: {
           type: 'list',
@@ -892,7 +894,7 @@ function buildWhatsAppMessagePayload(payload) {
   }
   return {
     messaging_product: 'whatsapp',
-    to: payload.wa_id,
+    ...recipient,
     type: 'text',
     text: {
       preview_url: Boolean(payload.preview_url),
