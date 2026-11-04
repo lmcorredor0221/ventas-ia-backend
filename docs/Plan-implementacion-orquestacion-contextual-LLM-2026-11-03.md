@@ -6,7 +6,7 @@
 **Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `b09886e`
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
 
-**Última ejecución:** `20261104152951_d4af6f21` — replay P9 sobre un clon PostgreSQL, con Meta simulada y DeepSeek real: 40/40 casos aprobados, 181 llamadas y 112.025 tokens. La fuente `ventas_ia_dev` quedó intacta. Aún no se ha hecho commit, push ni despliegue de estos cambios.
+**Última ejecución:** `20261104152951_d4af6f21` — replay P9 sobre un clon PostgreSQL, con Meta simulada y DeepSeek real: 40/40 casos aprobados, 181 llamadas y 112.025 tokens. La fuente `ventas_ia_dev` quedó intacta. Release publicado en Render con `2be5bd8` después de alinear el script `start` del servicio.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
@@ -284,7 +284,8 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-04 | Preflight P9 E2E | `docs/Evidencia-P9-preflight-e2e-2026-11-04.md`, `.env.e2e.local.example`, `server/tests/e2e-local-deepseek-40.mjs` | Bloqueado de forma segura: falta `.env.e2e.local` y `DEEPSEEK_API_KEY`; no se simuló DeepSeek ni se alteró la base local | Requiere configurar la clave local fuera del chat y ejecutar `npm run test:e2e:local` |
 | 2026-11-04 | Replay P9 inicial con DeepSeek real | `test-results/e2e-local/20261104135036_4c2986fd/` | 40/40 casos ejecutados; 38 aprobados, 2 brechas identificadas; fuente intacta | Correcciones focalizadas requeridas |
 | 2026-11-04 | Corrección focalizada P9 | `server/services/llmPlanner.js`, `server/services/agentRuntime.js`, `server/tests/e2e-local-deepseek-40.mjs` | Se corrigió la clasificación de listas de compra, la comparación semántica de campos faltantes y el ranking contextual de categorías amplias; la lógica no fija productos concretos | Replay completo ejecutado |
-| 2026-11-04 | Replay P9 final | `docs/Evidencia-P9-e2e-deepseek-2026-11-04.md`, `test-results/e2e-local/20261104152951_d4af6f21/` | 40/40 aprobados; 181 llamadas DeepSeek, 112.025 tokens; p95 acuse 16 ms, p95 worker 5.132 ms; flujo de tendero y nuevo pedido posterior aprobados | P9 local cerrada; falta release/piloto controlado |
+| 2026-11-04 | Replay P9 final | `docs/Evidencia-P9-e2e-deepseek-2026-11-04.md`, `test-results/e2e-local/20261104152951_d4af6f21/` | 40/40 aprobados; 181 llamadas DeepSeek, 112.025 tokens; p95 acuse 16 ms, p95 worker 5.132 ms; flujo de tendero y nuevo pedido posterior aprobados | P9 local cerrada |
+| 2026-11-04 | Release backend | Commits `0932a09`, `2be5bd8`; Render `dep-dbllecgae00c73c8avhg` | `2be5bd8` quedó `live`; health directo Render y proxy `via.leanagentbuilder.com` respondieron HTTP 200. El primer intento falló por el script `start` ausente y no llegó a producción | Release validado; queda piloto funcional con tenant demo |
 | 2026-11-03 | P2 contrato semántico | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; `semantic-frame.v2`, sin merge ni despliegue |
 | 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. El lock distribuido queda pendiente de P9; la revalidación antes de enviar se cerró en P6 |
 | 2026-11-03 | P4 memoria y estado conversacional | Commit `546c04c`, `docs/Evidencia-P4-memoria-estado-conversacional-2026-11-03.md`, `server/tests/conversation-context.mjs` | Validado localmente: contrato v1, borrador versionado, cursor, pendientes y ofertas activas; sin merge ni despliegue |
@@ -292,5 +293,5 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 
 ### Próximo hito autorizado
 
-El siguiente hito es **release/piloto controlado**. La evidencia local ya confirma 40/40; antes de producción todavía deben revisarse los cambios no comprometidos, ejecutar build y contratos en el estado final, crear el commit, hacer push, desplegar y validar el tenant demo con sus secretos y feature flags. No se debe interpretar la aprobación E2E local como despliegue automático.
+El siguiente hito es **piloto controlado con el tenant demo**. El backend ya está publicado y saludable; queda validar tráfico real de prueba, credenciales/secretos del tenant, catálogo, webhook de Meta y métricas de conversación sobre el release `2be5bd8`. El rollback debe apuntar al deploy live anterior si aparecen errores.
 
