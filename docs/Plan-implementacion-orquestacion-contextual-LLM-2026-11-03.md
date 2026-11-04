@@ -1,12 +1,12 @@
 # Plan de implementación: orquestación contextual con LLM
 
 **Fecha:** 3 de noviembre de 2026  
-**Estado:** P1, P2, P3, P4 y P5 implementadas en el worktree semántico; P6–P9 pendientes
+**Estado:** P1, P2, P3, P4, P5 y P6 implementadas localmente en el worktree semántico; P7–P9 pendientes
 **Checkpoint previo:** `7fd2c61` — `chore: checkpoint pilot docs and runtime tooling`  
 **Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `20a258e`  
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
 
-**Última ejecución:** `caaf7f0` — `feat: resolve catalog ambiguity contextually`. Este commit está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
+**Última ejecución:** `1c0da80` — `feat: revalidate contextual WhatsApp responses`. El trabajo está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
@@ -147,10 +147,10 @@ Reglas del contrato:
 | P0 | Punto de recuperación | Commit de documentación, evidencias y herramientas existentes | **Cerrada** | `7fd2c61`, build y arquitectura aprobados |
 | P1 | Instrumentación sin cambiar conducta | Registrar contexto base, decisión LLM, override y consumo separado del compositor | **Cerrada en worktree semántico** (`85eec39`) | Prueba `server/tests/contextual-observability.mjs` y contratos de arquitectura aprobados |
 | P2 | Contrato semántico | Formalizar `semantic-frame.v2`, delta/snapshot, `replyTo`, propuesta de acción y confianza | **Cerrada en worktree semántico** (`8611180`) | Contratos semánticos, proveedor, escenarios Colombia y arquitectura aprobados |
-| P3 | Consolidación de ráfagas | Ventana corta opt-in, agrupación por tenant/número/cliente, preservación de mensajes y bypass de interacciones | **Cerrada local en worker de una instancia** (`d0711e3`) | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden; botones/media no esperan; retry queda disponible |
+| P3 | Consolidación de ráfagas | Ventana corta opt-in, agrupación por tenant/número/cliente, preservación de mensajes y bypass de interacciones | **Cerrada local en worker de una instancia** (`d0711e3`) | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden; botones/media no esperan; retry queda disponible; la revalidación de respuestas quedó cerrada en P6 |
 | P4 | Memoria y estado | Separar contexto estable, borrador versionado, pregunta pendiente, ofertas activas y cursor de mensajes | **Cerrada localmente** (`546c04c`) | Contrato `conversation-context.v1`, borrador versionado, cursor y ofertas activas validados |
 | P5 | Resolución de catálogo | Mantener búsqueda por tenant; diferenciar ambigüedad resoluble de no resoluble y conservar atributos/presentación | **Cerrada localmente** (`caaf7f0`) | Leche con calificativo ofrece opciones cuando procede; ambigüedad genérica escala; atributos y descripción quedan como evidencia |
-| P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | Pendiente | Ninguna respuesta contradice una ráfaga posterior |
+| P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | **Cerrada localmente** (`1c0da80`) | Carrera, retry secuencial y retry concurrente cubiertos; ninguna respuesta automática obsoleta se envía |
 | P7 | Humano y continuidad | Handoff explícito, bloqueo de IA mientras está activo y retorno controlado tras resolución | Pendiente | El humano puede confirmar/ajustar/alistar sin reactivar carreras |
 | P8 | Validación E2E | Reejecutar SuperMarket y matriz semántica con DeepSeek real y Meta simulada | Pendiente | Criterios de aceptación completos, sin tocar datos fuente |
 | P9 | Piloto controlado | Activación gradual por tenant y métrica; rollback por feature flag | Pendiente | Sin regresión de latencia, costo ni integridad |
@@ -258,8 +258,9 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-03 | Checkpoint antes de implementar | Commit `7fd2c61` | Cerrado; sin cambios funcionales del plan |
 | 2026-11-03 | Plan y tablero documentados | Este documento | Cerrado; listo para revisión/ejecución por fases |
 | 2026-11-03 | P1 instrumentación | Commit `85eec39` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; sin merge ni despliegue |
+| 2026-11-04 | P6 revalidación y outbox idempotente | Commit `1c0da80`, `docs/Evidencia-P6-revalidacion-outbox-2026-11-04.md`, `server/tests/response-revalidation.mjs`, `npm test` | Cerrado localmente; carrera y duplicados controlados; sin merge ni despliegue |
 | 2026-11-03 | P2 contrato semántico | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; `semantic-frame.v2`, sin merge ni despliegue |
-| 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. Lock distribuido y revalidación antes de enviar siguen pendientes |
+| 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. El lock distribuido queda pendiente de P9; la revalidación antes de enviar se cerró en P6 |
 | 2026-11-03 | P4 memoria y estado conversacional | Commit `546c04c`, `docs/Evidencia-P4-memoria-estado-conversacional-2026-11-03.md`, `server/tests/conversation-context.mjs` | Validado localmente: contrato v1, borrador versionado, cursor, pendientes y ofertas activas; sin merge ni despliegue |
 | 2026-11-03 | P5 resolución contextual de catálogo | Commit `caaf7f0`, `docs/Evidencia-P5-resolucion-catalogo-2026-11-03.md`, `server/tests/semantic-resolution-contract.mjs` | Validado localmente: atributos, descripción, presentación y ambigüedad resoluble/no resoluble; sin merge ni despliegue |
 
