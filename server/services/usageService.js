@@ -71,7 +71,7 @@ export class UsageService {
       conversationId,
       estimated: !providerMetadata?.usage,
     };
-    this.incrementMetric(tenantId, 'llm_calls', 1, metadata);
+    this.incrementMetric(tenantId, 'llm_calls', Math.max(1, Number(providerMetadata?.requestCount ?? 1)), metadata);
     this.incrementMetric(tenantId, 'llm_prompt_tokens', promptTokens, metadata);
     this.incrementMetric(tenantId, 'llm_completion_tokens', completionTokens, metadata);
     return this.incrementMetric(tenantId, 'llm_total_tokens', totalTokens, metadata);

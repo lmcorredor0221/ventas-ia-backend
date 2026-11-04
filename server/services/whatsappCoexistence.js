@@ -61,7 +61,14 @@ export async function processCoexistenceEvent(runtime, normalized) {
       });
     }
   } else if (field === 'smb_message_echoes') {
-    for (const message of value.message_echoes ?? []) await importMessage(message.to || message.to_user_id || message.to_parent_user_id, message, false);
+    for (const message of value.message_echoes ?? []) {
+      // The Business app may reveal both phone and BSUID after an inbound
+      // message contained only BSUID. Pause that same active conversation.
+      const userId = message.to_user_id || message.to_parent_user_id;
+      const knownUser = userId && state.conversations.find(c => c.tenantId === tenantId
+        && c.waId === userId && !isClosedConversation(c));
+      await importMessage(knownUser?.waId || message.to || userId, message, false);
+    }
   }
   // PostgreSQL checkpoints this tenant and its imported conversations directly.
   // Waiting for the full snapshot here stalls the shared inbound worker, so

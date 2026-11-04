@@ -192,7 +192,9 @@ export class AgentRuntime {
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
-        reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente' : 'Cliente solicita asesor humano',
+        reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente'
+          : plan.executionMode === 'provider_unavailable_handoff' ? 'No fue posible obtener una interpretación completa del agente; revisar los mensajes pendientes'
+            : 'Solicitud requiere atención de la tienda',
         assigned_team: 'ventas',
         context_snapshot: { summary: normalized.text || 'Caso requiere apoyo humano.', normalized, plan },
       });

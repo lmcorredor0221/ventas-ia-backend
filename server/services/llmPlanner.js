@@ -89,6 +89,7 @@ export class LLMPlanner {
       // presupuesto incluso si una configuración anterior era más amplia.
       timeoutMs: Math.min(Number(platformConfig.timeoutMs ?? Infinity), Number(this.config?.llmRequestTimeoutMs ?? 8000)),
       maxTokens: Math.min(Number(platformConfig.maxTokens ?? Infinity), Number(this.config?.llmMaxTokens ?? 600)),
+      jsonRetryMaxTokens: Number(this.config?.llmJsonRetryMaxTokens ?? 1800),
       responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
       tone: tenant?.config?.agentPolicy?.tone,
       agentName: agentDisplayNameForTenant(tenant),
@@ -123,6 +124,7 @@ export class LLMPlanner {
         executionMode = 'provider_api';
       }
     } catch (error) {
+      providerMetadata = error.providerMetadata ?? null;
       const strictProduction = this.config?.allowLocalCatalogFallback === false && this.config?.whatsappMode === 'live';
       parsed = strictProduction
         ? providerUnavailableHandoffPlan({ text, conversation })
@@ -137,7 +139,7 @@ export class LLMPlanner {
         tenantId,
         conversationId,
         detail: `${provider} unavailable: ${error.message}`,
-        metadata: { provider, model: config.model, simulator: config.simulator, executionMode, reason: shorten(error.message, 180) },
+        metadata: { provider, model: config.model, simulator: config.simulator, executionMode, reason: shorten(error.message, 180), providerMetadata },
       });
     }
     const coerced = coercePlanWithConversation(parsed, { text, conversation, paymentMethods });
@@ -999,36 +1001,81 @@ async function callChatCompletions({ config, apiKey, prompt }) {
   const url = resolveBaseUrl(config, provider) ?? (provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions');
   const startedAt = Date.now();
   const model = config.model ?? defaultModel(provider);
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: Number(config.temperature ?? 0),
-      max_tokens: Number(config.maxTokens ?? 1200),
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  }, Number(config.timeoutMs ?? 15000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  return {
-    plan: normalizeProviderPlan(JSON.parse(stripJson(payload.choices?.[0]?.message?.content ?? '{}'))),
-    providerMetadata: {
-      provider,
-      model,
-      endpoint: redactedEndpoint(url),
-      durationMs: Date.now() - startedAt,
-      usage: payload.usage ?? null,
-    },
-  };
+  const timeoutMs = Number(config.timeoutMs ?? 15000);
+  const attempts = [];
+  const metadata = () => ({ provider, model, endpoint: redactedEndpoint(url),
+    durationMs: Date.now() - startedAt, attempts, requestCount: attempts.length,
+    usage: sumChatUsage(attempts.map(attempt => attempt.usage)) });
+  try {
+    for (let attemptIndex = 0; attemptIndex < 2; attemptIndex++) {
+      const remainingMs = timeoutMs - (Date.now() - startedAt);
+      if (remainingMs <= 0) throw new Error(`LLM API timeout after ${timeoutMs}ms`);
+      const maxTokens = attemptIndex === 0 ? Number(config.maxTokens ?? 1200)
+        : Math.max(Number(config.maxTokens ?? 1200), Number(config.jsonRetryMaxTokens ?? 1800));
+      const attempt = { maxTokens, finishReason: null, usage: null };
+      attempts.push(attempt);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remainingMs);
+      let payload;
+      try {
+        const response = await fetch(url, {
+          method: 'POST', signal: controller.signal,
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ model, temperature: Number(config.temperature ?? 0),
+            max_tokens: maxTokens, response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
+              { role: 'user', content: prompt },
+              ...(attemptIndex ? [{ role: 'system', content: 'La respuesta anterior no fue un JSON completo. Genera de nuevo el contrato completo, compacto, sin explicaciones. Conserva todos los productos y dudas del contexto. No copies objetos completos del catálogo en los items.' }] : []),
+            ],
+          }),
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
+        payload = JSON.parse(text || '{}');
+      } catch (error) {
+        attempt.errorCode = error.name === 'AbortError' ? 'timeout' : 'provider_request_failed';
+        if (error.name === 'AbortError') throw new Error(`LLM API timeout after ${timeoutMs}ms`);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+      attempt.usage = payload.usage ?? null;
+      attempt.finishReason = payload.choices?.[0]?.finish_reason ?? null;
+      let parsed;
+      try {
+        if (attempt.finishReason === 'length') throw new SyntaxError('LLM structured response reached its output token limit');
+        const content = payload.choices?.[0]?.message?.content;
+        if (!content?.trim()) throw new SyntaxError('LLM structured response is empty');
+        parsed = JSON.parse(stripJson(content));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.intent) {
+          throw new SyntaxError('LLM structured response is missing its intent');
+        }
+      } catch (error) {
+        attempt.errorCode = attempt.finishReason === 'length' ? 'output_truncated' : 'invalid_json';
+        // Only regenerate malformed model output, once, within the original deadline.
+        // Never execute a partial basket or mechanically repair the model's JSON.
+        if (attemptIndex === 0 && Date.now() - startedAt < timeoutMs) continue;
+        throw error;
+      }
+      return { plan: normalizeProviderPlan(parsed), providerMetadata: metadata() };
+    }
+  } catch (error) {
+    error.providerMetadata = metadata();
+    throw error;
+  }
+}
+
+function sumChatUsage(usages) {
+  const valid = usages.filter(Boolean);
+  if (!valid.length) return null;
+  const total = {};
+  for (const usage of valid) {
+    for (const [key, value] of Object.entries(usage)) {
+      if (typeof value === 'number' && Number.isFinite(value)) total[key] = (total[key] ?? 0) + value;
+    }
+  }
+  return total;
 }
 
 async function callChatReply({ config, apiKey, prompt }) {

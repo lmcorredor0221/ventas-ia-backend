@@ -53,10 +53,11 @@ try {
   await assert.rejects(runtime.processInbound({ tenantId: 'andina', messageId: 'missing-id', text: 'Hola' }), e => e.code === 'whatsapp_recipient_missing');
   assert.equal(store.getState().conversations.length, count, 'missing identity must not create or reuse an anonymous conversation');
   await runtime.processInbound({ tenantId: 'andina', coexistenceEvent: { field: 'smb_message_echoes', value: {
-    message_echoes: [{ id: 'human-bsuid', to_user_id: bsuid, type: 'text', text: { body: 'Ya te atiendo' } }],
+    message_echoes: [{ id: 'human-bsuid', to: '573001110002', to_user_id: bsuid, type: 'text', text: { body: 'Ya te atiendo' } }],
   } } });
   assert.equal(store.getState().conversations.find(c => c.id === first.id).manualMode, 'whatsapp_external');
   assert.equal(store.getState().conversations.find(c => c.id === first.id).messages.filter(m => m.providerMessageId === 'human-bsuid').length, 1);
+  assert.equal(store.getState().conversations.length, count, 'A dual phone/BSUID echo must not create a second customer');
   console.log('PASS BSUID inbound/contact/status, outbound text/template/buttons/list, continuity, tenant isolation and missing recipient guard');
 } finally {
   global.fetch = originalFetch;

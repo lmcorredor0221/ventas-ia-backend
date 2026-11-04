@@ -21,6 +21,7 @@ export const RUNTIME_CONFIG = {
   whatsappMode: process.env.WHATSAPP_PROVIDER_MODE ?? 'mock',
   llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 8000),
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 600),
+  llmJsonRetryMaxTokens: Number(process.env.LLM_JSON_RETRY_MAX_TOKENS ?? 1800),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The simulated payment endpoint exists for local contracts only. A pending
