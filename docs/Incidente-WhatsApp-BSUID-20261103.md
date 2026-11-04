@@ -39,6 +39,10 @@ La recuperación ahora regenera la salida estructurada una sola vez ante JSON in
 
 El tendero retomó la conversación desde el celular. Su eco contenía teléfono y BSUID juntos. El receptor ahora prioriza una conversación activa conocida por ese BSUID para no abrir otro cliente ni dejar respondiendo al agente al mismo tiempo. El contrato de coexistencia prueba ese formato doble. No se reenviaron mensajes del pedido mientras el tendero lo atendía.
 
+La corrección adicional quedó Live en Render con `da2fb38373790a46cc2156968f7c947144894188`, despliegue `dep-dbl7gvgm7kps739gq7r0`, el 3 de noviembre a las 19:13:20 Colombia. El guard del frontend (`d636614`) quedó Ready en Vercel, despliegue `dpl_2uHvehGNdjUeBKQPR5WybEoBmRPA`, alias `via.leanagentbuilder.com`.
+
+También se hizo una prueba local contra DeepSeek real, con almacenamiento temporal y sin enviar WhatsApp: contexto de leche entera más «un panta tajado». El modelo conservó la leche e interpretó «pan tajado» en 2.449 ms, 2.317 tokens de entrada y 368 de salida, `finish_reason=stop`, sin relevo humano. En esta ejecución no necesitó reintento; la recuperación ante salida truncada se validó mediante el contrato controlado. El primer intento local había fallado por conectividad del equipo, antes de obtener salida del proveedor.
+
 Referencia oficial verificada en el navegador: [Meta: Business-scoped user IDs](https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids), actualización del 23 de octubre de 2026.
 
 ## Alcance pendiente
