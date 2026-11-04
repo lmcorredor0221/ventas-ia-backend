@@ -1,0 +1,11 @@
+{
+  "observedAt": "2026-11-03T17:25:57.144Z",
+  "appId": "1094480476808501",
+  "rows": [
+    "\t\t\t\t\t\t\t\t\t313 row account_update Selector de versión de suscripción para el campo del webhook account_update. Configúralo en la versión v26.0. v26.0 ​ Probar Suscritos Suscritos",
+    "\t\t\t\t\t\t\t\t\t489 row history Selector de versión de suscripción para el campo del webhook history. Configúralo en la versión v26.0. v26.0 ​ Probar No suscritos No suscritos",
+    "\t\t\t\t\t\t\t\t\t569 row messages Selector de versión de suscripción para el campo del webhook messages. Configúralo en la versión v26.0. v26.0 ​ Probar Suscritos Suscritos",
+    "\t\t\t\t\t\t\t\t\t681 row smb_app_state_sync Selector de versión de suscripción para el campo del webhook smb_app_state_sync. Configúralo en la versión v26.0. v26.0 ​ Probar No suscritos No suscritos",
+    "\t\t\t\t\t\t\t\t\t697 row smb_message_echoes Selector de versión de suscripción para el campo del webhook smb_message_echoes. Configúralo en la versión v26.0. v26.0 ​ Probar No suscritos No suscritos"
+  ]
+}
