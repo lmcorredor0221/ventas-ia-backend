@@ -1,12 +1,12 @@
 # Plan de implementación: orquestación contextual con LLM
 
 **Fecha:** 3 de noviembre de 2026  
-**Estado:** P1 y P2 implementadas en el worktree semántico; P3–P9 pendientes  
+**Estado:** P1, P2 y P3 implementadas en el worktree semántico; P4–P9 pendientes  
 **Checkpoint previo:** `7fd2c61` — `chore: checkpoint pilot docs and runtime tooling`  
 **Referencia semántica:** worktree `codex/integracion-semantica-20261103`, commit `20a258e`  
 **Alcance:** backend conversacional de VIA, mensajes WhatsApp, catálogo, carrito, checkout, escalamiento humano y pruebas locales  
 
-**Última ejecución:** `85eec39` — `feat: instrument contextual conversation decisions`. Este commit está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
+**Última ejecución:** `d0711e3` — `feat: coalesce contextual whatsapp bursts`. Este commit, junto con `85eec39` y `8611180`, está en `codex/integracion-semantica-20261103`; aún no se ha fusionado a la rama principal ni desplegado.
 
 Este documento aterriza la premisa aprobada: el LLM debe interpretar el contexto y proponer la siguiente acción conversacional. Las reglas de negocio, los hechos del catálogo, la seguridad, la idempotencia y las restricciones de Meta siguen siendo límites obligatorios y verificables.
 
@@ -147,7 +147,7 @@ Reglas del contrato:
 | P0 | Punto de recuperación | Commit de documentación, evidencias y herramientas existentes | **Cerrada** | `7fd2c61`, build y arquitectura aprobados |
 | P1 | Instrumentación sin cambiar conducta | Registrar contexto base, decisión LLM, override y consumo separado del compositor | **Cerrada en worktree semántico** (`85eec39`) | Prueba `server/tests/contextual-observability.mjs` y contratos de arquitectura aprobados |
 | P2 | Contrato semántico | Formalizar `semantic-frame.v2`, delta/snapshot, `replyTo`, propuesta de acción y confianza | **Cerrada en worktree semántico** (`8611180`) | Contratos semánticos, proveedor, escenarios Colombia y arquitectura aprobados |
-| P3 | Consolidación de ráfagas | Implementar lease por conversación y ventana corta/adaptativa; no esperar indefinidamente | Pendiente | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden |
+| P3 | Consolidación de ráfagas | Ventana corta opt-in, agrupación por tenant/número/cliente, preservación de mensajes y bypass de interacciones | **Cerrada local en worker de una instancia** (`d0711e3`) | 2–5 mensajes consecutivos generan una sola interpretación sin perder orden; botones/media no esperan; retry queda disponible |
 | P4 | Memoria y estado | Separar contexto estable, borrador versionado, pregunta pendiente, ofertas activas y cursor de mensajes | Pendiente | Corrección de nombre/dirección/productos/pago en mensajes separados |
 | P5 | Resolución de catálogo | Mantener búsqueda por tenant; diferenciar ambigüedad resoluble de no resoluble y conservar atributos/presentación | Pendiente | Leche genérica ofrece opciones cuando procede; no inventa producto |
 | P6 | Revalidación y outbox | Revisar cursor antes de enviar; suprimir respuesta obsoleta; emitir respuesta idempotente | Pendiente | Ninguna respuesta contradice una ráfaga posterior |
@@ -258,9 +258,10 @@ La latencia se medirá separando acuse del webhook y respuesta completa. La cons
 | 2026-11-03 | Checkpoint antes de implementar | Commit `7fd2c61` | Cerrado; sin cambios funcionales del plan |
 | 2026-11-03 | Plan y tablero documentados | Este documento | Cerrado; listo para revisión/ejecución por fases |
 | 2026-11-03 | P1 instrumentación | Commit `85eec39` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; sin merge ni despliegue |
-| 2026-11-03 | P2 contrato semántico v2 | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; mantiene adaptación legacy y añade delta/snapshot |
+| 2026-11-03 | P2 contrato semántico | Commit `8611180` en `codex/integracion-semantica-20261103` | Cerrado en el worktree semántico; `semantic-frame.v2`, sin merge ni despliegue |
+| 2026-11-03 | P3 consolidación contextual | Commit `d0711e3`, `server/tests/whatsapp-inbound-batching.mjs`, `docs/Evidencia-P3-orquestacion-contextual-LLM-2026-11-03.md` | Cerrado local para una instancia; feature flag apagada por defecto. Lock distribuido y revalidación antes de enviar siguen pendientes |
 
 ### Próximo hito autorizado
 
-El siguiente hito es **P3 — consolidación de ráfagas**. Antes de fusionar o desplegar `85eec39` y `8611180`, se debe comparar el diff completo contra la rama principal. P3 debe usar el contrato v2 para consolidar mensajes sin aplicar reglas de palabras clave como sustituto de la interpretación contextual.
+El siguiente hito es **P4 — memoria y estado conversacional**. Antes de fusionar o desplegar los commits semánticos, se debe comparar el diff completo contra la rama principal. P4 debe usar el lote ya consolidado y el contrato v2 para separar memoria estable, borrador versionado, pregunta pendiente y ofertas activas, sin convertir palabras clave en un sustituto de la interpretación contextual.
 
