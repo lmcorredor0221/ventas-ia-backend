@@ -32,6 +32,49 @@ try {
     assert.equal((await store.getInboundMessage('priority-1')).status, 'queued');
     assert.equal((await store.listOutbox({ limit: 100 })).filter(x => x.aggregateId === 'priority-1').length, 1);
   });
+  await test('Inbound status and outbox lifecycle are independent of a blocked snapshot queue', async () => {
+    let release, entered;
+    const barrier = new Promise(r => { release = r; });
+    const started = new Promise(r => { entered = r; });
+    const snapshot = store.queueWrite(async () => { entered(); await barrier; }, 'controlled operational snapshot');
+    await started;
+    const entry = {
+      id: `outbox-${crypto.randomUUID()}`,
+      tenantId: 'andina',
+      kind: 'test.queue_priority',
+      aggregateType: 'test',
+      aggregateId: 'priority-queue',
+      idempotencyKey: `priority-queue-${crypto.randomUUID()}`,
+      payload: {},
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: new Date().toISOString(),
+      lastError: null,
+      createdAt: new Date().toISOString(),
+      lockedAt: null,
+      processedAt: null,
+    };
+    let completed;
+    try {
+      completed = await Promise.race([
+        (async () => {
+          await store.markInboundMessageProcessing('priority-1');
+          const created = await store.enqueueOutbox(entry);
+          const claimed = await store.claimOutbox({ limit: 10 });
+          assert.equal(claimed.some(item => item.id === entry.id), true);
+          await store.completeOutbox(entry.id, { ok: true });
+          return created?.created !== false;
+        })(),
+        pause(500).then(() => false),
+      ]);
+    } finally {
+      release();
+      await snapshot;
+    }
+    assert.equal(completed, true, 'Inbound/outbox lifecycle was blocked by unrelated snapshot persistence');
+    assert.equal((await store.getInboundMessage('priority-1')).status, 'processing');
+    assert.equal((await store.listOutbox({ status: 'processed', aggregateId: 'priority-queue', limit: 10 })).length, 1);
+  });
   await test('Concurrent redelivery creates exactly one inbound and one outbox entry', async () => {
     const results = await Promise.all(Array.from({ length: 16 }, () => store.enqueueInboundMessage(message('priority-dedup'))));
     assert.equal(results.filter(r => r.created).length, 1);

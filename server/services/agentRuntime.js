@@ -151,6 +151,12 @@ export class AgentRuntime {
       }
       let distributedLeaseAcquired = false;
       let batchMessages = [];
+      const receivedAtMs = Date.parse(currentInbound.receivedAt ?? '') || null;
+      const timing = {
+        receivedAtMs,
+        processingStartedAtMs: null,
+        agentStartedAtMs: null,
+      };
       try {
         if (this.config.whatsappInboundBatchingEnabled && this.store.acquireInboundBatchLease) {
           distributedLeaseAcquired = await this.store.acquireInboundBatchLease(batchKey, {
@@ -172,12 +178,14 @@ export class AgentRuntime {
           if (latest && latest.status !== 'completed') batchMessages.push(latest);
         }
         if (!batchMessages.length) return { duplicate: true, inbound: currentInbound };
+        timing.processingStartedAtMs = Date.now();
         for (const candidate of batchMessages) {
           await this.store.markInboundMessageProcessing?.(candidate.messageId);
         }
         const normalized = mergeInboundBatch(batchMessages, {
           consolidationWaitMs: Number(this.config.whatsappInboundBatchingEnabled ? this.config.whatsappInboundBatchWindowMs ?? 0 : 0),
         });
+        timing.agentStartedAtMs = Date.now();
         const result = await this.processInbound(normalized, {
           skipIdempotency: true,
           batchMessages: batchMessages.map((candidate) => candidate.payload),
@@ -193,8 +201,43 @@ export class AgentRuntime {
         for (const candidate of batchMessages) {
           await this.store.completeInboundMessage?.(candidate.messageId, completion);
         }
+        const completedAtMs = Date.now();
+        console.info(JSON.stringify({
+          event: 'whatsapp.inbound.timing',
+          tenantId: currentInbound.tenantId,
+          messageId,
+          batchSize: batchMessages.length,
+          queueWaitMs: timing.processingStartedAtMs && receivedAtMs
+            ? Math.max(0, timing.processingStartedAtMs - receivedAtMs)
+            : null,
+          preAgentMs: timing.agentStartedAtMs && receivedAtMs
+            ? Math.max(0, timing.agentStartedAtMs - receivedAtMs)
+            : null,
+          agentDurationMs: timing.agentStartedAtMs
+            ? Math.max(0, completedAtMs - timing.agentStartedAtMs)
+            : null,
+          totalDurationMs: receivedAtMs ? Math.max(0, completedAtMs - receivedAtMs) : null,
+          status: 'completed',
+        }));
         return result;
       } catch (error) {
+        console.error(JSON.stringify({
+          event: 'whatsapp.inbound.timing',
+          tenantId: currentInbound.tenantId,
+          messageId,
+          batchSize: batchMessages.length,
+          queueWaitMs: timing.processingStartedAtMs && receivedAtMs
+            ? Math.max(0, timing.processingStartedAtMs - receivedAtMs)
+            : null,
+          preAgentMs: timing.agentStartedAtMs && receivedAtMs
+            ? Math.max(0, timing.agentStartedAtMs - receivedAtMs)
+            : null,
+          agentDurationMs: timing.agentStartedAtMs ? Math.max(0, Date.now() - timing.agentStartedAtMs) : null,
+          totalDurationMs: receivedAtMs ? Math.max(0, Date.now() - receivedAtMs) : null,
+          status: 'failed',
+          errorCode: error.code ?? null,
+          error: error.message,
+        }));
         if (error.code !== 'inbound_batch_lease_busy') {
           for (const candidate of batchMessages) await this.store.failInboundMessage?.(candidate.messageId, error);
         }

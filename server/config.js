@@ -44,7 +44,10 @@ export const RUNTIME_CONFIG = {
   whatsappInboundBatchWindowMs: Number(process.env.WHATSAPP_INBOUND_BATCH_WINDOW_MS ?? 350),
   whatsappInboundBatchMaxMessages: Number(process.env.WHATSAPP_INBOUND_BATCH_MAX_MESSAGES ?? 8),
   whatsappInboundBatchLeaseMs: Number(process.env.WHATSAPP_INBOUND_BATCH_LEASE_MS ?? 30_000),
-  integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 5000),
+  // Polling is a recovery path; the worker also drains immediately after a
+  // local enqueue. Keep the fallback interval short enough for entries created
+  // by the HTTP service in another process.
+  integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 1000),
   integrationOutboxBatchSize: Number(process.env.INTEGRATION_OUTBOX_BATCH_SIZE ?? 10),
   // Receive Meta webhooks durably before doing catalog, LLM or Google work.
   // Keep this explicit so the rollout can start with a single pilot tenant.

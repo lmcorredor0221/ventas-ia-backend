@@ -1,4 +1,4 @@
-const DEFAULT_INTERVAL_MS = 5_000;
+const DEFAULT_INTERVAL_MS = 1_000;
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_MAX_ATTEMPTS = 8;
 
@@ -12,6 +12,7 @@ export class IntegrationOutbox {
     this.maxAttempts = Number(config.integrationOutboxMaxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     this.timer = null;
     this.running = false;
+    this.started = false;
   }
 
   register(kind, handler) {
@@ -43,11 +44,19 @@ export class IntegrationOutbox {
 
   async enqueue(args) {
     const entry = this.createEntry(args);
-    return this.store.enqueueOutbox(entry);
+    const result = await this.store.enqueueOutbox(entry);
+    // Wake a dedicated worker immediately when it owns this outbox. The
+    // interval remains as recovery polling for jobs created by another
+    // process, but normal work no longer waits for the next tick.
+    if (this.started) {
+      this.drain().catch((error) => console.error('Integration outbox immediate drain failed:', error.message));
+    }
+    return result;
   }
 
   start() {
     if (!this.enabled || this.timer) return;
+    this.started = true;
     this.timer = setInterval(() => {
       this.drain().catch((error) => console.error('Integration outbox drain failed:', error.message));
     }, this.intervalMs);
@@ -62,13 +71,35 @@ export class IntegrationOutbox {
     try {
       const entries = await this.store.claimOutbox({ limit: this.batchSize });
       for (const entry of entries) {
+        const handlerStartedAt = Date.now();
+        const queueAgeMs = entry.createdAt ? Math.max(0, handlerStartedAt - Date.parse(entry.createdAt)) : null;
         const handler = this.handlers[entry.kind];
         try {
           if (!handler) throw new Error(`No outbox handler registered for ${entry.kind}`);
           const result = await handler(entry);
           await this.store.completeOutbox(entry.id, result);
+          console.info(JSON.stringify({
+            event: 'integration_outbox.completed',
+            kind: entry.kind,
+            entryId: entry.id,
+            tenantId: entry.tenantId,
+            attempts: entry.attempts,
+            queueAgeMs,
+            handlerDurationMs: Date.now() - handlerStartedAt,
+          }));
           processed += 1;
         } catch (error) {
+          console.error(JSON.stringify({
+            event: 'integration_outbox.failed',
+            kind: entry.kind,
+            entryId: entry.id,
+            tenantId: entry.tenantId,
+            attempts: entry.attempts,
+            queueAgeMs,
+            handlerDurationMs: Date.now() - handlerStartedAt,
+            errorCode: error.code ?? null,
+            error: error.message,
+          }));
           const failed = await this.store.failOutbox(entry.id, error, { maxAttempts: this.maxAttempts });
           if (entry.kind === 'whatsapp.inbound_processing' && failed?.status === 'failed') {
             await this.store.failInboundMessage?.(entry.payload.messageId, error, { terminal: true });
@@ -84,6 +115,7 @@ export class IntegrationOutbox {
   async stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.started = false;
     if (this.enabled) await this.drain();
   }
 }

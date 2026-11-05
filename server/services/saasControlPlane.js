@@ -1899,8 +1899,10 @@ export function ensureSaasState(state) {
     tenant.config.orderPolicy = {
       ...defaults.orderPolicy,
       ...(tenant.config.orderPolicy ?? {}),
-      deliveryFee: tenant.config.orderPolicy?.deliveryFee ?? null,
-      deliveryMinimumSubtotal: tenant.config.orderPolicy?.deliveryMinimumSubtotal ?? null,
+      // Missing legacy values are migrated to the platform defaults. Explicit
+      // tenant values, including zero, remain untouched.
+      deliveryFee: tenant.config.orderPolicy?.deliveryFee ?? defaults.orderPolicy.deliveryFee,
+      deliveryMinimumSubtotal: tenant.config.orderPolicy?.deliveryMinimumSubtotal ?? defaults.orderPolicy.deliveryMinimumSubtotal,
       paymentMethods: tenant.config.orderPolicy?.paymentMethods ?? defaults.orderPolicy.paymentMethods,
     };
     tenant.config.saas = {
@@ -1995,8 +1997,8 @@ function tenantConfigFor(tenantId) {
       allowedTasks: ['intent_classification', 'order_parser', 'tool_router', 'response_composer'],
     },
     orderPolicy: {
-      deliveryFee: null,
-      deliveryMinimumSubtotal: null,
+      deliveryFee: 0,
+      deliveryMinimumSubtotal: 10000,
       customerIdentifier: 'whatsapp_wa_id',
       customerRequiredFields: ['name', 'defaultAddress'],
       missingQuantity: 'ask',

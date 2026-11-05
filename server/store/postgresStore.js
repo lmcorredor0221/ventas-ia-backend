@@ -29,7 +29,18 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
+    // Tenant configuration must not wait behind deferred full snapshots or
+    // unrelated operational writes. Keep this lane serialized so concurrent
+    // configuration changes still have deterministic last-write ordering.
+    this.criticalQueue = Promise.resolve();
+    this.criticalWrites = new Set();
     this.inboundWrites = new Set();
+    // Operational writes are authoritative table mutations (inbound, outbox,
+    // interaction offers and conversation projections). They must remain
+    // serialized per process, but must not wait behind the full app_state
+    // snapshot queue.
+    this.operationalQueue = Promise.resolve();
+    this.operationalWrites = new Set();
     this.snapshotSaveTimer = null;
     this.snapshotSaveDeferred = null;
     this.snapshotSaving = false;
@@ -217,7 +228,7 @@ export class PostgresStore {
 
   claimProcessedMessage(messageId, payload = {}) {
     if (!messageId) return Promise.resolve(true);
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const client = await this.pool.connect();
       try {
         const result = await client.query(
@@ -250,7 +261,7 @@ export class PostgresStore {
   }
 
   persistTenantCritical(tenantId) {
-    return this.queueWrite(async () => {
+    return this.queueCriticalWrite(async () => {
       const state = this.getState();
       const tenant = state.tenants.find((item) => item.id === tenantId);
       if (!tenant) return;
@@ -286,7 +297,7 @@ export class PostgresStore {
   }
 
   persistConversation(conversationId) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const conversation = this.getState().conversations.find((item) => item.id === conversationId);
       if (!conversation) return;
       const client = await this.pool.connect();
@@ -494,7 +505,7 @@ export class PostgresStore {
   }
 
   enqueueOutbox(entry) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const result = await insertOutboxEntry(this.pool, entry);
       return result.rows[0] ? outboxRow(result.rows[0]) : { ...entry, created: false };
     }, 'outbox enqueue');
@@ -571,28 +582,32 @@ export class PostgresStore {
   async acquireInboundBatchLease(lockKey, { ownerId = this.instanceId, leaseMs = 30_000 } = {}) {
     if (!lockKey) return true;
     const leaseUntil = new Date(Date.now() + Math.max(1_000, Number(leaseMs) || 30_000)).toISOString();
-    const result = await this.pool.query(
-      `INSERT INTO inbound_batch_leases (lock_key, owner_id, lease_until, updated_at)
-       VALUES ($1, $2, $3::timestamptz, now())
-       ON CONFLICT (lock_key) DO UPDATE
-         SET owner_id = EXCLUDED.owner_id,
-             lease_until = EXCLUDED.lease_until,
-             updated_at = now()
-       WHERE inbound_batch_leases.lease_until <= now()
-          OR inbound_batch_leases.owner_id = EXCLUDED.owner_id
-       RETURNING lock_key`,
-      [lockKey, ownerId, leaseUntil],
-    );
-    return result.rowCount > 0;
+    return this.queueOperationalWrite(async () => {
+      const result = await this.pool.query(
+        `INSERT INTO inbound_batch_leases (lock_key, owner_id, lease_until, updated_at)
+         VALUES ($1, $2, $3::timestamptz, now())
+         ON CONFLICT (lock_key) DO UPDATE
+           SET owner_id = EXCLUDED.owner_id,
+               lease_until = EXCLUDED.lease_until,
+               updated_at = now()
+         WHERE inbound_batch_leases.lease_until <= now()
+            OR inbound_batch_leases.owner_id = EXCLUDED.owner_id
+         RETURNING lock_key`,
+        [lockKey, ownerId, leaseUntil],
+      );
+      return result.rowCount > 0;
+    }, 'inbound batch lease acquire');
   }
 
   async releaseInboundBatchLease(lockKey, { ownerId = this.instanceId } = {}) {
     if (!lockKey) return true;
-    await this.pool.query(
-      'DELETE FROM inbound_batch_leases WHERE lock_key = $1 AND owner_id = $2',
-      [lockKey, ownerId],
-    );
-    return true;
+    return this.queueOperationalWrite(async () => {
+      await this.pool.query(
+        'DELETE FROM inbound_batch_leases WHERE lock_key = $1 AND owner_id = $2',
+        [lockKey, ownerId],
+      );
+      return true;
+    }, 'inbound batch lease release');
   }
 
   markInboundMessageProcessing(messageId) {
@@ -621,7 +636,7 @@ export class PostgresStore {
   }
 
   updateInboundMessage(messageId, assignments, values, label) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const result = await this.pool.query(
         `UPDATE inbound_messages SET ${assignments} WHERE message_id = $1 RETURNING *`,
         [messageId, ...values],
@@ -631,7 +646,7 @@ export class PostgresStore {
   }
 
   createInteractionOffer(offer) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const result = await this.pool.query(
         `INSERT INTO interaction_offers (id, tenant_id, conversation_id, order_id, version, status, payload, expires_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $9)
@@ -656,7 +671,7 @@ export class PostgresStore {
   }
 
   consumeInteractionOffer({ offerId, optionId, tenantId, conversationId }) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
@@ -701,7 +716,7 @@ export class PostgresStore {
   }
 
   async claimOutbox({ limit = 10 } = {}) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
@@ -734,7 +749,7 @@ export class PostgresStore {
   }
 
   completeOutbox(id, result = null) {
-    return this.queueWrite(() => this.pool.query(
+    return this.queueOperationalWrite(() => this.pool.query(
       `UPDATE integration_outbox
        SET status = 'processed', processed_at = now(), locked_at = NULL, payload = payload || $2::jsonb
        WHERE id = $1`,
@@ -743,7 +758,7 @@ export class PostgresStore {
   }
 
   failOutbox(id, error, { maxAttempts = 8 } = {}) {
-    return this.queueWrite(async () => {
+    return this.queueOperationalWrite(async () => {
       const current = await this.pool.query('SELECT attempts FROM integration_outbox WHERE id = $1', [id]);
       const attempts = Number(current.rows[0]?.attempts ?? 1);
       const status = attempts >= maxAttempts ? 'failed' : 'retrying';
@@ -842,6 +857,34 @@ export class PostgresStore {
     return this.saveQueue;
   }
 
+  queueOperationalWrite(operation, label) {
+    this.operationalQueue = this.operationalQueue.catch(() => undefined).then(operation);
+    const write = this.operationalQueue;
+    this.operationalWrites.add(write);
+    write.then(
+      () => this.operationalWrites.delete(write),
+      () => this.operationalWrites.delete(write),
+    );
+    write.catch((error) => {
+      console.error(`PostgresStore ${label} failed`, error);
+    });
+    return write;
+  }
+
+  queueCriticalWrite(operation, label) {
+    this.criticalQueue = this.criticalQueue.catch(() => undefined).then(operation);
+    const write = this.criticalQueue;
+    this.criticalWrites.add(write);
+    write.then(
+      () => this.criticalWrites.delete(write),
+      () => this.criticalWrites.delete(write),
+    );
+    write.catch((error) => {
+      console.error(`PostgresStore ${label} failed`, error);
+    });
+    return write;
+  }
+
   runInboundWrite(operation) {
     const write = Promise.resolve().then(operation);
     this.inboundWrites.add(write);
@@ -849,8 +892,15 @@ export class PostgresStore {
     return write;
   }
 
+  async flushOperational() {
+    await this.operationalQueue;
+    await Promise.all([...this.operationalWrites]);
+  }
+
   async flush() {
     await Promise.all([...this.inboundWrites]);
+    await this.criticalQueue;
+    await this.flushOperational();
     if (this.snapshotSaveTimer) {
       clearTimeout(this.snapshotSaveTimer);
       this.snapshotSaveTimer = null;
@@ -1685,6 +1735,7 @@ async function upsertConversation(client, conversation) {
           value = EXCLUDED.value,
           payload = EXCLUDED.payload,
           updated_at = EXCLUDED.updated_at
+      WHERE conversations.updated_at <= EXCLUDED.updated_at
     `,
     [
       conversation.id,

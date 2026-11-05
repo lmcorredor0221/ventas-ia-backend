@@ -666,12 +666,15 @@ export class ToolRegistry {
   }
 
   async whatsappBusinessMessaging(tenantId, conversationId, payload) {
+    const startedAt = Date.now();
     await sleep(20);
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
+    const sendStartedAt = Date.now();
     const liveConfig = this.config.whatsappMode === 'live'
       ? await this.sendLiveWhatsAppMessage({ tenant, payload })
       : null;
+    const sendDurationMs = Date.now() - sendStartedAt;
     const providerMessageId = liveConfig?.providerMessageId ?? `mock-${crypto.randomUUID()}`;
     this.store.mutate((next) => {
       const conversation = next.conversations.find((item) => item.id === conversationId);
@@ -688,7 +691,18 @@ export class ToolRegistry {
         conversation.updatedAt = new Date().toISOString();
       }
     });
+    const persistenceStartedAt = Date.now();
     await this.store.persistConversation?.(conversationId);
+    console.info(JSON.stringify({
+      event: 'whatsapp.outbound.timing',
+      tenantId,
+      conversationId,
+      providerMessageId,
+      live: Boolean(liveConfig),
+      sendDurationMs,
+      persistenceDurationMs: Date.now() - persistenceStartedAt,
+      totalDurationMs: Date.now() - startedAt,
+    }));
     this.audit(tenantId, 'tool.whatsapp_business_messaging.sent', 'whatsapp_message', {
       conversationId,
       providerMessageId,

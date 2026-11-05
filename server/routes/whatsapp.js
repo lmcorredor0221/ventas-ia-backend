@@ -103,6 +103,15 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
             requestId: req.requestId,
           },
         }));
+        console.info(JSON.stringify({
+          event: 'whatsapp.webhook.ack',
+          mode: 'async',
+          tenantId: normalized.tenantId,
+          messageId: normalized.messageId,
+          requestId: req.requestId,
+          durationMs: Date.now() - startedAt,
+          queued: queued.created,
+        }));
         return res.status(200).json({ ok: true, queued: queued.created, duplicate: !queued.created });
       }
       const result = await runtime.processInbound(normalized);
@@ -115,6 +124,15 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
         durationMs: Date.now() - startedAt,
         conversationId: result.conversation?.id,
         metadata: { duplicate: result.duplicate, phoneNumberId: normalized.phoneNumberId, waId: normalized.waId, traceId: normalized.traceId, requestId: req.requestId },
+      }));
+      console.info(JSON.stringify({
+        event: 'whatsapp.webhook.ack',
+        mode: 'sync',
+        tenantId: normalized.tenantId,
+        messageId: normalized.messageId,
+        requestId: req.requestId,
+        durationMs: Date.now() - startedAt,
+        duplicate: result.duplicate,
       }));
       return res.status(200).json({ ok: true, duplicate: result.duplicate, conversationId: result.conversation?.id });
     } catch (error) {

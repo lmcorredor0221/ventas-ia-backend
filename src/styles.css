@@ -4192,6 +4192,31 @@ select:disabled {
   line-height: 1.4;
 }
 
+.catalog-amount-sale-note {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid rgba(39, 122, 105, 0.2);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.catalog-amount-sale-note strong {
+  color: var(--ink);
+}
+
+.catalog-amount-sale-note code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: var(--ink);
+  background: rgba(39, 122, 105, 0.1);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+}
+
 .catalog-import-actions {
   display: flex;
   flex-wrap: wrap;

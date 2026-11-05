@@ -33,7 +33,7 @@
     "test:order-edit:postgres": "node server/tests/order-edit-contract.mjs --postgres",
     "test:cart-continuity": "node server/tests/cart-continuity-contract.mjs",
     "test:contextual-harness": "node server/tests/contextual-acceptance-contract.mjs && node server/tests/contextual-harness-contract.mjs",
-    "test:delivery": "node server/tests/delivery-policy-contract.mjs && node server/tests/delivery-runtime-contract.mjs && node server/tests/delivery-persistence-contract.mjs && node server/tests/commerce-questions-contract.mjs && node server/tests/llm-reply-composer-contract.mjs",
+    "test:delivery": "node server/tests/config-persistence-priority.mjs && node server/tests/delivery-policy-contract.mjs && node server/tests/delivery-runtime-contract.mjs && node server/tests/delivery-persistence-contract.mjs && node server/tests/commerce-questions-contract.mjs && node server/tests/llm-reply-composer-contract.mjs",
     "test:delivery:real": "node server/tests/delivery-commerce-deepseek.mjs",
     "test:payment": "node server/tests/payment-notice-contract.mjs",
     "test:payment:real": "node server/tests/payment-notice-deepseek.mjs",

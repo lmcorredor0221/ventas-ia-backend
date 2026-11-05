@@ -4123,7 +4123,11 @@ function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsh
           )}
         </div>
       )}
-      <small className="catalog-import-hint">Columnas obligatorias: <b>sku</b> y <b>nombre</b>. También puedes incluir precio, stock, categoría, marca y presentación.</small>
+      <small className="catalog-import-hint">Columnas obligatorias: <b>sku</b> y <b>nombre</b>. También puedes incluir precio, stock, categoría, marca, presentación, descripción, alias, etiquetas y atributos.</small>
+      <div className="catalog-amount-sale-note" role="note">
+        <strong>Venta por valor, por producto</strong>
+        <span>Usa la columna <code>permite_venta_por_valor</code> con <b>TRUE</b> para autorizar compras por importe en ese SKU. <b>FALSE</b>, vacío o ausencia de la columna significa que no está permitido.</span>
+      </div>
     </article>
   );
 }
@@ -6360,8 +6364,8 @@ function paymentMethodId(label) {
 }
 
 function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
-  const storedFee = policy.deliveryFee ?? null;
-  const storedMinimum = policy.deliveryMinimumSubtotal ?? null;
+  const storedFee = policy.deliveryFee ?? 0;
+  const storedMinimum = policy.deliveryMinimumSubtotal ?? 10000;
   const [deliveryFee, setDeliveryFee] = useState(() => String(storedFee ?? ''));
   const [minimumSubtotal, setMinimumSubtotal] = useState(() => String(storedMinimum ?? ''));
   const [saving, setSaving] = useState(false);
@@ -6374,8 +6378,10 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
     event.preventDefault();
     setNotice(null);
     try {
-      const fee = parseNullableCopAmount(deliveryFee, 'Costo del domicilio');
-      const minimum = parseNullableCopAmount(minimumSubtotal, 'Pedido mínimo');
+      // Empty fields restore the tenant defaults instead of creating a
+      // configuration-incomplete delivery policy.
+      const fee = parseNullableCopAmount(deliveryFee, 'Costo del domicilio') ?? 0;
+      const minimum = parseNullableCopAmount(minimumSubtotal, 'Pedido mínimo') ?? 10000;
       const orderPolicy = {};
       if (fee !== storedFee) orderPolicy.deliveryFee = fee;
       if (minimum !== storedMinimum) orderPolicy.deliveryMinimumSubtotal = minimum;
@@ -6396,16 +6402,16 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
   return (
     <form className="customer-reply-settings" noValidate onSubmit={save}>
       <h3>Condiciones del domicilio</h3>
-      <p>Valores en pesos enteros. Un campo vacío queda sin configurar. Escribe 0 para ofrecer domicilio gratis o no exigir mínimo.</p>
+      <p>Valores en pesos enteros. Por defecto: domicilio gratis y pedido mínimo de $10.000. Escribe 0 en el mínimo para no exigirlo.</p>
       <div className="config-field-grid">
         <label className="config-field">
           <span><Truck size={16} /> Costo del domicilio (COP)</span>
-          <input inputMode="numeric" value={deliveryFee} disabled={saving} onChange={(event) => { setDeliveryFee(event.target.value); setNotice(null); }} placeholder="Sin configurar" />
+          <input inputMode="numeric" value={deliveryFee} disabled={saving} onChange={(event) => { setDeliveryFee(event.target.value); setNotice(null); }} placeholder="0" />
           <small>Una tarifa por pedido. 0 = domicilio gratis.</small>
         </label>
         <label className="config-field">
           <span><ShoppingBag size={16} /> Pedido mínimo para domicilio (COP)</span>
-          <input inputMode="numeric" value={minimumSubtotal} disabled={saving} onChange={(event) => { setMinimumSubtotal(event.target.value); setNotice(null); }} placeholder="Sin configurar" />
+          <input inputMode="numeric" value={minimumSubtotal} disabled={saving} onChange={(event) => { setMinimumSubtotal(event.target.value); setNotice(null); }} placeholder="10000" />
           <small>Solo productos, sin sumar el domicilio. 0 = sin mínimo.</small>
         </label>
       </div>

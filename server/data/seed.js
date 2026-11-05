@@ -46,10 +46,10 @@ export function createSeedState() {
           allowedTasks: ['intent_classification', 'order_parser', 'tool_router', 'response_composer'],
         },
         orderPolicy: {
-          // Only this historical test fixture explicitly offers free delivery without a minimum.
-          // New tenants and other fixtures remain unknown; this is not a global commercial default.
-          deliveryFee: tenant.id === 'andina' ? 0 : null,
-          deliveryMinimumSubtotal: tenant.id === 'andina' ? 0 : null,
+          // Platform defaults apply to every newly provisioned store. Tenant
+          // configuration can still override either value independently.
+          deliveryFee: 0,
+          deliveryMinimumSubtotal: 10000,
           customerIdentifier: 'whatsapp_wa_id',
           customerRequiredFields: ['name', 'defaultAddress'],
           missingQuantity: 'ask',
