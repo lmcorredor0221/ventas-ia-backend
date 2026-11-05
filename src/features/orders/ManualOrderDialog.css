@@ -1,0 +1,30 @@
+.manual-order-dialog { width: min(760px, calc(100vw - 24px)); max-height: 90dvh; box-sizing: border-box; overflow-y: auto; border: 1px solid #d6ded9; border-radius: 20px; padding: 24px; color: #192234; background: #fffdfa; }
+.manual-order-dialog::backdrop { background: #15213399; }
+.manual-order-dialog header, .manual-order-dialog footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.manual-order-dialog h2 { font-size: 1.35rem; margin: 5px 0; }
+.manual-order-dialog p { line-height: 1.5; }
+.manual-order-dialog fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.manual-order-fields { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.manual-order-dialog label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: .9rem; }
+.manual-order-dialog input, .manual-order-dialog select { width: 100%; box-sizing: border-box; min-width: 0; padding: 12px; font: inherit; color: inherit; background: white; border: 1px solid #b9c5be; border-radius: 8px; }
+.manual-order-dialog input:focus-visible, .manual-order-dialog select:focus-visible, .manual-order-dialog button:focus-visible { outline: 3px solid #335ac8; outline-offset: 2px; }
+.manual-order-search { margin-top: 22px; }
+.manual-order-results { list-style: none; margin: 8px 0; padding: 0; max-height: 240px; overflow: auto; border: 1px solid #d6ded9; border-radius: 8px; }
+.manual-order-results button { width: 100%; text-align: left; padding: 12px; border: 0; border-bottom: 1px solid #e5ebe7; background: #f5fbf6; color: inherit; display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
+.manual-order-results button:hover { background: #e3f4e8; }
+.manual-order-dialog button:disabled { opacity: .55; cursor: not-allowed; }
+.manual-order-lines { margin-top: 18px; }
+.manual-order-line { display: grid; grid-template-columns: 1fr 85px 95px auto; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid #dfe4e1; }
+.manual-order-line small { display: block; margin-top: 5px; }
+.manual-order-total { display: flex; justify-content: space-between; gap: 12px; font-size: 1.15rem; }
+.manual-order-dialog .manual-order-consent { display: flex; flex-direction: row; align-items: start; line-height: 1.5; gap: 10px; }
+.manual-order-consent input { flex: 0 0 20px; width: 20px; height: 20px; margin-top: 2px; }
+.manual-order-error { color: #a52222; }
+.manual-order-help { color: #516154; font-size: .9rem; }
+.manual-order-dialog footer { flex-wrap: wrap; padding-top: 14px; }
+@media (max-width: 600px) {
+  .manual-order-dialog { padding: 18px; }
+  .manual-order-fields { grid-template-columns: 1fr; }
+  .manual-order-line { grid-template-columns: 1fr 80px; gap: 10px; }
+  .manual-order-dialog footer button { width: 100%; min-height: 44px; }
+}

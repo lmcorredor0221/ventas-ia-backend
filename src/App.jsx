@@ -1,9 +1,12 @@
+import { launchMetaEmbeddedSignup } from './features/whatsapp/embeddedSignup.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
 import { patchJson, postJson } from './core/api/client.js';
 import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
 import PaymentNotices from './features/orders/PaymentNotices.jsx';
 import OrderProgressCard, { OrderPricingSummary } from './features/orders/OrderProgressCard.jsx';
+import ManualOrderDialog from './features/orders/ManualOrderDialog.jsx';
+import OrderWorkspace from './features/orders/OrderWorkspace.jsx';
 import {
   Activity,
   AlertTriangle,
@@ -38,8 +41,8 @@ import {
   PanelLeftOpen,
   Pause,
   Play,
-  Plus,
   PlugZap,
+  RefreshCw,
   RotateCcw,
   Search,
   Send,
@@ -79,6 +82,7 @@ const statusLabel = {
   resolved: 'Resuelto',
   manual_active: 'Atención manual activa',
   closed_no_confirmation: 'Cerrado sin confirmar',
+  closed_dispatched: 'En camino y cerrado',
 };
 
 const statusIcon = {
@@ -88,6 +92,7 @@ const statusIcon = {
   degraded: Clock3,
   manual_active: UserCheck,
   closed_no_confirmation: Clock3,
+  closed_dispatched: CheckCircle2,
   needs_binding: PlugZap,
   sandbox_ready: ShieldCheck,
   resolved: BadgeCheck,
@@ -411,76 +416,6 @@ function loadFacebookSdk(appId, version) {
   return window.__ventasIaFacebookSdkPromise;
 }
 
-function isTrustedMetaOrigin(origin) {
-  try {
-    const host = new URL(origin).hostname.toLowerCase();
-    return host === 'facebook.com'
-      || host.endsWith('.facebook.com')
-      || host === 'meta.com'
-      || host.endsWith('.meta.com');
-  } catch {
-    return false;
-  }
-}
-
-async function launchMetaEmbeddedSignup(launch) {
-  if (!launch?.appId || !launch?.configId) throw new Error('Falta la configuración de Meta Embedded Signup.');
-  const FB = await loadFacebookSdk(launch.appId, launch.graphApiVersion ?? 'v21.0');
-  return new Promise((resolve, reject) => {
-    let loginCode = '';
-    let sessionInfo = null;
-    let settled = false;
-    const finish = () => {
-      if (settled || !loginCode || !sessionInfo?.wabaId || !sessionInfo?.phoneNumberId) return;
-      settled = true;
-      window.removeEventListener('message', onMessage);
-      resolve({ code: loginCode, ...sessionInfo });
-    };
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener('message', onMessage);
-      reject(error);
-    };
-    const onMessage = (event) => {
-      if (!isTrustedMetaOrigin(event.origin)) return;
-      let data = event.data;
-      if (typeof data === 'string') {
-        try { data = JSON.parse(data); } catch { return; }
-      }
-      if (data?.type !== 'WA_EMBEDDED_SIGNUP') return;
-      const payload = data.data ?? data;
-      const eventName = String(payload.event ?? '').toUpperCase();
-      if (eventName === 'CANCEL' || eventName === 'ERROR') {
-        fail(new Error('La autorización de WhatsApp fue cancelada o reportó un error.'));
-        return;
-      }
-      sessionInfo = {
-        wabaId: payload.waba_id ?? payload.wabaId,
-        phoneNumberId: payload.phone_number_id ?? payload.phoneNumberId,
-        displayPhoneNumber: payload.display_phone_number ?? payload.displayPhoneNumber,
-      };
-      finish();
-    };
-    window.addEventListener('message', onMessage);
-    FB.login((response) => {
-      const code = response?.authResponse?.code;
-      if (!code) {
-        fail(new Error('Meta no devolvió el código de autorización.'));
-        return;
-      }
-      loginCode = code;
-      finish();
-    }, {
-      config_id: launch.configId,
-      response_type: launch.responseType ?? 'code',
-      override_default_response_type: true,
-      extras: { sessionInfoVersion: '3' },
-    });
-    window.setTimeout(() => fail(new Error('La autorización de WhatsApp tardó demasiado.')), 180000);
-  });
-}
-
 function firstActiveTenantId(auth) {
   return auth?.memberships?.find((item) => item.status === 'active')?.tenantId ?? auth?.memberships?.[0]?.tenantId ?? '';
 }
@@ -502,6 +437,8 @@ function App() {
   const [conversationList, setConversationList] = useState(loadFixtureSize ? initialConversations : []);
   const [backendStatus, setBackendStatus] = useState('connecting');
   const [tenantId, setTenantId] = useState(() => initialRouteQuery?.get('tenant') ?? tenants[0].id);
+  const activeTenantRef = useRef(tenantId);
+  activeTenantRef.current = tenantId;
   const [activeView, setActiveView] = useState(() => initialRouteQuery?.get('view') === 'onboarding' ? 'onboarding' : 'summary');
   const [selectedId, setSelectedId] = useState(initialConversations[0]?.id ?? '');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -539,6 +476,8 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedHumanRequestId, setSelectedHumanRequestId] = useState('');
   const [selectedOrderId, setSelectedOrderId] = useState('');
+  const [manualOrderTarget, setManualOrderTarget] = useState(null);
+  const [orderWorkspaceTarget, setOrderWorkspaceTarget] = useState(null);
   const conversationSearchRef = useRef(null);
   const onboardingRedirectedTenantIds = useRef(new Set());
 
@@ -589,7 +528,9 @@ function App() {
           setAuthStatus('signed_in');
           setAuthRequired(false);
           setAuthError('');
-          if (session.memberships?.[0]?.tenantId) setTenantId(session.memberships[0].tenantId);
+          if (!canAccessPlatformAdmin(session) && session.memberships?.[0]?.tenantId) {
+            setTenantId(session.memberships[0].tenantId);
+          }
         }
       } catch {
         if (!cancelled) setAuthStatus('guest');
@@ -842,12 +783,44 @@ function App() {
     setActiveView('approvals');
   }
 
+  async function confirmManualOrder(conversationId, input) {
+    const requestedTenant = tenantId;
+    const result = await postJson(`/api/conversations/${encodeURIComponent(conversationId)}/manual-order`, input, { headers: csrfHeaders(auth), timeoutMs: 30000 });
+    if (activeTenantRef.current !== requestedTenant) return;
+    setOrders(current => [result.order, ...current.filter(order => order.id !== result.order.id)]);
+    setRequests(current => current.filter(request => request.conversationId !== conversationId));
+    setConversationList(current => current.map(conversation => conversation.id === conversationId ? { ...conversation, orderId: result.order.id, orderStatus: result.order.status } : conversation));
+    setManualOrderTarget(null);
+    setRefreshKey(value => value + 1);
+    openOrder(result.order.id);
+  }
+
   function openOrder(orderId) {
+    setOrderWorkspaceTarget({ id: orderId, tenantId });
     setSelectedHumanRequestId('');
     setSelectedOrderId(orderId);
     setQueueFocus('delivery');
     setQueueNotice(null);
     setActiveView('approvals');
+  }
+
+  function acceptOrderEdit(order) {
+    if (order.tenantId !== activeTenantRef.current) return;
+    setOrders(current => current.map(item => item.id === order.id ? order : item));
+    setRefreshKey(value => value + 1);
+  }
+
+  async function advanceWorkspaceOrder(order) {
+    const requestedTenant = tenantId;
+    const pending = visibleRequests.find(request => isDeliveryRequest(request) && deliveryRequestMatchesOrder(request, order));
+    if (order.status === 'pending_human_preparation' && pending) {
+      await postJson(`/api/pending-requests/${encodeURIComponent(pending.id)}/resolve`, { outcome: 'approved', responseMode: 'none' }, { headers: csrfHeaders(auth) });
+      if (activeTenantRef.current === requestedTenant) setRequests(current => current.filter(request => request.id !== pending.id));
+    } else {
+      const result = await patchJson(`/api/orders/${encodeURIComponent(order.id)}/status`, { status: order.status === 'preparing' ? 'dispatched' : 'preparing' }, { headers: csrfHeaders(auth) });
+      if (activeTenantRef.current === requestedTenant) setOrders(current => current.map(item => item.id === order.id ? result : item));
+    }
+    if (activeTenantRef.current === requestedTenant) setRefreshKey(value => value + 1);
   }
 
   function navigateToView(nextView) {
@@ -975,11 +948,16 @@ function App() {
 
   async function runWhatsAppOnboarding(action, payload = {}) {
     setOnboardingError('');
+    let completionAttemptId = payload.attemptId;
     const routes = {
       intent: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/intent`,
       start: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/start`,
+      renew: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/renew`,
+      sync: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/coexistence/sync`,
       complete: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/embedded-signup/complete`,
       binding: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/binding`,
+      pilot: `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/connect`,
+      'pilot-refresh': `/api/saas/tenants/${encodeURIComponent(tenantId)}/whatsapp/test-pilot/refresh`,
     };
     setOnboardingBusy(`whatsapp-${action}`);
     try {
@@ -990,13 +968,16 @@ function App() {
         credentials: 'include',
         body: JSON.stringify(payload),
       });
-      const result = await response.json().catch(() => ({}));
+      let result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error ?? `WhatsApp ${response.status}`);
       if (action === 'start' && result.launch?.authorizationUrl) {
         window.open(result.launch.authorizationUrl, '_blank', 'noopener,noreferrer');
       }
-      if (action === 'start' && result.mode === 'embedded_signup' && result.launch) {
-        const signup = await launchMetaEmbeddedSignup(result.launch);
+      if (['start', 'renew'].includes(action) && result.mode === 'embedded_signup' && result.launch) {
+        const sdk = await loadFacebookSdk(result.launch.appId, result.launch.graphApiVersion ?? 'v26.0');
+        const signup = await launchMetaEmbeddedSignup(result.launch, sdk, window);
+        if (activeTenantRef.current !== tenantId) throw new Error('Cambiaste de tienda durante la autorización. Vuelve a abrir la tienda que deseas conectar.');
+        completionAttemptId = signup.attemptId;
         const completionPayload = {
           ...signup,
           registrationPin: payload.registrationPin,
@@ -1009,14 +990,16 @@ function App() {
         });
         const completion = await completionResponse.json().catch(() => ({}));
         if (!completionResponse.ok) throw new Error(completion.error ?? `WhatsApp ${completionResponse.status}`);
+        result = completion;
       }
       setRefreshKey((value) => value + 1);
       const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(tenantId)}/status`, { credentials: 'include' });
-      if (statusResponse.ok) setOnboardingBundle(await statusResponse.json());
+      if (statusResponse.ok && activeTenantRef.current === tenantId) setOnboardingBundle(await statusResponse.json());
+      if (action === 'pilot-refresh') setOnboardingNotice('Meta validó el token de prueba y VIA actualizó el canal de esta tienda.');
       return result;
     } catch (error) {
       setOnboardingError(error.message);
-      return null;
+      return completionAttemptId ? { requiresCompletionRetry: true, attemptId: completionAttemptId } : null;
     } finally {
       setOnboardingBusy('');
     }
@@ -1046,7 +1029,10 @@ function App() {
   async function resolveRequest(id, outcome, options = {}) {
     const note = options.note ?? draftReply;
     const responseMode = options.responseMode ?? 'none';
-    const request = requests.find((item) => item.id === id);
+    const resolvedRequest = requests.find((request) => request.id === id);
+    const deliveryOrderId = resolvedRequest ? deliveryRequestOrderId(resolvedRequest) : '';
+    const isDeliveryOrder = Boolean(resolvedRequest && isDeliveryRequest(resolvedRequest));
+    const request = resolvedRequest;
     const isDeliveryReview = request && isDeliveryPolicyReview(request);
     setResolvingRequestId(id);
     setQueueNotice(null);
@@ -1058,11 +1044,24 @@ function App() {
       }, { headers: csrfHeaders(auth) });
       if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
       setRequests((current) => current.filter((item) => item.id !== id));
-      setQueueNotice({ type: 'success', text: isDeliveryReview
-        ? 'Revisión comercial guardada. El cliente debe aceptar una cotización vigente antes de confirmar el pedido.'
-        : outcome === 'approved' && request && isDeliveryRequest(request)
-          ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.'
-          : 'Decisión guardada. La lista se actualizará enseguida.' });
+      if (isDeliveryOrder) {
+        const nextStatus = outcome === 'approved' ? 'preparing' : 'cancelled';
+        setOrders((current) => current.map((order) => (
+          deliveryRequestMatchesOrder(resolvedRequest, order) || order.id === deliveryOrderId
+            ? { ...order, status: nextStatus, updatedAt: new Date().toISOString() }
+            : order
+        )));
+      }
+      setQueueNotice({
+        type: 'success',
+        text: isDeliveryReview
+          ? 'Revisión comercial guardada. El cliente debe aceptar una cotización vigente antes de confirmar el pedido.'
+          : isDeliveryOrder && outcome === 'approved'
+          ? 'Pedido tomado. Ahora alístalo y después marca que va en camino.'
+          : isDeliveryOrder
+            ? 'Pedido cancelado. Quedó registrado en los finalizados.'
+            : 'Decisión guardada. La lista se actualizará enseguida.',
+      });
       setRefreshKey((value) => value + 1);
     } catch (error) {
       setQueueNotice({ type: 'error', text: normalizeApiErrorMessage(error, 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.') });
@@ -1079,11 +1078,19 @@ function App() {
       const result = await patchJson(`/api/orders/${encodeURIComponent(orderId)}/status`, { status }, { headers: csrfHeaders(auth) });
       setOrders((current) => current.map((order) => order.id === orderId ? result : order));
       if (status === 'delivered') setQueueFocus('finished');
-      setQueueNotice({ type: 'success', text: {
+      const notice = {
         preparing: 'Pedido tomado. Ya puedes alistarlo.',
         dispatched: 'Pedido marcado en camino.',
         delivered: 'Pedido marcado como entregado.',
-      }[status] });
+      }[status];
+      const notification = result.transition?.notification;
+      if (status === 'dispatched' && notification?.status === 'sent') {
+        setQueueNotice({ type: 'success', text: `${notice} Avisamos al cliente por WhatsApp y cerramos la conversación.` });
+      } else if (status === 'dispatched' && notification?.status === 'failed') {
+        setQueueNotice({ type: 'error', text: `${notice} pero WhatsApp no pudo entregar el aviso. Renueva el token de Meta y vuelve a intentarlo.` });
+      } else {
+        setQueueNotice({ type: 'success', text: notice });
+      }
       setRefreshKey((value) => value + 1);
     } catch (error) {
       setQueueNotice({ type: 'error', text: error.message });
@@ -1357,6 +1364,8 @@ function App() {
             onSelectConversation={openWhatsAppConversation}
             onDeleteConversation={deleteConversation}
             onOpenWhatsAppExternally={markManualWhatsApp}
+            onManualOrder={id => setManualOrderTarget({ id, tenantId })}
+            onOpenOrder={openOrder}
             onOpenApprovals={openApprovals}
             onToggleDetail={() => setConversationDetailCollapsed((value) => !value)}
             pendingRequest={visibleRequests.find((request) => request.conversationId === selectedConversation?.id)}
@@ -1382,6 +1391,7 @@ function App() {
             requests={visibleRequests}
             orders={visibleOrders}
             onAdvanceOrder={advanceOrder}
+            onOpenOrderWorkspace={id => setOrderWorkspaceTarget({ id, tenantId })}
             updatingOrderId={updatingOrderId}
             selectedOrderId={selectedOrderId}
             conversations={visibleConversations}
@@ -1437,8 +1447,15 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration key={tenant.id} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
+      {orderWorkspaceTarget?.tenantId === tenantId && <OrderWorkspace key={`${tenantId}:${orderWorkspaceTarget.id}`}
+        orderId={orderWorkspaceTarget.id} tenantId={tenantId} headers={csrfHeaders(auth)}
+        onClose={() => setOrderWorkspaceTarget(null)} onSaved={acceptOrderEdit} onAdvance={advanceWorkspaceOrder}
+        onOpenWhatsApp={conversation => { window.open(whatsappHref(conversation.waId), '_blank', 'noopener,noreferrer'); markManualWhatsApp(conversation.id); }} />}
+      {manualOrderTarget?.tenantId === tenantId && <ManualOrderDialog key={manualOrderTarget.id}
+        conversationId={manualOrderTarget.id} onClose={() => setManualOrderTarget(null)} onSubmit={confirmManualOrder}
+        onOpenOrder={id => { setManualOrderTarget(null); openOrder(id); }} />}
     </main>
   );
 }
@@ -2777,6 +2794,8 @@ function UsageMeter({ label, used, limit, percent }) {
 }
 
 function ConversationsView({
+  onManualOrder,
+  onOpenOrder,
   backendStatus,
   conversations: conversationItems,
   detailCollapsed,
@@ -2915,6 +2934,8 @@ function ConversationsView({
         )}
         {activeWorkspaceTab === 'detail' && selectedConversation ? (
           <ConversationPanel
+            onManualOrder={onManualOrder}
+            onOpenOrder={onOpenOrder}
             conversation={selectedConversation}
             detailCollapsed={detailCollapsed}
             events={events}
@@ -2943,6 +2964,8 @@ function ConversationsView({
 }
 
 function ConversationPanel({
+  onManualOrder,
+  onOpenOrder,
   conversation,
   detailCollapsed = false,
   events,
@@ -3052,6 +3075,10 @@ function ConversationPanel({
         <span>{needsHuman ? 'Necesita atención' : 'Siguiente paso'}</span>
         <strong>{nextAction}</strong>
         <div className="button-row">
+          {!conversation.orderId && onManualOrder && (conversation.manualMode === 'whatsapp_external' || ['manual_active', 'blocked', 'approval_required', 'degraded'].includes(conversation.status) || conversation.closeReason === 'manual_inactivity') && (
+            <button className="approve-btn compact" type="button" onClick={() => onManualOrder(conversation.id)}><ShoppingBag size={16} />Confirmar y alistar pedido</button>
+          )}
+          {conversation.orderId && onOpenOrder && <button className="approve-btn compact" type="button" onClick={() => onOpenOrder(conversation.orderId)}><ShoppingBag size={16} />Ver pedido</button>}
           {needsHuman && onOpenApprovals && (
             <button className="approve-btn compact" type="button" onClick={onOpenApprovals}>
               <UserCheck size={16} />
@@ -3090,6 +3117,8 @@ function ConversationPanel({
         <InfoLine icon={Search} label="Necesidad" value={conversation.need} />
         <InfoLine icon={ShoppingBag} label="Valor / etapa" value={`${conversation.value} · ${stageLabel(conversation.stage)}`} />
         <InfoLine icon={PlugZap} label="Herramienta" value={toolLabel(conversation.lastTool)} />
+        {conversation.aiExecution?.mode && <InfoLine icon={Bot} label="Interpretación" value={llmExecutionLabel(conversation.aiExecution.mode)} />}
+        {conversation.customerCapture?.capturedAt && <InfoLine icon={UserCheck} label="Datos del cliente" value={customerCaptureLabel(conversation.customerCapture)} />}
       </div>
 
       {pendingRequest && (
@@ -3143,7 +3172,11 @@ function conversationMessages(conversation) {
 }
 
 function whatsappHref(waId) {
-  const digits = String(waId ?? '').replace(/\D/g, '');
+  const value = String(waId ?? '').trim();
+  // Usernames/BSUIDs are not phone numbers: stripping their prefix can
+  // accidentally open a different recipient. Only build links for phones.
+  if (!/^\+?[\d\s()-]+$/.test(value)) return '';
+  const digits = value.replace(/\D/g, '');
   if (!digits) return '';
   return `https://wa.me/${digits}`;
 }
@@ -3153,6 +3186,29 @@ function formatMessageTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Sin hora';
   return date.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+}
+
+function llmExecutionLabel(mode) {
+  const labels = {
+    provider_api: 'LLM de producción',
+    codex_simulated_deepseek: 'Simulación de IA',
+    codex_cli_simulated_deepseek: 'Simulación de IA',
+    mock_structured: 'Simulación estructurada',
+    mock_structured_fallback: 'Simulación estructurada',
+    provider_unavailable_handoff: 'LLM no disponible: relevo humano',
+  };
+  return labels[mode] ?? mode;
+}
+
+function customerCaptureLabel(capture) {
+  const fields = [capture?.nameSource && 'Nombre', capture?.addressSource && 'Dirección'].filter(Boolean);
+  const sources = new Set([capture?.nameSource, capture?.addressSource].filter(Boolean));
+  const source = sources.size > 1
+    ? 'registrados desde el mensaje y la IA'
+    : sources.has('llm')
+      ? 'interpretados por IA'
+      : 'recibidos del mensaje';
+  return `${fields.join(' y ') || 'Datos'} ${source}`;
 }
 
 function InfoLine({ icon: Icon, label, value }) {
@@ -3179,13 +3235,21 @@ function isDeliveryRequest(request) {
     || snapshot.action === 'prepare_delivery_order';
 }
 
+function deliveryRequestOrderId(request) {
+  const snapshot = request?.contextSnapshot ?? request?.context_snapshot ?? {};
+  return snapshot.orderId ?? snapshot.order_id ?? '';
+}
+
+function deliveryRequestMatchesOrder(request, order) {
+  const orderId = deliveryRequestOrderId(request);
+  return orderId ? orderId === order.id : request?.conversationId === order.conversationId;
+}
+
 function operationalOrders(orders, requests) {
   const pendingOrderRequests = requests.filter(isDeliveryRequest);
   return orders.filter((order) => (
-    ['preparing', 'dispatched'].includes(order.status)
-    || (order.status === 'pending_human_preparation' && !pendingOrderRequests.some((request) => (
-      request.contextSnapshot?.orderId === order.id || request.conversationId === order.conversationId
-    )))
+    !pendingOrderRequests.some((request) => deliveryRequestMatchesOrder(request, order))
+    && ['pending_human_preparation', 'preparing', 'dispatched'].includes(order.status)
   ));
 }
 
@@ -3234,7 +3298,7 @@ function normalizeLabel(value = '') {
     .toLowerCase();
 }
 
-function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
+function HumanQueue({ requests, orders = [], conversations, onSelectConversation, onResolve, onAdvanceOrder, onOpenOrderWorkspace, draftReply, setDraftReply, replyMode, setReplyMode, selectedRequestId = '', selectedOrderId = '', focusTab = 'pending', notice, resolvingRequestId, updatingOrderId }) {
   const [activeQueueTab, setActiveQueueTab] = useState(focusTab);
   const selectedRequestRef = useRef(null);
   const queueRows = requests.map((request) => {
@@ -3335,6 +3399,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
             conversationAvailable={conversations.some((conversation) => conversation.id === order.conversationId)}
             onSelectConversation={onSelectConversation}
             onAdvance={onAdvanceOrder}
+            onOpenWorkspace={onOpenOrderWorkspace}
             busy={updatingOrderId === order.id}
             selected={selectedOrderId === order.id}
           />
@@ -3355,6 +3420,7 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                 <span className="request-kind">{view.task}</span>
               </div>
               <h3>{view.title}</h3>
+              {view.isDeliveryOrder && view.orderId && <button className="ghost-btn" type="button" onClick={() => onOpenOrderWorkspace(view.orderId)}><ShoppingBag size={17} />Ver pedido y conversación</button>}
               {view.isDeliveryOrder || view.isDeliveryReview ? (
                 <div className="delivery-brief">
                   {view.isDeliveryOrder && (
@@ -3604,7 +3670,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       icon: UserCheck,
       label: 'Tu cuenta Google',
       value: googleConnection?.accountEmail ?? 'Pendiente',
-      state: googleConnection?.accountEmail ? 'ok' : 'warn',
+      state: googleConnection?.status === 'connected' ? 'ok' : 'warn',
     },
     {
       icon: MessageCircle,
@@ -3616,11 +3682,11 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
   const onboardingTabs = [
     ['route', ShieldCheck, 'Ruta', `${completeCount}/${checks.length}`],
     ['billing', CircleDollarSign, 'Pago', subscriptionLabel],
-    ['google', Database, 'Google', googleConnection?.accountEmail ? 'Conectado' : 'Pendiente'],
+    ['google', Database, 'Google', googleConnection?.status === 'connected' ? 'Conectado' : googleConnection?.status === 'reconnect_required' ? 'Reconectar' : 'Pendiente'],
     ['whatsapp', MessageCircle, 'WhatsApp', tenant.config?.whatsapp?.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['test', Play, 'Prueba', status.readyForOperation ? 'Lista' : 'Pendiente'],
   ];
-  const googleConnected = Boolean(googleConnection?.accountEmail || googleConnection?.status === 'connected');
+  const googleConnected = googleConnection?.status === 'connected';
   const googleProvisioned = Boolean(
     workspace?.spreadsheet?.id || workspace?.status === 'provisioned' || workspace?.status === 'ready',
   );
@@ -3629,12 +3695,14 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       key: 'authorize',
       icon: UserCheck,
       title: 'Conectar tu cuenta Google',
-      detail: 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
+      detail: googleConnection?.status === 'reconnect_required'
+        ? 'La autorización de Google venció o fue revocada. Reconecta la misma cuenta; conservaremos la hoja y los datos de tu tienda.'
+        : 'Entra con la cuenta que usas para guardar los productos y pedidos de tu tienda.',
       done: googleConnected,
       status: googleConnected ? 'sandbox_ready' : setupAccess.allowed ? 'needs_binding' : 'approval_required',
       statusText: googleConnected ? 'Cuenta conectada' : setupAccess.allowed ? 'Pendiente' : 'Inicia tu prueba primero',
       action: 'google-oauth',
-      actionLabel: googleConnected ? 'Reconectar Google' : 'Conectar Google',
+      actionLabel: googleConnection?.accountEmail ? 'Reconectar Google' : 'Conectar Google',
       disabled: !setupAccess.allowed,
     },
     {
@@ -3737,7 +3805,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
       {notice && (
         <div className={`setup-notice ${error ? 'is-warning' : ''}`} role="status">
           {error ? <AlertTriangle size={17} /> : <CheckCircle2 size={17} />}
-          <span>{notice}</span>
+          <span>{error || notice}</span>
         </div>
       )}
 
@@ -3802,7 +3870,7 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
           </div>
           <div className="readiness-list">
             <ResourceRow icon={ShieldCheck} label="Operación" value={operationLabel} />
-            <ResourceRow icon={CircleDollarSign} label="Plan" value={subscriptionLabel} />
+            <ResourceRow icon={CircleDollarSign} label="Pago plataforma" value={humanState(subscription?.status) ?? 'Sin validar'} />
             <ResourceRow icon={UserCheck} label="Cuenta Google" value={googleConnection?.accountEmail ?? 'No conectada'} />
             <ResourceRow icon={MessageCircle} label="WhatsApp" value={tenant.config?.whatsapp?.phoneNumberId ? 'Número conectado' : 'Pendiente'} />
           </div>
@@ -3827,6 +3895,10 @@ function OnboardingView({ billingStatus, bundle, busyAction, error, notice, isPl
               isPlatformAdmin={isPlatformAdmin}
               key={check.key}
               onAction={(action) => {
+                if (action === 'subscription' && !isPlatformAdmin) {
+                  setActiveOnboardingTab('billing');
+                  return;
+                }
                 onAction(action);
               }}
             />
@@ -4002,7 +4074,14 @@ function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsh
   async function importFile() {
     if (!csvText) return;
     const imported = await onImport('import', { csvText, fileName: file?.name });
-    if (imported) setResult(imported);
+    if (imported) setResult({
+      ...imported.validation,
+      ...imported,
+      valid: imported.status === 'imported',
+      canImport: false,
+      totalRows: imported.importedRows,
+      message: imported.status === 'imported' ? 'Los productos ya están guardados en Google Sheets de tu tienda.' : imported.message,
+    });
   }
 
   const validationErrors = result?.errors ?? [];
@@ -4034,7 +4113,7 @@ function CatalogImportPanel({ busyAction, error, googleReady, onImport, spreadsh
       {(localError || error) && <p className="catalog-import-error"><AlertTriangle size={15} />{localError || error}</p>}
       {result && (
         <div className={`catalog-import-result ${result.valid ? 'is-valid' : 'is-invalid'}`}>
-          <strong>{result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
+          <strong>{result.status === 'imported' ? `${result.importedRows} productos importados` : result.valid ? `${result.totalRows} filas revisadas` : 'El archivo necesita ajustes'}</strong>
           <span>{result.message}</span>
           {result.valid && <small>{result.activeRows ?? result.totalRows} productos activos · {googleReady ? 'Google preparado' : 'Conecta Google para importarlo'}</small>}
           {validationErrors.slice(0, 4).map((item) => <small className="is-error" key={`${item.row}-${item.field}`}>Fila {item.row}: {item.message}</small>)}
@@ -4060,6 +4139,9 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
   const canContinue = billing?.actions?.canContinueCheckout;
   const canStart = billing?.actions?.canStartCheckout;
   const status = activeSubscription?.status ?? 'pending_payment';
+  const canStartTrial = status === 'pending_payment'
+    && Boolean(plan?.trialEnabled && Number(plan?.trialDays) > 0)
+    && !activeSubscription?.trialStartedAt;
   const nextDate = activeSubscription?.nextBillingDate ?? activeSubscription?.currentPeriodEnd;
   const notices = billing?.notices ?? [];
   const paymentHistory = billing?.paymentHistory ?? payments;
@@ -4092,7 +4174,12 @@ function BillingOwnerPanel({ billing, busyAction, onAction, subscription }) {
         </div>
       )}
       <div className="billing-owner-actions">
-        {canContinue ? (
+        {canStartTrial ? (
+          <button className="approve-btn compact" type="button" onClick={() => onAction('subscription')} disabled={Boolean(busyAction)}>
+            <CircleDollarSign size={16} />
+            Iniciar prueba de {plan.trialDays} días
+          </button>
+        ) : canContinue ? (
           <button className="approve-btn compact" type="button" onClick={() => onAction('billing-continue')} disabled={Boolean(busyAction)}>
             <CircleDollarSign size={16} />
             Continuar pago
@@ -4207,7 +4294,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
     {
       key: 'business_app_existing',
       title: 'Tiene WhatsApp Business App',
-      detail: 'Guiamos migración o activación del número para responder desde la plataforma.',
+      detail: 'Conserva la app del celular y conecta VIA mediante coexistencia, si Meta habilita tu número.',
       hasWhatsAppBusiness: true,
     },
     {
@@ -4218,11 +4305,21 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
     },
   ];
   const [registrationPin, setRegistrationPin] = useState('');
+  const [phoneSelection, setPhoneSelection] = useState(null);
+  useEffect(() => { setRegistrationPin(''); setPhoneSelection(null); }, [tenant.id]);
+  async function connect(action = 'start', extra = {}) {
+    const result = await onAction(action, { registrationPin, ...extra });
+    if (result?.requiresPhoneSelection || result?.requiresCompletionRetry) setPhoneSelection({ ...result, tenantId: tenant.id });
+    else if (result) { setPhoneSelection(null); setRegistrationPin(''); }
+  }
   const currentPath = onboarding.setupPath;
   const connected = onboarding.status === 'connected';
-  const requiresRegistrationPin = currentPath && currentPath !== 'cloud_api_existing';
+  const testPilot = onboarding.testPilot ?? {};
+  const requiresRegistrationPin = currentPath === 'new_business';
   const canStart = Boolean(currentPath && onboarding.canAutomate && (!requiresRegistrationPin || /^\d{6}$/.test(registrationPin)));
-  const platformBlock = onboarding.reason === 'meta_app_review_pending'
+  const platformBlock = onboarding.reason === 'meta_login_review_pending'
+    ? { title: 'Falta habilitar el acceso de clientes externos en Meta', detail: 'Los permisos de WhatsApp ya están aprobados. Ventas IA debe completar el acceso de Facebook Login para que puedas autorizar tu propio negocio. Tu tienda no tiene que solicitar este permiso.' }
+    : onboarding.reason === 'meta_app_review_pending'
     ? whatsappMetaReviewCopy(onboarding.platformReadiness?.appReviewStatus)
     : onboarding.reason === 'status_unavailable'
       ? {
@@ -4270,10 +4367,11 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
         {paths.map((path) => (
           <button
             className={`whatsapp-path ${currentPath === path.key ? 'is-selected' : ''}`}
-            disabled={busyAction === 'whatsapp-intent' || connected}
+            disabled={Boolean(busyAction) || connected}
             key={path.key}
             onClick={() => {
               setRegistrationPin('');
+              setPhoneSelection(null);
               onAction('intent', {
                 setupPath: path.key,
                 hasWhatsAppBusiness: path.hasWhatsAppBusiness,
@@ -4313,6 +4411,39 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <ShieldCheck size={18} />
               <p>No tendrás que buscar identificadores, tokens, enlaces de webhook ni códigos técnicos en Meta.</p>
             </div>
+            {isPlatformAdmin && (
+              <div className="whatsapp-test-pilot">
+                <span className="eyebrow">Piloto de evidencia Meta</span>
+                <h4>Conecta el número de prueba de la plataforma</h4>
+                <p>
+                  Este acceso sirve solo para comprobar Ventas IA ante Meta. El número queda limitado a esta
+                  tienda piloto y nunca se comparte con clientes ni con otras tiendas.
+                </p>
+                {testPilot.eligible ? (
+                  testPilot.configured ? (
+                    <button
+                      className="approve-btn compact"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => onAction('pilot')}
+                      type="button"
+                    >
+                      <PlugZap size={15} />
+                      {busyAction === 'whatsapp-pilot' ? 'Conectando número de prueba...' : 'Conectar número de prueba'}
+                    </button>
+                  ) : (
+                    <p className="whatsapp-test-pilot-note">
+                      Falta cargar de forma segura los datos del número de prueba en Render. No uses un número
+                      ni una credencial de un cliente.
+                    </p>
+                  )
+                ) : (
+                  <p className="whatsapp-test-pilot-note">
+                    Para proteger a los clientes, primero designa esta tienda como piloto en Render. Su
+                    identificador interno es <code>{tenant.id}</code>.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="whatsapp-pending-actions">
               <button className="approve-btn" type="button" onClick={() => onSelectOnboardingTab('google')}>
                 <Database size={16} />
@@ -4332,7 +4463,7 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
           </div>
           <div>
               <span>2</span>
-              <div><strong>Confirma el negocio y el número</strong><p>En la ventana de Meta inicia sesión, elige o crea tu negocio y recibe un código por SMS o llamada.</p></div>
+              <div><strong>Autoriza el negocio de tu tienda</strong><p>Tu acceso a Google en VIA no inicia sesión en Facebook. Meta necesita que una persona administradora autorice su negocio y número. “Centro de Innovación Visual” identifica al proveedor de VIA: elige el negocio de tu tienda, no el del proveedor.</p></div>
           </div>
           <div>
               <span>3</span>
@@ -4345,15 +4476,36 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
             <div className="whatsapp-connected-summary">
               <CheckCircle2 size={20} />
               <div>
-                <strong>WhatsApp conectado</strong>
-                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} ya puede recibir pedidos en Ventas IA.</p>
+                <strong>{onboarding.channelStatus === 'revoked' ? 'Meta retiró el acceso: renueva la autorización' : 'WhatsApp vinculado'}</strong>
+                <p>{onboarding.binding.displayPhoneNumber ?? tenant.whatsappNumber ?? 'Tu número'} quedó vinculado. Completa la prueba de recepción y respuesta para comprobar el canal.</p>
+                <p>{onboarding.token?.message ?? onboarding.token?.detail}</p>
+                <p>Los cargos de mensajería los factura Meta a tu negocio. VIA no ha verificado tu método de pago.</p>
+                <a href={onboarding.billing?.url ?? 'https://business.facebook.com/wa/manage/'} target="_blank" rel="noreferrer">Revisar cuenta y pagos en Meta</a>
+                {onboarding.sync?.required && <p>{onboarding.sync.error === 'whatsapp_sync_outcome_unknown' ? 'El canal está vinculado, pero falta confirmar si Meta recibió la solicitud de historial. Contacta a soporte de VIA para revisar los eventos antes de repetirla.' : onboarding.sync.error ? 'La sincronización inicial requiere un reintento.' : onboarding.sync.history === 'completed' ? 'Historial sincronizado.' : onboarding.sync.history === 'not_shared' ? 'Decidiste no compartir el historial. Puedes recibir mensajes nuevos.' : `Sincronización solicitada a Meta${onboarding.sync.progress ? `: ${onboarding.sync.progress}%` : ''}. Mantén abierta WhatsApp Business en el celular. El historial se importa solo si lo autorizaste.`}</p>}
+                {onboarding.sync?.error && onboarding.sync.error !== 'whatsapp_sync_outcome_unknown' && <button className="ghost-btn" disabled={Boolean(busyAction)} onClick={() => onAction('sync')} type="button">Reintentar sincronización</button>}
+                {onboarding.canAutomate && <button className="ghost-btn" disabled={Boolean(busyAction)} onClick={() => connect('renew')} type="button">Renovar autorización con Meta</button>}
+                {isPlatformAdmin && testPilot.eligible && testPilot.configured && (
+                  <div className="whatsapp-pilot-refresh">
+                    <p>Canal de evidencia de Meta. Si Meta rechaza un envío por token vencido, actualiza el token seguro en Render y renuévalo aquí.</p>
+                    <button
+                      className="ghost-btn compact"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => onAction('pilot-refresh')}
+                      type="button"
+                    >
+                      <RefreshCw size={15} />
+                      {busyAction === 'whatsapp-pilot-refresh' ? 'Validando token de prueba...' : 'Renovar token de prueba'}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ) : onboarding.canAutomate ? (
             <>
               <div className="manual-guide">
                 <strong>Listo para conectar</strong>
-                <p>Al continuar se abrirá una ventana segura de Meta. Ten a mano el celular con tu número y el acceso al negocio. No tendrás que copiar tokens ni identificadores.</p>
+                <p>Vincularás el número con {tenant.name}. En Meta, verifica que el negocio y el número sean los tuyos antes de autorizar. Tu negocio conserva su administración y paga a Meta los mensajes que correspondan; la suscripción VIA se cobra por separado.</p>
+                {currentPath === 'business_app_existing' && <p>Ten abierta WhatsApp Business en el celular para vincularlo siguiendo las instrucciones de Meta. No borres ni desconectes tu cuenta para forzar el proceso. La disponibilidad depende de la elegibilidad de tu negocio.</p>}
               </div>
               {requiresRegistrationPin && (
                 <label className="whatsapp-pin-field">
@@ -4373,12 +4525,15 @@ function WhatsAppActivationWizard({ busyAction, isPlatformAdmin, onboarding, onA
               <button
                 className="approve-btn whatsapp-connect-button"
                 disabled={!canStart || Boolean(busyAction)}
-                onClick={() => onAction('start', { registrationPin })}
+                onClick={() => connect()}
                 type="button"
               >
                 <Send size={16} />
                 Conectar con Meta
               </button>
+              {phoneSelection?.tenantId === tenant.id && (phoneSelection.requiresCompletionRetry
+                ? <div className="manual-guide"><p>La finalización no terminó. Puedes reintentar durante diez minutos sin repetir la autorización. Si Meta no llegó a entregar acceso, abre una conexión nueva.</p><button className="ghost-btn" type="button" disabled={Boolean(busyAction)} onClick={() => connect('complete', { attemptId: phoneSelection.attemptId })}>Reintentar finalización</button></div>
+                : <div className="manual-guide"><strong>Elige el número de esta tienda</strong><p>Meta autorizó varios números. Selecciona el que recibirá pedidos aquí.</p>{phoneSelection.phones.map(phone => <button className="ghost-btn" key={phone.id} type="button" disabled={Boolean(busyAction)} onClick={() => connect('complete', { attemptId: phoneSelection.attemptId, phoneNumberId: phone.id })}>{phone.displayPhoneNumber ?? phone.verifiedName ?? 'Número sin nombre'} {phone.verifiedName ?? ''}</button>)}</div>)}
             </>
           ) : (
             <div className="whatsapp-unavailable">
@@ -5513,7 +5668,6 @@ function ObservabilityView({ overview }) {
   const [activeObservabilityTab, setActiveObservabilityTab] = useState('monitor');
   const [webhookFilters, setWebhookFilters] = useState({ tenantId: '', provider: '', status: '', from: '', to: '', q: '' });
   const [webhookData, setWebhookData] = useState({ summary: overview?.platform?.webhookSummary ?? {}, events: overview?.recentWebhooks ?? [] });
-  const [outboxData, setOutboxData] = useState({ summary: overview?.platform?.outboxSummary ?? {}, entries: overview?.recentOutbox ?? [] });
   const [webhookBusy, setWebhookBusy] = useState(false);
   const [selectedWebhookId, setSelectedWebhookId] = useState('');
   const [selectedWebhook, setSelectedWebhook] = useState(null);
@@ -5522,32 +5676,23 @@ function ObservabilityView({ overview }) {
 
   useEffect(() => {
     let cancelled = false;
-    async function loadObservability() {
+    async function loadWebhooks() {
       setWebhookBusy(true);
       const params = new URLSearchParams();
       for (const [key, value] of Object.entries(webhookFilters)) {
         if (value) params.set(key, value);
       }
       params.set('limit', '500');
-      const outboxParams = new URLSearchParams({ limit: '100' });
-      if (webhookFilters.tenantId) outboxParams.set('tenantId', webhookFilters.tenantId);
       try {
-        const [response, outboxResponse] = await Promise.all([
-          fetch(`/api/admin/webhooks?${params}`, { credentials: 'include' }),
-          fetch(`/api/admin/outbox?${outboxParams}`, { credentials: 'include' }),
-        ]);
-        const [payload, outboxPayload] = await Promise.all([
-          response.json().catch(() => ({})),
-          outboxResponse.json().catch(() => ({})),
-        ]);
+        const response = await fetch(`/api/admin/webhooks?${params}`, { credentials: 'include' });
+        const payload = await response.json().catch(() => ({}));
         if (!cancelled && response.ok) setWebhookData(payload);
-        if (!cancelled && outboxResponse.ok) setOutboxData(outboxPayload);
       } finally {
         if (!cancelled) setWebhookBusy(false);
       }
     }
-    loadObservability();
-    const timer = window.setInterval(loadObservability, 7000);
+    loadWebhooks();
+    const timer = window.setInterval(loadWebhooks, 7000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -5579,11 +5724,9 @@ function ObservabilityView({ overview }) {
   }
 
   const webhookSummary = webhookData.summary ?? {};
-  const outboxSummary = outboxData.summary ?? {};
   const observabilityTabs = [
     ['monitor', Activity, 'Monitor', `${webhookSummary.total ?? 0} eventos`],
     ['events', ListFilter, 'Eventos', `${(webhookData.events ?? []).length} visibles`],
-    ['queue', Clock3, 'Cola', `${outboxSummary.pending ?? 0} pendientes`],
     ['detail', Eye, 'Detalle', selectedWebhook ? eventStatusLabel(selectedWebhook.status) : 'Sin selección'],
   ];
   function inspectWebhook(id) {
@@ -5686,28 +5829,8 @@ function ObservabilityView({ overview }) {
             <AdminKpi label="Procesados" value={webhookSummary.processed ?? 0} />
             <AdminKpi label="Errores" value={webhookSummary.failed ?? 0} />
             <AdminKpi label="Rechazados" value={webhookSummary.rejected ?? 0} />
-            <AdminKpi label="Cola pendiente" value={outboxSummary.pending ?? 0} />
+            <AdminKpi label="Promedio" value={`${webhookSummary.avgDurationMs ?? 0} ms`} />
           </div>
-        </div>
-        <div className="webhook-table tab-queue">
-          {(outboxData.entries ?? []).map((entry) => (
-            <div className="webhook-row" key={entry.id}>
-              <time>{formatDateTime(entry.createdAt)}</time>
-              <strong>{outboxKindLabel(entry.kind)}</strong>
-              <span>{entry.tenantId ?? 'Plataforma'}</span>
-              <span>{entry.aggregateId ?? 'Sin agregado'}</span>
-              <b className={`webhook-status is-${entry.status}`}>{outboxStatusLabel(entry.status)}</b>
-              <code>{entry.attempts} intento{entry.attempts === 1 ? '' : 's'}</code>
-              <span>{entry.lastError ?? formatDateTime(entry.nextAttemptAt ?? entry.processedAt)}</span>
-            </div>
-          ))}
-          {!(outboxData.entries ?? []).length && (
-            <div className="empty-state">
-              <Clock3 size={24} />
-              <h3>Sin trabajos en cola</h3>
-              <p>Los trabajos de WhatsApp y sincronización aparecerán aquí cuando se encolen.</p>
-            </div>
-          )}
         </div>
         <div className="webhook-investigation-grid">
           <div className="webhook-table tab-events">
@@ -6024,26 +6147,6 @@ function eventStatusLabel(value) {
   return labels[value] ?? value ?? 'Sin estado';
 }
 
-function outboxStatusLabel(value) {
-  const labels = {
-    pending: 'Pendiente',
-    processing: 'Procesando',
-    retrying: 'Reintentando',
-    failed: 'Fallo terminal',
-    processed: 'Completado',
-  };
-  return labels[value] ?? value ?? 'Sin estado';
-}
-
-function outboxKindLabel(value) {
-  const labels = {
-    'whatsapp.inbound_processing': 'Mensaje entrante',
-    'order.sheet_create': 'Pedido a Sheets',
-    'order.sheet_projection': 'Estado a Sheets',
-  };
-  return labels[value] ?? value ?? 'Trabajo externo';
-}
-
 function planLabel(value) {
   const labels = {
     'Production pilot': 'Piloto productivo',
@@ -6222,18 +6325,38 @@ function formatFullDateTime(value) {
   }).format(new Date(value));
 }
 
-function editablePaymentMethods(methods) {
-  const defaults = [
-    { id: 'cash', label: 'Efectivo', enabled: true },
-    { id: 'card_terminal', label: 'Tarjeta', enabled: true },
-    { id: 'bre_b', label: 'Bre-B', enabled: true },
-  ];
-  if (!Array.isArray(methods) || !methods.length) return defaults;
-  return methods.map((method, index) => ({
-    id: method.id ?? `payment_${index + 1}`,
-    label: method.label ?? method.id ?? `Forma de pago ${index + 1}`,
-    enabled: method.enabled !== false,
+const defaultPaymentMethods = [
+  { id: 'cash', label: 'Efectivo', aliases: ['efectivo', 'cash'] },
+  { id: 'card_terminal', label: 'Tarjeta', aliases: ['tarjeta', 'datafono', 'datáfono'] },
+  { id: 'breb', label: 'Bre-B', aliases: ['bre-b', 'breb'] },
+];
+
+function tenantPaymentMethods(tenant) {
+  const configured = Array.isArray(tenant.config?.orderPolicy?.paymentMethods)
+    ? tenant.config.orderPolicy.paymentMethods
+    : [];
+  const configuredById = new Map(configured.filter((method) => method?.id).map((method) => [method.id, method]));
+  const core = defaultPaymentMethods.map((method) => ({
+    ...method,
+    ...configuredById.get(method.id),
+    id: method.id,
+    label: configuredById.get(method.id)?.label || method.label,
+    aliases: Array.from(new Set([...(method.aliases ?? []), ...(configuredById.get(method.id)?.aliases ?? [])])),
+    enabled: true,
+    required: true,
   }));
+  const custom = configured.filter((method) => method?.id && !defaultPaymentMethods.some((coreMethod) => coreMethod.id === method.id));
+  return [...core, ...custom];
+}
+
+function paymentMethodId(label) {
+  return String(label ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
 }
 
 function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
@@ -6294,7 +6417,16 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
 
 function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
-  const [paymentMethods, setPaymentMethods] = useState(() => editablePaymentMethods(tenant.config?.orderPolicy?.paymentMethods));
+  const [agentName, setAgentName] = useState(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
+  const [agentNotice, setAgentNotice] = useState('');
+  const [savingAgent, setSavingAgent] = useState(false);
+  useEffect(() => {
+    setAgentName(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
+  }, [tenant.id, tenant.config?.agentPolicy?.displayName]);
+  const [paymentMethods, setPaymentMethods] = useState(() => tenantPaymentMethods(tenant));
+  const [paymentLabel, setPaymentLabel] = useState('');
+  const [paymentNotice, setPaymentNotice] = useState('');
+  const [savingPayments, setSavingPayments] = useState(false);
   const [savingReplySettings, setSavingReplySettings] = useState(false);
   const [replySettingsNotice, setReplySettingsNotice] = useState(null);
   const [llmDraft, setLlmDraft] = useState(() => ({
@@ -6315,6 +6447,9 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
     missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
   }));
   useEffect(() => {
+    setPaymentMethods(tenantPaymentMethods(tenant));
+    setPaymentLabel('');
+    setPaymentNotice('');
     setLlmDraft({
       phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
       phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -6332,26 +6467,15 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
       filePolicyRef: tenant.config?.googleDrive?.filePolicyRef ?? `${tenant.id.toUpperCase()}_DRIVE_FILE_POLICY_REF`,
       missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
     });
-    setPaymentMethods(editablePaymentMethods(tenant.config?.orderPolicy?.paymentMethods));
   }, [tenant]);
-  const updatePaymentMethod = (index, patch) => {
-    setPaymentMethods((current) => current.map((method, methodIndex) => methodIndex === index ? { ...method, ...patch } : method));
-  };
-  const addPaymentMethod = () => {
-    setPaymentMethods((current) => [...current, { id: `payment_${current.length + 1}`, label: 'Nuevo medio de pago', enabled: true }]);
-  };
-  const removePaymentMethod = (index) => {
-    setPaymentMethods((current) => current.length > 1 ? current.filter((_, methodIndex) => methodIndex !== index) : current);
-  };
   const saveCustomerReplySettings = async () => {
     setSavingReplySettings(true);
     setReplySettingsNotice(null);
     try {
       await onSaveConfig({
         agentPolicy: { tone: llmDraft.tone },
-        orderPolicy: { paymentMethods },
       });
-      setReplySettingsNotice({ type: 'success', text: 'Atención y pagos guardados.' });
+      setReplySettingsNotice({ type: 'success', text: 'Estilo de atención guardado.' });
     } catch (error) {
       setReplySettingsNotice({ type: 'error', text: error.message });
     } finally {
@@ -6370,11 +6494,62 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const connectedTools = toolList.filter((tool) => ['sandbox_ready', 'production_ready', 'approval_required'].includes(tool.status)).length;
   const configTabs = [
     ['store', Store, 'Tienda', 'Datos base'],
+    ['payments', CircleDollarSign, 'Cobros', `${paymentMethods.length} medios`],
     ['google', Database, 'Productos', googleStatusHint],
     ['whatsapp', MessageCircle, 'WhatsApp', llmDraft.phoneNumberId ? 'Conectado' : 'Pendiente'],
     ['agent', Bot, 'Cómo responde', 'Atención al cliente'],
     ['tools', PlugZap, 'Estado técnico', `${connectedTools}/${toolList.length}`],
   ];
+  const addPaymentMethod = () => {
+    const label = paymentLabel.trim();
+    const id = paymentMethodId(label);
+    if (!id) {
+      setPaymentNotice('Escribe el nombre del medio de pago que aceptas.');
+      return;
+    }
+    if (paymentMethods.some((method) => method.id === id || method.label.toLocaleLowerCase('es-CO') === label.toLocaleLowerCase('es-CO'))) {
+      setPaymentNotice('Ese medio de pago ya está disponible.');
+      return;
+    }
+    setPaymentMethods((current) => [...current, { id, label, aliases: [label], enabled: true }]);
+    setPaymentLabel('');
+    setPaymentNotice(`${label} se agregará cuando guardes los cambios.`);
+  };
+  const removePaymentMethod = (id) => {
+    if (defaultPaymentMethods.some((method) => method.id === id)) return;
+    setPaymentMethods((current) => current.filter((method) => method.id !== id));
+    setPaymentNotice('El cambio se aplicará cuando guardes los medios de pago.');
+  };
+  const savePaymentMethods = async () => {
+    setSavingPayments(true);
+    setPaymentNotice('');
+    try {
+      await onSaveConfig({ orderPolicy: { paymentMethods } });
+      setPaymentNotice('Medios de pago guardados para esta tienda.');
+    } catch {
+      setPaymentNotice('No se pudieron guardar los medios de pago. Inténtalo nuevamente.');
+    } finally {
+      setSavingPayments(false);
+    }
+  };
+  const saveAgentName = async (event) => {
+    event.preventDefault();
+    const name = agentName.normalize('NFC').trim().replace(/ +/g, ' ');
+    if (!name || name.length > 60 || !/^[\p{L}\p{M}][\p{L}\p{M} .’'\-]*$/u.test(name)) {
+      setAgentNotice('Usa un nombre de hasta 60 caracteres: letras, espacios, puntos, apóstrofes o guiones.');
+      return;
+    }
+    setSavingAgent(true);
+    setAgentNotice('');
+    try {
+      await onSaveConfig({ agentPolicy: { displayName: name } });
+      setAgentNotice('Nombre guardado. Se usará en los próximos mensajes de esta tienda.');
+    } catch {
+      setAgentNotice('No se pudo guardar el nombre. Inténtalo nuevamente.');
+    } finally {
+      setSavingAgent(false);
+    }
+  };
   return (
     <section className="config-layout">
       <div className="section-title split-title config-titlebar">
@@ -6427,6 +6602,57 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
             <span>Los secretos se guardan como referencias por cliente; la app no muestra valores planos.</span>
           </div>
           </details>
+        </article>
+        )}
+        {activeConfigTab === 'payments' && (
+        <article className="settings-panel config-focus-panel">
+          <div className="config-panel-heading">
+            <div>
+              <span className="eyebrow">Cobro al cliente</span>
+              <h3>Medios de pago de tu tienda</h3>
+            </div>
+            <span className="status-chip is-live">{paymentMethods.length} disponibles</span>
+          </div>
+          <p>El asistente mostrará el total del pedido y pedirá uno de estos medios antes de confirmarlo.</p>
+          <div className="payment-method-list" aria-label="Medios de pago disponibles">
+            {paymentMethods.map((method) => {
+              const isCore = defaultPaymentMethods.some((coreMethod) => coreMethod.id === method.id);
+              return (
+                <div className="payment-method-row" key={method.id}>
+                  <div>
+                    <CircleDollarSign size={18} />
+                    <span>
+                      <strong>{method.label}</strong>
+                      <small>{isCore ? 'Incluido en tu tienda' : 'Medio creado por tu tienda'}</small>
+                    </span>
+                  </div>
+                  {isCore ? (
+                    <span className="payment-method-fixed">Activo</span>
+                  ) : (
+                    <button aria-label={`Quitar ${method.label}`} className="icon-btn danger-icon-btn" title={`Quitar ${method.label}`} type="button" onClick={() => removePaymentMethod(method.id)}>
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div className="payment-method-add">
+            <label className="config-field">
+              <span><CircleDollarSign size={16} /> Nuevo medio de pago</span>
+              <input value={paymentLabel} onChange={(event) => setPaymentLabel(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addPaymentMethod(); } }} placeholder="Ej. Nequi" />
+            </label>
+            <button className="ghost-btn" type="button" onClick={addPaymentMethod}>Agregar</button>
+          </div>
+          {paymentNotice && <p className="config-inline-notice" role="status">{paymentNotice}</p>}
+          <div className="isolation-note">
+            <ShieldCheck size={18} />
+            <span>Esta lista es independiente para cada tienda y no modifica los medios de pago de otros clientes.</span>
+          </div>
+          <button className="approve-btn" disabled={savingPayments} type="button" onClick={savePaymentMethods}>
+            <Check size={16} />
+            {savingPayments ? 'Guardando…' : 'Guardar medios de pago'}
+          </button>
         </article>
         )}
         {activeConfigTab === 'google' && (
@@ -6579,6 +6805,18 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
         {activeConfigTab === 'agent' && (
         <article className="settings-panel config-focus-panel">
           <h3>Cómo responde a tus clientes</h3>
+          <form onSubmit={saveAgentName}>
+            <label className="config-field">
+              <span><Bot size={16} /> Nombre del asistente</span>
+              <input value={agentName} onChange={(event) => setAgentName(event.target.value)}
+                maxLength={60} required disabled={savingAgent} aria-describedby="agent-name-help" />
+            </label>
+            <p id="agent-name-help">Se presentará como asistente virtual con este nombre. El cambio solo aplica a esta tienda.</p>
+            <button className="approve-btn" disabled={savingAgent || !agentName.trim()} type="submit">
+              <Check size={16} /> {savingAgent ? 'Guardando…' : 'Guardar nombre'}
+            </button>
+            {agentNotice && <p className="config-inline-notice" role="status">{agentNotice}</p>}
+          </form>
           <div className="isolation-note">
             <Bot size={18} />
             <span>El asistente responde en español de Colombia y te pide ayuda cuando necesita una decisión.</span>
@@ -6597,24 +6835,8 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
                 <option value="formal_neutral">Formal y neutral</option>
               </select>
             </label>
-            <div className="payment-method-settings">
-              <div className="payment-method-heading">
-                <div>
-                  <strong>Formas de pago</strong>
-                  <span>El cliente las verá al confirmar su pedido.</span>
-                </div>
-                <button className="icon-btn" type="button" onClick={addPaymentMethod} title="Agregar forma de pago" aria-label="Agregar forma de pago"><Plus size={17} /></button>
-              </div>
-              {paymentMethods.map((method, index) => (
-                <div className="payment-method-row" key={`${method.id}-${index}`}>
-                  <input aria-label={`Nombre de forma de pago ${index + 1}`} value={method.label} onChange={(event) => updatePaymentMethod(index, { label: event.target.value })} />
-                  <label className="payment-method-enabled"><input type="checkbox" checked={method.enabled !== false} onChange={(event) => updatePaymentMethod(index, { enabled: event.target.checked })} /> Activa</label>
-                  <button className="icon-btn" type="button" onClick={() => removePaymentMethod(index)} disabled={paymentMethods.length === 1} title="Eliminar forma de pago" aria-label={`Eliminar ${method.label}`}><Trash2 size={16} /></button>
-                </div>
-              ))}
-            </div>
             {replySettingsNotice && <p role={replySettingsNotice.type === 'error' ? 'alert' : 'status'}>{replySettingsNotice.text}</p>}
-            <button className="approve-btn" type="button" disabled={savingReplySettings} onClick={saveCustomerReplySettings}><Check size={16} />{savingReplySettings ? 'Guardando…' : 'Guardar atención y pagos'}</button>
+            <button className="approve-btn" type="button" disabled={savingReplySettings} onClick={saveCustomerReplySettings}><Check size={16} />{savingReplySettings ? 'Guardando…' : 'Guardar estilo de atención'}</button>
           </div>
         </article>
         )}

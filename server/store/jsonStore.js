@@ -6,6 +6,7 @@ import { ensureIdentityState } from '../services/authService.js';
 import { ensureUsageState } from '../services/usageService.js';
 import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
+import { applyOrderEdit, assertOrderEditVersion, assertOrderEditPolicy } from '../domain/orderEdit.js';
 
 export class JsonStore {
   constructor(filePath) {
@@ -86,6 +87,15 @@ export class JsonStore {
         }
       }
     });
+  }
+
+  commitOrderEdit(change) {
+    const current = this.getState().ordersByTenant?.[change.order.tenantId]?.find(item => item.id === change.order.id);
+    assertOrderEditVersion(current, change.expectedVersion);
+    assertOrderEditPolicy(this.state.tenants.find(tenant => tenant.id === change.order.tenantId), change.order);
+    const before = structuredClone(this.state);
+    try { applyOrderEdit(this.state, change); this.save(); }
+    catch (error) { this.state = before; throw error; }
   }
 
   enqueueInboundMessage(normalized) {

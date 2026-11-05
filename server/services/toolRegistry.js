@@ -522,7 +522,7 @@ export class ToolRegistry {
     return { provider: 'google_sheets', status: 'synced', sourceRef };
   }
 
-  async syncLiveOrderStatus({ tenantId, order, status, updatedAt }) {
+  async syncLiveOrderStatus({ tenantId, order, status, updatedAt, fullOrder = false }) {
     const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
     const live = await this.liveGoogleContext(tenantId);
     if (!live) {
@@ -547,8 +547,8 @@ export class ToolRegistry {
     await this.googleWorkspace.updateValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
-      range: `Pedidos!G${rowNumber}:J${rowNumber}`,
-      values: [orderToSheetRow(nextOrder).slice(6, 10)],
+      range: fullOrder ? `Pedidos!A${rowNumber}:M${rowNumber}` : `Pedidos!G${rowNumber}:J${rowNumber}`,
+      values: [fullOrder ? orderToSheetRow(nextOrder) : orderToSheetRow(nextOrder).slice(6, 10)],
     });
     return { status: 'synced' };
   }

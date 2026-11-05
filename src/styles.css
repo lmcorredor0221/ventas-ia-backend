@@ -4913,6 +4913,61 @@ select:disabled {
   line-height: 1.38;
 }
 
+.whatsapp-test-pilot {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed rgba(23, 50, 77, 0.25);
+  border-radius: 7px;
+  background: rgba(23, 50, 77, 0.04);
+}
+
+.whatsapp-test-pilot h4,
+.whatsapp-test-pilot p {
+  margin: 0;
+}
+
+.whatsapp-test-pilot h4 {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.whatsapp-test-pilot p {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.whatsapp-test-pilot .approve-btn {
+  justify-self: start;
+}
+
+.whatsapp-test-pilot-note {
+  padding-top: 2px;
+}
+
+.whatsapp-test-pilot code {
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
+.whatsapp-pilot-refresh {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.whatsapp-pilot-refresh p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.whatsapp-pilot-refresh .ghost-btn {
+  justify-self: start;
+}
+
 .whatsapp-pin-field {
   display: grid;
   gap: 7px;
@@ -6685,7 +6740,6 @@ code {
 
 .observability-layout .tab-monitor,
 .observability-layout .tab-events,
-.observability-layout .tab-queue,
 .observability-layout .tab-detail {
   display: none;
 }
@@ -6695,10 +6749,6 @@ code {
 }
 
 .active-observability-events .tab-events {
-  display: grid;
-}
-
-.active-observability-queue .tab-queue {
   display: grid;
 }
 
@@ -6819,6 +6869,76 @@ code {
   gap: 14px;
 }
 
+.payment-method-list {
+  display: grid;
+  gap: 8px;
+}
+
+.payment-method-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 50, 77, 0.13);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.payment-method-row > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.payment-method-row svg {
+  flex: 0 0 auto;
+  color: var(--green);
+}
+
+.payment-method-row span:not(.payment-method-fixed) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.payment-method-row strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.payment-method-row small {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.payment-method-fixed {
+  flex: 0 0 auto;
+  color: var(--green);
+  font-size: 0.75rem;
+  font-weight: 850;
+}
+
+.payment-method-add {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.payment-method-add .config-field {
+  flex: 1 1 250px;
+}
+
+.config-inline-notice {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .config-panel-heading {
   display: flex;
   align-items: flex-start;
@@ -6848,62 +6968,6 @@ code {
   align-items: center;
   gap: 8px;
   color: var(--muted);
-}
-
-.customer-reply-settings {
-  display: grid;
-  gap: 12px;
-  max-width: 620px;
-}
-
-.payment-method-settings {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.7);
-}
-
-.payment-method-heading,
-.payment-method-row,
-.payment-method-enabled {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.payment-method-heading {
-  justify-content: space-between;
-}
-
-.payment-method-heading strong,
-.payment-method-heading span {
-  display: block;
-}
-
-.payment-method-heading span {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.payment-method-row input[type='text'],
-.payment-method-row input:not([type]) {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.payment-method-enabled {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 0.8rem;
-  font-weight: 750;
-}
-
-.payment-method-enabled input {
-  width: 16px;
-  height: 16px;
 }
 
 .google-config-status {
@@ -8092,15 +8156,6 @@ code {
   .config-field-grid,
   .google-config-status {
     grid-template-columns: 1fr;
-  }
-
-  .payment-method-row {
-    align-items: stretch;
-    flex-wrap: wrap;
-  }
-
-  .payment-method-row > input:first-child {
-    flex-basis: calc(100% - 42px);
   }
 
   .global-search,

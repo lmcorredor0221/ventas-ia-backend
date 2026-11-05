@@ -12,6 +12,7 @@ import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
 import { assertDeliveryPricing, deliveryPolicyRevision } from '../domain/deliveryPolicy.js';
+import { applyOrderEdit, assertOrderEditVersion, assertOrderEditPolicy, refreshOrderConversation, refreshPreparationRequest } from '../domain/orderEdit.js';
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -73,6 +74,45 @@ export class PostgresStore {
   async getTenant(tenantId) {
     const result = await this.pool.query('SELECT payload FROM tenants WHERE id = $1', [tenantId]);
     return result.rows[0]?.payload ?? null;
+  }
+
+  async getOrder(tenantId, orderId) {
+    const result = await this.pool.query('SELECT payload FROM orders WHERE tenant_id = $1 AND id = $2', [tenantId, orderId]);
+    return result.rows[0]?.payload ?? null;
+  }
+
+  commitOrderEdit(change) {
+    return this.queueWrite(async () => {
+      const { order, expectedVersion, entries = [] } = change;
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const tenantRow = await client.query('SELECT payload FROM tenants WHERE id = $1 FOR UPDATE', [order.tenantId]);
+        assertOrderEditPolicy(tenantRow.rows[0]?.payload, order);
+        const result = await client.query('SELECT payload FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE', [order.id, order.tenantId]);
+        assertOrderEditVersion(result.rows[0]?.payload, expectedVersion);
+        // A dedicated, authorized edit can replace a quote. Generic snapshot
+        // and status writers retain their existing commercial-data protection.
+        await client.query('UPDATE orders SET payload = $3::jsonb, version = $4, updated_at = $5, subtotal = $6 WHERE id = $1 AND tenant_id = $2',
+          [order.id, order.tenantId, JSON.stringify(order), order.version, order.updatedAt, order.subtotal]);
+        const conversationRow = await client.query('SELECT payload FROM conversations WHERE id = $1 AND tenant_id = $2 FOR UPDATE', [order.conversationId, order.tenantId]);
+        if (conversationRow.rows[0]) {
+          const conversation = conversationRow.rows[0].payload;
+          refreshOrderConversation(conversation, order, change.catalogProducts);
+          await upsertConversation(client, conversation);
+        }
+        const requests = await client.query("SELECT payload FROM pending_requests WHERE tenant_id = $1 AND conversation_id = $2 AND status = 'pending' FOR UPDATE", [order.tenantId, order.conversationId]);
+        for (const row of requests.rows) {
+          const request = row.payload;
+          refreshPreparationRequest(request, order);
+          await client.query('UPDATE pending_requests SET payload = $2::jsonb WHERE id = $1', [request.id, JSON.stringify(request)]);
+        }
+        for (const entry of entries) await insertOutboxEntry(client, entry);
+        await client.query('COMMIT');
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+      this.mutate(state => applyOrderEdit(state, change));
+    }, 'order edit');
   }
 
   async listConversations({ tenantId } = {}) {
@@ -894,7 +934,7 @@ async function persistOrderOnClient(client, tenantId, orderId, order) {
 }
 
 function sameOrderCommercialSnapshot(current, next) {
-  return current.pricing === undefined || ['pricing', 'paymentMethod', 'delivery', 'items', 'subtotal']
+  return current.pricing === undefined || ['pricing', 'paymentMethod', 'delivery', 'items', 'subtotal', 'customerName', 'deliveryAddress']
     .every((field) => isDeepStrictEqual(current[field], next[field]));
 }
 
@@ -1671,13 +1711,15 @@ async function upsertOrder(client, tenantId, order, { strictVersion = false, thr
           version = EXCLUDED.version,
           payload = EXCLUDED.payload,
           updated_at = EXCLUDED.updated_at
-      WHERE ${strictVersion ? 'orders.version < EXCLUDED.version AND' : ''}
+      WHERE ${strictVersion ? 'orders.version < EXCLUDED.version AND' : 'orders.version <= EXCLUDED.version AND'}
         (NOT (orders.payload ? 'pricing') OR (
           orders.payload->'pricing' IS NOT DISTINCT FROM EXCLUDED.payload->'pricing'
           AND orders.payload->'paymentMethod' IS NOT DISTINCT FROM EXCLUDED.payload->'paymentMethod'
           AND orders.payload->'delivery' IS NOT DISTINCT FROM EXCLUDED.payload->'delivery'
           AND orders.payload->'items' IS NOT DISTINCT FROM EXCLUDED.payload->'items'
           AND orders.payload->'subtotal' IS NOT DISTINCT FROM EXCLUDED.payload->'subtotal'
+          AND orders.payload->'customerName' IS NOT DISTINCT FROM EXCLUDED.payload->'customerName'
+          AND orders.payload->'deliveryAddress' IS NOT DISTINCT FROM EXCLUDED.payload->'deliveryAddress'
         ))
       RETURNING id
     `,

@@ -68,16 +68,32 @@ function createExpressRuntime({ config, store }) {
     store,
     config,
     handlers: {
+      'order.sheet_edit': async (entry) => {
+        const order = store.getOrder ? await store.getOrder(entry.tenantId, entry.aggregateId)
+          : store.getState().ordersByTenant?.[entry.tenantId]?.find(item => item.id === entry.aggregateId);
+        if (!order) throw new Error('Edited order not found');
+        // Always project the latest committed revision, including on retries.
+        const result = await tools.syncLiveOrderStatus({ tenantId: order.tenantId, order,
+          status: order.status, updatedAt: order.updatedAt, fullOrder: true });
+        if (result.status === 'synced') {
+          store.mutate(state => {
+            const current = state.ordersByTenant?.[order.tenantId]?.find(item => item.id === order.id);
+            if (current && current.version === order.version) { current.sheetSyncStatus = 'synced'; current.sheetSyncedAt = new Date().toISOString(); }
+          });
+          await store.persistOrder?.(order.tenantId, order.id);
+        }
+        return result;
+      },
       'order.sheet_projection': async (entry) => {
-        const order = Object.values(store.getState().ordersByTenant ?? {})
+        const order = store.getOrder ? await store.getOrder(entry.payload.tenantId, entry.payload.orderId) : Object.values(store.getState().ordersByTenant ?? {})
           .flat()
           .find((item) => item.id === entry.payload.orderId && item.tenantId === entry.payload.tenantId);
         if (!order) throw new Error(`Order ${entry.payload.orderId} not found for outbox projection`);
         const result = await tools.syncLiveOrderStatus({
           tenantId: entry.payload.tenantId,
           order,
-          status: entry.payload.status,
-          updatedAt: entry.payload.updatedAt,
+          status: order.status,
+          updatedAt: order.updatedAt,
         });
         if (result.status === 'synced') {
           store.mutate((state) => {

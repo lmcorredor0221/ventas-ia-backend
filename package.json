@@ -28,6 +28,8 @@
     "test:grounding": "node server/tests/grounding-contract.mjs",
     "test:order-audit": "node server/tests/amount-sale-contract.mjs && node server/tests/order-data-audit-contract.mjs && node server/tests/order-data-audit-runtime.mjs",
     "test:order-audit:real": "node server/tests/order-data-audit-deepseek.mjs",
+    "test:order-edit": "node server/tests/order-edit-contract.mjs",
+    "test:order-edit:postgres": "node server/tests/order-edit-contract.mjs --postgres",
     "test:cart-continuity": "node server/tests/cart-continuity-contract.mjs",
     "test:contextual-harness": "node server/tests/contextual-acceptance-contract.mjs && node server/tests/contextual-harness-contract.mjs",
     "test:delivery": "node server/tests/delivery-policy-contract.mjs && node server/tests/delivery-runtime-contract.mjs && node server/tests/delivery-persistence-contract.mjs && node server/tests/commerce-questions-contract.mjs && node server/tests/llm-reply-composer-contract.mjs",

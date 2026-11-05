@@ -122,6 +122,28 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     }
   });
 
+  router.get('/orders/:id/workspace', async (req, res, next) => {
+    try {
+      const order = orders.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      res.json(await orders.workspace({ orderId: order.id, tenantId: order.tenantId, includeCatalog: req.query.catalog !== 'false' }));
+    } catch (error) { next(error); }
+  });
+
+  router.patch('/orders/:id', async (req, res, next) => {
+    try {
+      const order = orders.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const actorId = req.auth?.user?.id ?? 'local-owner';
+      const result = await orders.edit({ orderId: order.id, tenantId: order.tenantId, input: req.body ?? {}, actorId });
+      auth.recordTenantAction(req, { tenantId: order.tenantId, action: 'order.edited', resource: order.id,
+        metadata: { version: result.order.version, actorId } });
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   router.patch('/orders/:id/status', async (req, res, next) => {
     try {
       const state = store.getState();
