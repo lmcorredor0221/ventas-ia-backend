@@ -6382,16 +6382,19 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
       // configuration-incomplete delivery policy.
       const fee = parseNullableCopAmount(deliveryFee, 'Costo del domicilio') ?? 0;
       const minimum = parseNullableCopAmount(minimumSubtotal, 'Pedido mínimo') ?? 10000;
-      const orderPolicy = {};
-      if (fee !== storedFee) orderPolicy.deliveryFee = fee;
-      if (minimum !== storedMinimum) orderPolicy.deliveryMinimumSubtotal = minimum;
-      if (!Object.keys(orderPolicy).length) {
-        setNotice({ type: 'success', text: 'No hay cambios por guardar.' });
-        return;
-      }
+      // Persist the effective values even when they equal the platform
+      // defaults. This makes 0 / 10.000 explicit per tenant instead of
+      // leaving the owner unable to distinguish "saved" from "default".
+      const orderPolicy = {
+        deliveryFee: fee,
+        deliveryMinimumSubtotal: minimum,
+      };
       setSaving(true);
-      await onSaveConfig({ orderPolicy });
-      setNotice({ type: 'success', text: 'Condiciones de domicilio guardadas.' });
+      const updatedTenant = await onSaveConfig({ orderPolicy });
+      const persistedPolicy = updatedTenant?.config?.orderPolicy ?? orderPolicy;
+      setDeliveryFee(String(persistedPolicy.deliveryFee ?? fee));
+      setMinimumSubtotal(String(persistedPolicy.deliveryMinimumSubtotal ?? minimum));
+      setNotice({ type: 'success', text: `Condiciones guardadas: domicilio $ ${persistedPolicy.deliveryFee ?? fee} y mínimo $ ${persistedPolicy.deliveryMinimumSubtotal ?? minimum}.` });
     } catch (error) {
       setNotice({ type: 'error', text: error.message });
     } finally {
@@ -6529,12 +6532,21 @@ function Configuration({ auth, onNavigate, onSaveConfig, tenant, tools: toolList
     setGoogleRangesBusy(true);
     setGoogleNotice(null);
     try {
-      await onSaveConfig({ googleSheets: {
+      const updatedTenant = await onSaveConfig({ googleSheets: {
         catalogRange: llmDraft.catalogRange,
+        // Keep the legacy field synchronized for already deployed readers.
+        range: llmDraft.catalogRange,
         customerProfilesRange: llmDraft.customerProfilesRange,
         ordersRange: llmDraft.ordersRange,
       } });
-      setGoogleNotice({ type: 'success', text: 'Rangos guardados para esta tienda.' });
+      const persistedRanges = updatedTenant?.config?.googleSheets ?? {};
+      setLlmDraft(current => ({
+        ...current,
+        catalogRange: persistedRanges.catalogRange ?? persistedRanges.range ?? current.catalogRange,
+        customerProfilesRange: persistedRanges.customerProfilesRange ?? current.customerProfilesRange,
+        ordersRange: persistedRanges.ordersRange ?? current.ordersRange,
+      }));
+      setGoogleNotice({ type: 'success', text: 'Rangos guardados y aplicados para esta tienda.' });
     } catch (error) {
       setGoogleNotice({ type: 'error', text: error.message });
     } finally {

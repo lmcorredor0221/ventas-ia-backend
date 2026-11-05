@@ -9,6 +9,7 @@ import { orderDataRevision } from '../domain/orderDataAudit.js';
 import { quoteBreakdownWasCommunicated } from './llmReplyComposer.js';
 import { whatsappOrderSummary, splitWhatsAppText } from '../domain/whatsappOrderSummary.js';
 import { applySemanticCart, orderDraftBlockingFields } from '../domain/groundingContracts.js';
+import { googleSheetRangesForTenant } from './googleSheetRanges.js';
 import {
   advanceOrderDraft,
   catalogSearchTextForItem,
@@ -571,6 +572,8 @@ export class AgentRuntime {
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
     if (this.config.llmGroundingEnabled) return this.handleGroundedCatalogQuery({ tenantId, conversationId, normalized, plan });
     const text = normalized.text ?? '';
+    const tenant = await this.getTenant(tenantId);
+    const catalogRange = googleSheetRangesForTenant(tenant).catalogRange;
     // En una consulta de catalogo el planner puede dejar el pedido legado
     // vacio y conservar los items unicamente en el marco semantico. El
     // resolutor debe consumir ese marco para no perder categoria, ambiguedad
@@ -584,7 +587,7 @@ export class AgentRuntime {
       const matches = [];
       for (const search of catalogSearches) {
         const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-          range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+          range: catalogRange,
           filters: search.filters,
           cache_policy: 'short_ttl',
         });
@@ -643,7 +646,7 @@ export class AgentRuntime {
     const search = enrichCatalogSearch(catalogSearches[0] ?? { query: text, filters: inferCatalogFilter(text) }, text);
     const query = search.query;
     const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-      range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+      range: catalogRange,
       filters: search.filters,
       cache_policy: 'short_ttl',
     });
@@ -766,6 +769,7 @@ export class AgentRuntime {
 
   async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, validatedSelection, commercialRequoteAttempt = 0 }) {
     const tenant = await this.getTenant(tenantId);
+    const catalogRange = googleSheetRangesForTenant(tenant).catalogRange;
     const initialConversation = await this.getConversation(conversationId);
     if (this.config.llmGroundingEnabled) {
       plan = { ...plan, order: { ...plan.order, items: applySemanticCart(initialConversation?.orderDraft?.items,
@@ -783,7 +787,7 @@ export class AgentRuntime {
     const orderItems = [];
     for (const [index, item] of (plan.order?.items ?? []).entries()) {
       const catalog = grounded ? { rows: grounded.observations[index].rows } : await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-        range: tenant?.config?.googleSheets?.range,
+        range: catalogRange,
         filters: deliveryItemFiltersFromPlan(plan, item, index),
         cache_policy: 'short_ttl',
       });

@@ -3,6 +3,13 @@ import { attributeText, catalogEvidence } from '../domain/catalogEvidence.js';
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 import { isDeepStrictEqual } from 'node:util';
 import { assertDeliveryPricing, deliveryPolicyRevision, evaluateDeliveryPolicy, catalogLineTotal } from '../domain/deliveryPolicy.js';
+import {
+  googleSheetAppendRange,
+  googleSheetColumnRange,
+  googleSheetOrderStatusRowRange,
+  googleSheetRangesForTenant,
+  googleSheetRowRange,
+} from './googleSheetRanges.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
@@ -100,7 +107,7 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
-    const requestedRange = payload.range ?? tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:Q1000';
+    const requestedRange = payload.range ?? googleSheetRangesForTenant(tenant).catalogRange;
     const effectiveRange = normalizeCatalogRange(requestedRange);
     if (!live && !this.config.allowLocalCatalogFallback) {
       this.emitCatalogReadTelemetry({
@@ -504,7 +511,7 @@ export class ToolRegistry {
   }
 
   async lookupLiveCustomerProfile({ tenantId, tenant, live, waId }) {
-    const range = tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:H1000';
+    const range = googleSheetRangesForTenant(tenant).customerProfilesRange;
     const values = await this.googleWorkspace.readValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
@@ -523,7 +530,9 @@ export class ToolRegistry {
   }
 
   async upsertLiveCustomerProfile({ tenantId, live, payload, now }) {
-    const range = 'Clientes!A1:H1000';
+    const tenant = this.store.getState().tenants?.find((item) => item.id === tenantId);
+    const range = googleSheetRangesForTenant(tenant).customerProfilesRange;
+    const appendRange = googleSheetAppendRange(range, 'Clientes', 'A', 'H');
     const values = await this.googleWorkspace.readValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
@@ -545,32 +554,36 @@ export class ToolRegistry {
       await this.googleWorkspace.updateValues({
         accessToken: live.accessToken,
         spreadsheetId: live.spreadsheetId,
-        range: `Clientes!A${existing.rowNumber}:H${existing.rowNumber}`,
+        range: googleSheetRowRange(range, existing.rowNumber, 'Clientes', 'A', 'H'),
         values: [row],
       });
-      return `Clientes!A${existing.rowNumber}:H${existing.rowNumber}`;
+      return googleSheetRowRange(range, existing.rowNumber, 'Clientes', 'A', 'H');
     }
     await this.googleWorkspace.appendValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
-      range: 'Clientes!A:H',
+      range: appendRange,
       values: [row],
     });
-    return 'Clientes!A:H';
+    return appendRange;
   }
 
-  async appendLiveOrder({ live, order }) {
+  async appendLiveOrder({ live, order, range }) {
+    const appendRange = googleSheetAppendRange(range, 'Pedidos', 'A', 'M');
     await this.googleWorkspace.appendValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
-      range: 'Pedidos!A:M',
+      range: appendRange,
       values: [orderToSheetRow(order)],
     });
-    return 'Pedidos!A:M';
+    return appendRange;
   }
 
   async appendOrderProjection({ tenantId, order }) {
-    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId];
+    const tenant = state.tenants?.find((item) => item.id === tenantId);
+    const ordersRange = googleSheetRangesForTenant(tenant).ordersRange;
     const live = await this.liveGoogleContext(tenantId);
     if (!live) {
       if (connection?.status === 'connected' && connection.mode === 'live') {
@@ -578,12 +591,15 @@ export class ToolRegistry {
       }
       return { provider: 'google_sheets', status: 'not_connected', sourceRef: null };
     }
-    const sourceRef = await this.appendLiveOrder({ live, order });
+    const sourceRef = await this.appendLiveOrder({ live, order, range: ordersRange });
     return { provider: 'google_sheets', status: 'synced', sourceRef };
   }
 
   async syncLiveOrderStatus({ tenantId, order, status, updatedAt, fullOrder = false }) {
-    const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId];
+    const tenant = state.tenants?.find((item) => item.id === tenantId);
+    const ordersRange = googleSheetRangesForTenant(tenant).ordersRange;
     const live = await this.liveGoogleContext(tenantId);
     if (!live) {
       if (connection?.status === 'connected' && connection.mode === 'live') {
@@ -594,7 +610,7 @@ export class ToolRegistry {
     const rows = await this.googleWorkspace.readValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
-      range: 'Pedidos!A:A',
+      range: googleSheetColumnRange(ordersRange, 'start', 'Pedidos', 'A', 'M'),
     });
     const rowIndex = rows.findIndex((row) => row[0] === order.id);
     if (rowIndex < 0) {
@@ -607,7 +623,9 @@ export class ToolRegistry {
     await this.googleWorkspace.updateValues({
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
-      range: fullOrder ? `Pedidos!A${rowNumber}:M${rowNumber}` : `Pedidos!G${rowNumber}:J${rowNumber}`,
+      range: fullOrder
+        ? googleSheetRowRange(ordersRange, rowNumber, 'Pedidos', 'A', 'M')
+        : googleSheetOrderStatusRowRange(ordersRange, rowNumber),
       values: [fullOrder ? orderToSheetRow(nextOrder) : orderToSheetRow(nextOrder).slice(6, 10)],
     });
     return { status: 'synced' };

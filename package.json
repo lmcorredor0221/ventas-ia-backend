@@ -26,6 +26,7 @@
     "test:catalog-import": "node server/tests/catalog-import.mjs",
     "test:catalog-retrieval": "node server/tests/catalog-retrieval-contract.mjs",
     "test:catalog-observability": "node server/tests/catalog-observability-contract.mjs",
+    "test:google-ranges": "node server/tests/google-ranges-contract.mjs && node server/tests/catalog-observability-contract.mjs",
     "test:grounding": "node server/tests/grounding-contract.mjs",
     "test:order-audit": "node server/tests/amount-sale-contract.mjs && node server/tests/order-data-audit-contract.mjs && node server/tests/order-data-audit-runtime.mjs",
     "test:order-audit:real": "node server/tests/order-data-audit-deepseek.mjs",

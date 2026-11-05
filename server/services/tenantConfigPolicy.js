@@ -85,6 +85,14 @@ export function mergeTenantConfig(base, patch) {
       ? mergeTenantConfig(output[key] ?? {}, value)
       : value;
   }
+  // Keep the legacy catalog range alias synchronized. Older runtime paths
+  // read `range`, while the tenant-facing configuration uses `catalogRange`.
+  // Canonicalize both fields at the merge boundary so a saved range is also
+  // effective for older readers and for already persisted tenants.
+  if (isPlainObject(patch?.googleSheets)) {
+    if (patch.googleSheets.catalogRange !== undefined) output.googleSheets.range = output.googleSheets.catalogRange;
+    else if (patch.googleSheets.range !== undefined) output.googleSheets.catalogRange = output.googleSheets.range;
+  }
   return output;
 }
 
