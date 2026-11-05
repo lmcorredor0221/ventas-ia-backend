@@ -43,8 +43,34 @@ Para activar el código validado deben establecerse `LLM_GROUNDING_ENABLED=true`
 
 Se conservan PostgreSQL, autenticación/CSRF obligatorios, acceso local deshabilitado, entrada asíncrona y outbox ya configurados. Las variables se actualizan individualmente, sin reemplazar el conjunto de credenciales del servicio.
 
-Pendiente de completar en el cierre del release: SHAs publicados, IDs/estados de los despliegues y resultados HTTP. El frontend debe responder por HTTPS, el proxy `/api/health` y el backend `/health` deben responder 200 y una ruta protegida sin sesión debe responder 401. No se confunde un push o un build aprobado con un despliegue terminado.
+### Cierre verificado
+
+| Componente | Commit publicado | Despliegue | Estado |
+|---|---|---|---|
+| Backend | `2ecbe26c97ff1a9a23a1f7ff42e071731c06de29`, rama `codex/backend-plan-payload-20261020` del remoto backend | `dep-dbm1se56e07s73asq6h0` | `live`, terminado 2026-11-05 06:15:49 UTC / 01:15:49 Colombia |
+| Frontend | `d097eb685d82e67d35d446902393687c1aa3a463`, `main` del remoto frontend | `dpl_BJxiwQ1iDPVk1EKZVrfW7bQ3G8WE` | `READY`, producción; alias `via.leanagentbuilder.com` confirmado por API |
+
+Se comprobaron ambos commits remotos, el SHA del despliegue Render y el SHA Git/alias del despliegue Vercel. Los commits posteriores de documentación no cambian el código ejecutado por Render; su auto-deploy continúa desactivado.
+
+Las cuatro variables descritas arriba quedaron guardadas y verificadas antes del despliegue. La configuración preexistente mantiene entrada asíncrona y outbox habilitados, PostgreSQL y autenticación/CSRF activos, y acceso de desarrollo deshabilitado. No se cambiaron las credenciales ni los métodos de pago de los clientes.
+
+Verificación HTTP posterior (06:16–06:18 UTC):
+
+- `https://via.leanagentbuilder.com/` y `/?app=1`: **200**.
+- `https://via.leanagentbuilder.com/api/health`: **200**.
+- `https://ventas-ia-backend-free.onrender.com/health`: **200**.
+- `https://ventas-ia-backend-free.onrender.com/health/ready`: **200**, `production=true`, `storageDriver=postgres`, `whatsappMode=live`, sin errores ni advertencias de configuración.
+- `/api/auth/me` directo y mediante VIA: **401** sin sesión, como corresponde.
+- Bundle publicado `index-C1hPk_IW.js`: **200**, tipo JavaScript, 477.803 bytes; contiene condiciones de domicilio, avisos de comprobante, Embedded Signup y el diálogo «Confirmar y alistar pedido». El hash de producción difiere del build local; se verificó el archivo que referencia el HTML publicado y el SHA fuente de Vercel.
+
+La comprobación de salud confirma disponibilidad y configuración, no una conversación E2E real ni tiempos de respuesta garantizados. No se enviaron mensajes a WhatsApp durante este release.
+
+### Incidencias observadas durante el release
+
+- El primer arranque tuvo un timeout PostgreSQL `57014` en `PostgresStore.save`, al insertar/actualizar `app_state`. Render reinició la instancia; el segundo arranque escuchó en el puerto 10000 con PostgreSQL y quedó `live`. No se encontraron errores nuevos en la consulta de logs desde 06:15:50 UTC hasta el cierre. Queda pendiente analizar la contención del snapshot durante reinicios; este despliegue no demuestra que esté corregida.
+- `npm ci` del backend informó dos avisos de dependencias: `body-parser` (alto) y `qs` (moderado). `npm audit --omit=dev` los confirmó, ambos transitivos y con corrección disponible. Este release no cambia el lockfile ni aplica automáticamente `npm audit fix`; quedan registrados para un parche controlado. El frontend integrado instaló sin vulnerabilidades reportadas.
+- La máquina local tuvo fallos DNS transitorios al consultar `api.render.com`; las operaciones se reintentaron y su resultado se verificó, sin crear despliegues duplicados.
 
 ## Reversión
 
-Si aparece una regresión de operación, volver al SHA backend `2be5bd8029320f3c17a285d4e35743b9914b792b` (deploy previo `dep-dbllecgae00c73c8avhg`) y promover el deployment anterior de Vercel. Desactivar grounding/auditor permite retirar esas capacidades; no revierte por sí solo todos los cambios de esta versión. No borrar datos ni forzar Git. Conservar los registros de pedidos y outbox para investigar.
+Si aparece una regresión de operación, volver al SHA backend `2be5bd8029320f3c17a285d4e35743b9914b792b` (deploy previo `dep-dbllecgae00c73c8avhg`) y promover el deployment anterior de Vercel `dpl_414bShhSSayWzUtqsFqvm4APQmbx` (frontend `198dc6ebe3c3296a15d4a5caec23670b24dc9bc5`). Desactivar grounding/auditor permite retirar esas capacidades; no revierte por sí solo todos los cambios de esta versión. No borrar datos ni forzar Git. Conservar los registros de pedidos y outbox para investigar.
