@@ -96,3 +96,27 @@ python tests/verify_order_workspace.py
 - Frontend: incorporar el delta de `src/` sobre `frontend/main` en el worktree de release, conservando la configuración publicada. Publicar `main` sin forzar Git, después de comprobar que el backend nuevo está activo.
 - Verificar SHA, estado terminal y HTTP de ambos servicios, con autenticación obligatoria. Una comprobación de salud no sustituye la prueba de un pedido real.
 - Reversión de código disponible: backend `2ecbe26c97ff1a9a23a1f7ff42e071731c06de29` y frontend `d097eb685d82e67d35d446902393687c1aa3a463`. No revierte cambios comerciales ya guardados; conservar pedidos e historial.
+
+## Cierre de producción — 5 de noviembre de 2026
+
+| Componente | Commit publicado | Despliegue verificado | Estado |
+|---|---|---|---|
+| Backend | `6c8be7c61f6d0c25750414eb0e3ee3cb8e251d17`, remoto backend, rama `codex/backend-plan-payload-20261020` | Render `dep-dbm6rplbedkc73bdblag` | `live`, 11:55:51 UTC / 06:55:51 Colombia |
+| Frontend | `de6699b24e5925c7c2d043c3c8f254965b85874f`, remoto frontend, `main` | Vercel `dpl_88hRdJiBDHkY6GPNSGUGJ3aW8oRg` | `READY`, producción, alias `via.leanagentbuilder.com` confirmado |
+
+El frontend de release se construyó nuevamente antes de publicarlo. Su árbol Git `src/` coincide exactamente con el del commit backend (`dd5a7dafab83ed0d5411f38de54d7983aa365f69`); se conservó la configuración de producción del repositorio frontend. El delta frontend son cinco archivos: la vista, sus estilos y normalización de pagos, más los dos accesos desde la interfaz existente.
+
+Comprobaciones posteriores, 11:56–11:58 UTC:
+
+- `/health/ready` del backend: HTTP 200, PostgreSQL, producción, WhatsApp live, sin advertencias ni errores de configuración.
+- `https://via.leanagentbuilder.com/api/health`: HTTP 200.
+- `/api/auth/me` directo y mediante VIA: HTTP 401 sin sesión; `/api/ops/overview?tenantId=demo`: HTTP 401 sin sesión.
+- GET del workspace con identificador ficticio inexistente: HTTP 404 «Pedido no encontrado», según el contrato de la ruta. No se solicitó ni modificó un pedido real.
+- `https://via.leanagentbuilder.com/?app=1`: HTTP 200. Bundle público `/assets/index-Vy6rKoEb.js`: HTTP 200, JavaScript, 494.033 bytes; contiene «Ver pedido y conversación», «Editar pedido» y la confirmación de acuerdo con el cliente.
+- No aparecieron errores nuevos en la consulta de registros de Render entre 11:55:53 UTC y el cierre de la verificación. Esto es una observación de esa ventana, no una certificación de estabilidad bajo carga.
+
+Incidencias conservadas: durante la rotación se repitió el timeout PostgreSQL `57014` al guardar el snapshot `app_state`, seguido de un reinicio de instancia. El stack de ese fallo refiere `PostgresStore.save:740`, correspondiente al código previo; el nuevo despliegue terminó activo a las 11:55:51. Este release no corrige ni certifica la contención de snapshots durante el reemplazo de instancias. También continúan los dos avisos de dependencias del release anterior (uno alto y uno moderado).
+
+El conector Render requirió reautenticación; se usó la CLI ya autenticada en el workspace confirmado. Hubo fallos DNS locales transitorios; se verificó el historial antes de reintentar y se creó un único despliegue. Vercel se desplegó automáticamente al publicar `main`; se comprobaron SHA, estado y alias mediante su conector.
+
+Los commits posteriores de documentación no modifican el código desplegado. No se cambiaron variables, credenciales, planes ni datos de clientes; no se enviaron mensajes reales. Los límites funcionales y de latencia del informe anterior siguen vigentes.
