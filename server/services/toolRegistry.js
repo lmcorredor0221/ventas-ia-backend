@@ -97,7 +97,20 @@ export class ToolRegistry {
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const live = await this.liveGoogleContext(tenantId);
+    const requestedRange = payload.range ?? tenant?.config?.googleSheets?.catalogRange ?? 'Catalogo!A1:Q1000';
+    const effectiveRange = normalizeCatalogRange(requestedRange);
     if (!live && !this.config.allowLocalCatalogFallback) {
+      this.emitCatalogReadTelemetry({
+        tenantId,
+        status: 'connection_required',
+        source: null,
+        spreadsheetId: null,
+        requestedRange,
+        effectiveRange,
+        filters: payload.filters,
+        rows: [],
+        reason: 'google_connection_required',
+      });
       return googleConnectionRequiredResult('No se pudo consultar el catalogo de Google de esta tienda.');
     }
     const rows = live
@@ -105,17 +118,61 @@ export class ToolRegistry {
         tenantId,
         tenant,
         live,
-        range: payload.range ?? tenant?.config?.googleSheets?.catalogRange,
+        range: requestedRange,
       })
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
+    const filteredRows = filterRows(rows, payload.filters);
+    this.emitCatalogReadTelemetry({
+      tenantId,
+      status: rows.length ? 'success' : 'error',
+      source: live ? 'google_sheets_live' : 'local_test_fixture',
+      spreadsheetId: live?.spreadsheetId ?? null,
+      requestedRange,
+      effectiveRange,
+      filters: payload.filters,
+      rows,
+      filteredRows,
+    });
     return {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'driveFileId', 'allowsSaleByAmount'],
-      rows: filterRows(rows, payload.filters),
+      rows: filteredRows,
       source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
       fetched_at: new Date().toISOString(),
     };
+  }
+
+  emitCatalogReadTelemetry({
+    tenantId,
+    status,
+    source,
+    spreadsheetId,
+    requestedRange,
+    effectiveRange,
+    filters,
+    rows = [],
+    filteredRows = [],
+    reason = null,
+  }) {
+    this.events.emit({
+      type: 'catalog.source.read',
+      tenantId,
+      detail: `Catalog source read (${status})`,
+      metadata: {
+        status,
+        source,
+        spreadsheetRef: maskReference(spreadsheetId),
+        requestedRange,
+        effectiveRange,
+        filters: sanitizeCatalogFilters(filters),
+        parsedRowCount: rows.length,
+        filteredRowCount: filteredRows.length,
+        candidateSkus: filteredRows.slice(0, 16).map((row) => row.sku).filter(Boolean),
+        candidateNames: filteredRows.slice(0, 16).map((row) => row.name).filter(Boolean),
+        reason,
+      },
+    });
   }
 
   async googleDriveFilePicker(tenantId, payload) {
@@ -401,7 +458,7 @@ export class ToolRegistry {
   }
 
   async readLiveCatalogRows({ tenantId, tenant, live, range }) {
-    const sheetRange = (range ?? 'Catalogo!A1:Q1000').replace(/(:)P(?=\d|$)/, '$1Q');
+    const sheetRange = normalizeCatalogRange(range);
     const cacheKey = `${tenantId}:${live.spreadsheetId}:${sheetRange}`;
     const cached = this.liveCatalogCache.get(cacheKey);
     if (cached?.rows && cached.expiresAt > Date.now()) return cached.rows;
@@ -778,6 +835,30 @@ function filterRows(rows, filters = {}) {
       }),
   );
   return query ? rankRowsByQuery(scopedRows, query) : scopedRows;
+}
+
+function normalizeCatalogRange(range) {
+  return String(range ?? 'Catalogo!A1:Q1000').replace(/(:)P(?=\d|$)/, '$1Q');
+}
+
+function sanitizeCatalogFilters(filters = {}) {
+  const allowedKeys = new Set(['query', 'category', 'sku', 'attributes']);
+  return Object.fromEntries(Object.entries(filters ?? {})
+    .filter(([key, value]) => allowedKeys.has(key) && value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => [key, truncateTelemetryValue(value)]));
+}
+
+function truncateTelemetryValue(value, maxLength = 240) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!text) return text;
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function maskReference(value) {
+  if (!value) return null;
+  const text = String(value);
+  if (text.length <= 10) return text;
+  return `${text.slice(0, 5)}…${text.slice(-5)}`;
 }
 
 function categoryMatches(actual, expected) {
