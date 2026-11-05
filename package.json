@@ -29,6 +29,7 @@
     "test:order-audit": "node server/tests/amount-sale-contract.mjs && node server/tests/order-data-audit-contract.mjs && node server/tests/order-data-audit-runtime.mjs",
     "test:order-audit:real": "node server/tests/order-data-audit-deepseek.mjs",
     "test:order-edit": "node server/tests/order-edit-contract.mjs",
+    "test:order-summary": "node server/tests/whatsapp-order-summary-contract.mjs && node server/tests/confirmation-offer-contract.mjs && node server/tests/order-summary-notification-contract.mjs",
     "test:order-edit:postgres": "node server/tests/order-edit-contract.mjs --postgres",
     "test:cart-continuity": "node server/tests/cart-continuity-contract.mjs",
     "test:contextual-harness": "node server/tests/contextual-acceptance-contract.mjs && node server/tests/contextual-harness-contract.mjs",

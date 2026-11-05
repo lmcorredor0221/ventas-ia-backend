@@ -25,6 +25,7 @@ import { createAdminRouter } from './routes/admin.js';
 import { OrderService } from './services/orderService.js';
 import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js';
 import { IntegrationOutbox } from './services/integrationOutbox.js';
+import { orderSummaryNotification } from './services/orderSummaryNotification.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -68,6 +69,7 @@ function createExpressRuntime({ config, store }) {
     store,
     config,
     handlers: {
+      'order.summary_notification': orderSummaryNotification({ store, tools, events }),
       'order.sheet_edit': async (entry) => {
         const order = store.getOrder ? await store.getOrder(entry.tenantId, entry.aggregateId)
           : store.getState().ordersByTenant?.[entry.tenantId]?.find(item => item.id === entry.aggregateId);

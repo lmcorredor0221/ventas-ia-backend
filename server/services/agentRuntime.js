@@ -7,6 +7,7 @@ import { GroundedDecisionAgent } from './groundedDecisionAgent.js';
 import { OrderDataAuditor } from './orderDataAuditor.js';
 import { orderDataRevision } from '../domain/orderDataAudit.js';
 import { quoteBreakdownWasCommunicated } from './llmReplyComposer.js';
+import { whatsappOrderSummary, splitWhatsAppText } from '../domain/whatsappOrderSummary.js';
 import { applySemanticCart, orderDraftBlockingFields } from '../domain/groundingContracts.js';
 import {
   advanceOrderDraft,
@@ -1020,11 +1021,11 @@ export class AgentRuntime {
     const sent = await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: customerReply,
+      text: confirmationOffer?.text ?? customerReply,
       ...((productSelectionOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productSelectionOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
     } });
     if (sent?.accepted && !requiresHumanResolution && normalizedMissingFields.length === 0
-      && quoteBreakdownWasCommunicated(customerReply, pricing)
+      && quoteBreakdownWasCommunicated(confirmationOffer?.text ?? customerReply, pricing)
       && (await this.getConversation(conversationId))?.orderDraft?.version === nextDraft.version) {
       const communicatedQuote = { draftVersion: nextDraft.version, policyRevision: pricing.policyRevision,
         basketRevision: pricing.basketRevision, total: pricing.total, delivery: pricing.delivery,
@@ -1226,7 +1227,7 @@ export class AgentRuntime {
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Productos: ${formatCurrency(order.order.pricing.subtotal)}. ${order.order.delivery === false ? 'No incluye servicio de domicilio.' : `Domicilio: ${formatCurrency(order.order.pricing.deliveryFee)}.`} Total: ${formatCurrency(order.order.pricing.total)}. Pago: ${paymentMethodLabel(order.order.paymentMethod, paymentMethodsForTenant(tenant))}. ${order.order.delivery === false ? 'La tienda lo alista; acuerda con ella cómo recibirlo.' : `Dirección: ${order.order.deliveryAddress}. La tienda lo alista y coordina la entrega.`} Referencia: ${order.order.id}.`,
+      text: whatsappOrderSummary(order.order, { stage: 'received', paymentMethods: paymentMethodsForTenant(tenant) }).text,
     } });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
@@ -1358,7 +1359,7 @@ export class AgentRuntime {
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: customerReply,
+      text: confirmationOffer?.text ?? customerReply,
       ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
     } });
 
@@ -1893,12 +1894,16 @@ export class AgentRuntime {
     };
   }
 
-  async createConfirmationOffer({ tenantId, conversationId, body, draftVersion = 0 }) {
+  async createConfirmationOffer({ tenantId, conversationId, draftVersion = 0 }) {
     if (!this.store.createInteractionOffer) return null;
-    const draft = (await this.getConversation(conversationId))?.orderDraft;
+    const conversation = await this.getConversation(conversationId);
+    if (conversation?.tenantId !== tenantId) return null;
+    const draft = conversation.orderDraft;
     if (!isCurrentDraftVersion(draft, draftVersion) || orderDraftBlockingFields(draft).length) return null;
     const tenant = await this.getTenant(tenantId);
     if (draft.pricing && draft.pricing.policyRevision !== deliveryPolicyRevision(tenant)) return null;
+    const summary = whatsappOrderSummary(draft, { paymentMethods: paymentMethodsForTenant(tenant) });
+    if (!summary.complete) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const options = [
@@ -1917,9 +1922,10 @@ export class AgentRuntime {
     });
     return {
       offer,
+      text: summary.text,
       interactive: {
         kind: 'button',
-        body: String(body ?? '¿Confirmas el pedido?').trim() || '¿Confirmas el pedido?',
+        body: summary.text,
         buttons: options.map(({ id, title }) => ({ id, title })),
       },
     };
@@ -2069,7 +2075,7 @@ export class AgentRuntime {
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text,
+      text: confirmationOffer?.text ?? text,
       ...(confirmationOffer ? { interactive: confirmationOffer.interactive } : {}),
     } });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
@@ -2171,7 +2177,7 @@ export class AgentRuntime {
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text,
+      text: confirmationOffer?.text ?? text,
       ...((productOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
     } });
     return { summary: 'Interactive product variant selected', interaction: result.option };
@@ -2268,19 +2274,11 @@ export class AgentRuntime {
         body: 'Puedes responder con estas opciones o escribirme cómo deseas continuar.' } };
     }
     if (!payload?.interactive && payload?.text?.length > 4096) {
-      const remaining = String(payload.text);
-      let cursor = 0, result;
-      while (cursor < remaining.length) {
-        let end = Math.min(cursor + 4096, remaining.length);
-        if (end < remaining.length) {
-          const boundary = remaining.lastIndexOf(' ', end);
-          if (boundary > cursor) end = boundary + 1;
-          if (end - cursor > 4096) end--;
-        }
+      let result;
+      for (const text of splitWhatsAppText(payload.text)) {
         result = await this.sendCustomerMessage({ tenantId, conversationId, normalized,
-          payload: { ...payload, text: remaining.slice(cursor, end) } });
+          payload: { ...payload, text } });
         if (result?.suppressed) return result;
-        cursor = end;
       }
       return result;
     }
@@ -3396,15 +3394,6 @@ function interactiveProductTitle(product) {
   return [name, presentation].filter(Boolean).join(' ').slice(0, 72);
 }
 
-
-function formatOrderItems(items = []) {
-  const lines = (items ?? [])
-    .filter((item) => item?.name)
-    .map((item) => item.saleMode === 'amount' ? `${formatCurrency(item.requestedAmount)} de ${describeCatalogProduct(item)} (por valor)`
-      : `${item.quantity ?? 1} x ${describeCatalogProduct(item)}`);
-  if (!lines.length) return 'pedido registrado';
-  return lines.join(', ');
-}
 
 function initials(value) {
   return String(value)

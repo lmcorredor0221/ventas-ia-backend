@@ -57,7 +57,7 @@ try {
     const order = app.orders.findOrder(conversation.orderId, 'andina');
     assert.equal(order.pricing.total, 14000); assert.equal(order.subtotal, 10000);
     assert.equal(order.items[0].presentation, '1 paquete');
-    assert.match(conversation.messages.at(-1).text, /1 x Pan de prueba \(1 paquete\)/);
+    assert.match(conversation.messages.at(-1).text, /• Pan de prueba \(1 paquete\)\n  1 × \$ 10\.000 = \*\$ 10\.000\*/);
   });
   await test('Historical pending fields cannot conceal missing delivery configuration', async () => {
     const tenant = { id: 'x', config: { orderPolicy: {} } };

@@ -47,7 +47,7 @@ try {
   assert.ok(confirmed.conversation.orderId); assert.equal(auditCalls, 1, 'No repeat audit for acceptance of unchanged data');
   const persisted = app.orders.findOrder(confirmed.conversation.orderId, 'andina');
   assert.equal(persisted.items[0].quantity, null); assert.equal(persisted.items[0].requestedAmount, 5000);
-  assert.match(confirmed.conversation.messages.at(-1).text, /por valor/);
+  assert.match(confirmed.conversation.messages.at(-1).text, /por valor/i);
   // A new inbound arrives while the audit is running: its patch cannot be sent/applied.
   intent = 'delivery_order'; items = [{ rawItemId: 'sal-new', catalogQuery: 'Salchichón', productHypothesis: 'Salchichón', rawText: '5000 de salchichón', quantity: 2 }];
   delta = { name: 'Ana', address: 'Calle Uno 1', paymentPreference: 'cash' };

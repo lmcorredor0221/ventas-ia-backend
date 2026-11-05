@@ -682,6 +682,7 @@ export class ToolRegistry {
           text: payload.text ?? payload.interactive?.body ?? payload.template_name ?? 'Mensaje enviado',
           channel: liveConfig ? 'whatsapp_live' : 'whatsapp_mock',
           action: payload.action ?? payload.template_name ?? 'session_message',
+          ...(payload.deliveryKey ? { deliveryKey: payload.deliveryKey } : {}),
           createdAt: new Date().toISOString(),
         });
         conversation.updatedAt = new Date().toISOString();

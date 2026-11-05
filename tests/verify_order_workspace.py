@@ -43,6 +43,7 @@ with sync_playwright() as p:
     page.screenshot(path=str(ARTIFACTS / 'desktop-edit.png'), full_page=True)
     dialog.get_by_role('button', name='Guardar cambios').click()
     expect(dialog.get_by_text('Cambios guardados. El pedido conserva su etapa.')).to_be_visible()
+    expect(dialog.get_by_text('Resumen actualizado en cola para WhatsApp.')).to_be_visible()
     expect(dialog.get_by_role('button', name='Marcar tomado')).to_be_visible()
     dialog.get_by_text('Historial de cambios (1)').click()
     expect(dialog.get_by_text('22.200', exact=False).first).to_be_visible()

@@ -42,7 +42,11 @@ export class OrderService {
     const tenant = this.store.getState().tenants.find(item => item.id === tenantId);
     const effectiveOrder = { ...order, status: this.effectiveStatus(order) };
     const canEdit = EDITABLE_ORDER_STATUSES.includes(effectiveOrder.status);
+    const [notification] = await this.store.listOutbox?.({ tenantId, aggregateId: orderId, kind: 'order.summary_notification', limit: 1 }) ?? [];
     return { order: effectiveOrder, canEdit,
+      summaryNotification: notification?.payload?.version === order.version ? {
+        status: notification.result?.status ?? notification.payload?.result?.status ?? notification.status, version: order.version,
+      } : null,
       conversation: conversation?.tenantId === tenantId ? { id: conversation.id, customer: conversation.customer,
         waId: conversation.waId, messages: conversation.messages ?? [], status: conversation.status } : null,
       products: canEdit && includeCatalog ? await this.catalogForEditing(tenantId) : [],
@@ -117,8 +121,12 @@ export class OrderService {
       version: order.version, before: orderCommercialFields(current), after: orderCommercialFields(order) }];
     const entry = this.outbox?.createEntry({ tenantId, kind: 'order.sheet_edit', aggregateType: 'order', aggregateId: orderId,
       idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`, payload: { tenantId, orderId, version: order.version } });
-    await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries: entry ? [entry] : [], catalogProducts: products });
-    return { order, notification: 'not_sent', projection: this.outbox ? 'queued' : 'not_queued' };
+    const notification = this.outbox?.enabled ? this.outbox.createEntry({ tenantId, kind: 'order.summary_notification',
+      aggregateType: 'order', aggregateId: orderId, idempotencyKey: `order-summary:${orderId}:${order.version}`,
+      payload: { tenantId, orderId, version: order.version } }) : null;
+    await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion,
+      entries: [entry, notification].filter(Boolean), catalogProducts: products });
+    return { order, notification: notification ? 'queued' : 'not_queued', projection: this.outbox ? 'queued' : 'not_queued' };
   }
 
   effectiveStatus(order, requests = this.store.getState().pendingRequests ?? []) {

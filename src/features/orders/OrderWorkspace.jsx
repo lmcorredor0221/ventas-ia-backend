@@ -8,6 +8,16 @@ import './OrderWorkspace.css';
 const money = value => Number.isSafeInteger(value) ? new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value) : 'Por definir';
 const normal = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const date = value => value && !Number.isNaN(Date.parse(value)) ? new Date(value).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+const summaryStatus = {
+  pending: 'Resumen actualizado en cola para WhatsApp.', processing: 'Enviando el resumen actualizado por WhatsApp.',
+  retrying: 'No se pudo enviar el resumen todavía. Se reintentará; los cambios están guardados.',
+  accepted: 'Meta aceptó el envío del resumen actualizado. Esto no confirma su lectura.',
+  window_closed: 'El resumen no se envió: venció la ventana de atención de WhatsApp. Espera un mensaje del cliente para retomar el contacto.',
+  failed: 'No se pudo enviar el resumen actualizado. Revisa la conexión de WhatsApp.',
+  recipient_unavailable: 'No se envió el resumen: revisa la conversación asociada al pedido.',
+  invalid_summary: 'No se envió el resumen: hay datos del pedido por revisar.',
+  superseded: 'Esta notificación se omitió porque el pedido cambió de revisión o de etapa.',
+};
 const draftFor = order => ({ customerName: order.customerName ?? '', deliveryAddress: order.deliveryAddress ?? '',
   delivery: order.pricing?.delivery ?? order.delivery ?? true,
   deliveryFee: order.pricing?.deliveryFee ?? '', paymentMethod: normalizePaymentMethodId(order.paymentMethod),
@@ -100,8 +110,9 @@ export default function OrderWorkspace({ orderId, tenantId, headers, onClose, on
         customerConfirmed: confirmed,
       }, { headers, timeoutMs: 30000 });
       if (!alive.current) return;
-      setContext(current => ({ ...current, order: result.order })); setDraft(draftFor(result.order));
-      setEditing(false); setConfirmed(false); setNotice('Cambios guardados. El pedido conserva su etapa.');
+      setContext(current => ({ ...current, order: result.order,
+        summaryNotification: result.notification === 'queued' ? { status: 'pending', version: result.order.version } : null })); setDraft(draftFor(result.order));
+      setEditing(false); setConfirmed(false); setNotice(`Cambios guardados. El pedido conserva su etapa.${result.notification === 'queued' ? '' : ' No se pudo programar el envío del resumen por WhatsApp.'}`);
       onSaved(result.order);
     } catch (failure) { if (alive.current) { setError(failure.message); setConfirmed(false); } }
     finally { if (alive.current) setBusy(false); }
@@ -122,6 +133,7 @@ export default function OrderWorkspace({ orderId, tenantId, headers, onClose, on
     <nav className="ow-tabs" aria-label="Vista del pedido"><button type="button" aria-pressed={tab === 'order'} onClick={() => setTab('order')}><ShoppingBag size={18} />Pedido</button><button type="button" aria-pressed={tab === 'chat'} onClick={() => setTab('chat')}><MessageCircle size={18} />Conversación</button></nav>
     {error && <div className="ow-notice is-error" role="alert">{error} <button className="text-btn" type="button" disabled={busy} onClick={() => editing ? setDiscard('reload') : setRefresh(value => value + 1)}>Recargar pedido</button></div>}
     {notice && <p className="ow-notice" role="status">{notice}</p>}
+    {context?.summaryNotification && summaryStatus[context.summaryNotification.status] && <p className="ow-notice" role="status">{summaryStatus[context.summaryNotification.status]}</p>}
     {discard && <div className="ow-notice" role="alert"><p>Tienes una edición abierta. ¿Quieres descartar los cambios sin guardar?</p><button type="button" className="ghost-btn" onClick={() => setDiscard(false)}>Seguir editando</button><button type="button" className="deny-btn" onClick={() => { const reload = discard === 'reload'; setDiscard(false); if (reload) { setEditing(false); setRefresh(value => value + 1); } else onClose(); }}>Descartar cambios</button></div>}
     {loading ? <p className="ow-loading" role="status">Cargando pedido y conversación…</p> : context && <div className={`ow-columns ow-tab-${tab}`}>
       <section className="ow-order" aria-label="Detalle del pedido">
@@ -149,7 +161,7 @@ export default function OrderWorkspace({ orderId, tenantId, headers, onClose, on
               {belowMinimum && <div className="ow-notice"><p>El mínimo para domicilio de la tienda es {money(minimum)}.</p><label className="ow-checkbox"><input type="checkbox" checked={draft.minimumException} onChange={event => change({ minimumException: event.target.checked })} />Autorizo una excepción al mínimo para este pedido</label></div>}
               <label>Motivo o nota del cambio {belowMinimum ? '(obligatorio)' : '(opcional)'}<textarea maxLength={500} required={belowMinimum} value={draft.reason} onChange={event => change({ reason: event.target.value })} rows={2} /></label>
               <label className="ow-checkbox"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} required />Acordé con el cliente los productos, la entrega, el medio de pago y este total.</label>
-              <p className="ow-muted">Guardar actualiza el pedido; no envía un WhatsApp ni acredita el pago.</p>
+              <p className="ow-muted">Al guardar, se enviará al cliente el resumen actualizado por WhatsApp si la ventana de atención sigue abierta. Registrar el medio de pago no acredita su recepción.</p>
               <footer className="ow-actions"><button className="approve-btn" type="submit" disabled={!confirmed || !items.length || total == null || (belowMinimum && !draft.minimumException)}><Check size={18} />{busy ? 'Guardando…' : 'Guardar cambios'}</button><button className="ghost-btn" type="button" onClick={() => { setEditing(false); setDraft(draftFor(order)); setError(''); }}>Cancelar edición</button></footer></>}
           </fieldset>
           {!editing && <div className="ow-actions">{context.canEdit && onAdvance && <button className="approve-btn" type="button" disabled={busy} onClick={advance}>{busy ? 'Guardando…' : order.status === 'preparing' ? 'Marcar en camino' : 'Marcar tomado'}</button>}<button className="text-btn" type="button" disabled={busy} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} />Actualizar pedido</button></div>}

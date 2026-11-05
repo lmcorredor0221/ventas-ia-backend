@@ -342,7 +342,8 @@ export function quoteBreakdownWasCommunicated(text, pricing) {
   if (!pricing?.canConfirm || !isMoney(pricing.subtotal) || !isMoney(pricing.total)) return false;
   const facts = replyCommercialFacts({ pricing, subtotal: pricing.subtotal });
   const required = ['subtotal', 'pricing.total', ...(pricing.delivery ? ['pricing.deliveryFee'] : [])];
-  const reply = compactText(String(text ?? ''));
+  // WhatsApp's bold markers are presentation, not a change to the quote.
+  const reply = compactText(String(text ?? '').replace(/\*/g, ''));
   return required.every(field => {
     const fact = facts.find(entry => entry.field === field);
     return Boolean(fact && isMoney(fact.amount) && reply.includes(compactText(fact.text)));

@@ -757,12 +757,15 @@ export class PostgresStore {
     }, 'outbox failure');
   }
 
-  listOutbox({ status, limit = 100 } = {}) {
+  listOutbox({ status, tenantId, aggregateId, kind, limit = 100 } = {}) {
     const values = [];
     const clauses = [];
     if (status) {
       values.push(status);
       clauses.push(`status = $${values.length}`);
+    }
+    for (const [column, value] of [['tenant_id', tenantId], ['aggregate_id', aggregateId], ['kind', kind]]) {
+      if (value) { values.push(value); clauses.push(`${column} = $${values.length}`); }
     }
     values.push(Number(limit) || 100);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';

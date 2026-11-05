@@ -39,9 +39,10 @@ try {
   assert.equal(result.order.version, 2);
   assert.equal(result.order.editHistory[0].before.pricing.total, 13000);
   assert.equal(result.order.editHistory[0].after.pricing.total, 22200);
-  assert.equal(result.notification, 'not_sent');
-  assert.equal(store.state.integrationOutbox.length, 1);
+  assert.equal(result.notification, 'queued');
+  assert.equal(store.state.integrationOutbox.length, 2);
   assert.equal(store.state.integrationOutbox[0].kind, 'order.sheet_edit');
+  assert.equal(store.state.integrationOutbox[1].kind, 'order.summary_notification');
   assert.deepEqual(store.state.conversations[0].messages, beforeMessages);
   assert.equal(store.state.conversations[0].manualWhatsApp.active, true);
   assert.equal(store.state.conversations[0].orderDraft.pricing.total, 22200);
@@ -131,7 +132,7 @@ try {
   checks++;
 
   // Retried Sheets edits project the latest order, and a provider outage does
-  // not roll back the operational write or trigger a WhatsApp send.
+  // not roll back the operational write or resend an older WhatsApp revision.
   seedOrderEdit(store);
   await edit(editInput());
   await edit(editInput({ expectedVersion: 2, customerName: 'Última revisión' }));
@@ -215,7 +216,7 @@ async function postgresContracts() {
     seedOrderEdit(db, { pending: true });
     const before = structuredClone(db.state);
     await db.save();
-    const makeService = database => new OrderService({ store: database, tools: { googleSheetsReadTable: products }, outbox: new IntegrationOutbox({ store: database }) });
+    const makeService = database => new OrderService({ store: database, tools: { googleSheetsReadTable: products }, outbox: new IntegrationOutbox({ store: database, config: { integrationOutboxEnabled: true } }) });
     const service = makeService(db);
     const save = (engine, input) => engine.edit({ tenantId: 'andina', orderId: 'ord-edit-local', actorId: 'pg-owner', input });
     await save(service, editInput());
@@ -225,7 +226,12 @@ async function postgresContracts() {
     assert.equal(row.payload.editHistory.length, 1);
     assert.equal((await db.getConversation('chat-edit-local')).orderDraft.pricing.total, 22200);
     assert.equal((await db.listPendingRequests({ tenantId: 'andina' }))[0].contextSnapshot.pricing.total, 22200);
-    assert.equal((await db.listOutbox()).length, 1);
+    assert.equal((await db.listOutbox()).length, 2);
+    const [notification] = await db.listOutbox({ tenantId: 'andina', aggregateId: 'ord-edit-local', kind: 'order.summary_notification', limit: 1 });
+    assert.equal(notification.payload.version, 2);
+    assert.equal((await db.listOutbox({ tenantId: 'norte', kind: 'order.summary_notification' })).length, 0);
+    await db.completeOutbox(notification.id, { status: 'accepted', version: 2 });
+    assert.equal((await service.workspace({ tenantId: 'andina', orderId: 'ord-edit-local', includeCatalog: false })).summaryNotification.status, 'accepted');
     checks++;
 
     const db2 = new PostgresStore({ databaseUrl: url.toString(), ssl: 'disable', max: 3 }); stores.push(db2);
@@ -236,7 +242,7 @@ async function postgresContracts() {
     assert.equal(raced.find(r => r.status === 'rejected').reason.code, 'order_version_conflict');
     const committed = await db.getOrder('andina', 'ord-edit-local');
     assert.equal(committed.version, 3);
-    assert.equal((await db.listOutbox()).length, 2);
+    assert.equal((await db.listOutbox()).length, 4);
     checks++;
 
     // An old snapshot cannot replace a commercially edited order.
@@ -254,7 +260,7 @@ async function postgresContracts() {
     await assert.rejects(save(service, editInput({ expectedVersion: 3 })), error => error.code === '23502');
     assert.deepEqual(await db.getOrder('andina', 'ord-edit-local'), committed);
     assert.deepEqual(db.state.ordersByTenant.andina[0], localBefore);
-    assert.equal((await db.listOutbox()).length, 2);
+    assert.equal((await db.listOutbox()).length, 4);
     checks++;
   } finally {
     for (const database of stores) await database.close();

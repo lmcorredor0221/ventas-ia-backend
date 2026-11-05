@@ -314,10 +314,11 @@ export class JsonStore {
     return failed;
   }
 
-  listOutbox({ status, limit = 100 } = {}) {
+  listOutbox({ status, tenantId, aggregateId, kind, limit = 100 } = {}) {
     return (this.getState().integrationOutbox ?? [])
       .filter((item) => !status || item.status === status)
-      .slice(-Number(limit));
+      .filter(item => (!tenantId || item.tenantId === tenantId) && (!aggregateId || item.aggregateId === aggregateId) && (!kind || item.kind === kind))
+      .slice(-Number(limit)).reverse();
   }
 
   migrate() {
