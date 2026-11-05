@@ -73,6 +73,19 @@ export default function ManualOrderDialog({ conversationId, onClose, onSubmit, o
       </header>
       <p>Registra lo acordado con el cliente por WhatsApp. Revisa productos y total antes de pasarlo a alistamiento.</p>
       {error && <p role="alert" className="manual-order-error">{error}</p>}
+      {context?.conversation?.messages?.length > 0 && (
+        <section className="manual-order-conversation" aria-label="Mensajes de la conversación escalada">
+          <h3>Lo que acordaste con el cliente</h3>
+          <div className="manual-order-conversation-list">
+            {context.conversation.messages.slice(-8).map((message, index) => (
+              <div key={message.id ?? `${message.createdAt ?? 'message'}-${index}`} className={`manual-order-message manual-order-message-${message.role ?? 'unknown'}`}>
+                <strong>{message.label ?? (message.role === 'assistant' ? 'Asistente' : 'Cliente')}</strong>
+                <span>{message.text ?? ''}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {loading ? <p role="status">Consultando el catálogo de tu tienda…</p> : context?.order ? (
         <div><p>Esta conversación ya tiene un pedido registrado.</p><button className="approve-btn" onClick={() => onOpenOrder(context.order.id)}>Ver pedido</button></div>
       ) : context ? (

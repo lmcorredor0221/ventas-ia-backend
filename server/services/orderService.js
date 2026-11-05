@@ -53,6 +53,114 @@ export class OrderService {
       paymentMethods: paymentMethodsForTenant(tenant), deliveryPolicy: deliveryPolicyForTenant(tenant) };
   }
 
+  async manualOrderContext({ conversationId, tenantId }) {
+    const conversation = this.store.getConversation
+      ? await this.store.getConversation(conversationId)
+      : this.store.getState().conversations?.find((item) => item.id === conversationId);
+    if (!conversation || conversation.tenantId !== tenantId) throw editError('Conversación no encontrada.', 'conversation_not_found', 404);
+    const existing = this.findOrder(conversation.orderId, tenantId)
+      ?? (this.store.getState().ordersByTenant?.[tenantId] ?? []).find((item) => item.conversationId === conversationId);
+    if (existing) return { conversation: manualConversationSnapshot(conversation), order: existing, products: [], paymentMethods: [], deliveryPolicy: deliveryPolicyForTenant(this.store.getState().tenants.find((item) => item.id === tenantId)) };
+    const tenant = this.store.getState().tenants.find((item) => item.id === tenantId);
+    const profile = this.store.getState().customerProfilesByTenant?.[tenantId]?.[conversation.waId] ?? null;
+    const draft = manualDraftFromConversation(conversation, profile);
+    return {
+      conversation: manualConversationSnapshot(conversation),
+      draft,
+      products: await this.catalogForEditing(tenantId),
+      paymentMethods: paymentMethodsForTenant(tenant),
+      deliveryPolicy: deliveryPolicyForTenant(tenant),
+    };
+  }
+
+  async createManualOrder({ conversationId, tenantId, input, actorId = 'local-owner' }) {
+    const conversation = this.store.getConversation
+      ? await this.store.getConversation(conversationId)
+      : this.store.getState().conversations?.find((item) => item.id === conversationId);
+    if (!conversation || conversation.tenantId !== tenantId) throw editError('Conversación no encontrada.', 'conversation_not_found', 404);
+    if (this.findOrder(conversation.orderId, tenantId) || (this.store.getState().ordersByTenant?.[tenantId] ?? []).some((item) => item.conversationId === conversationId)) {
+      throw editError('Esta conversación ya tiene un pedido registrado.', 'manual_order_already_exists', 409);
+    }
+    if (input?.customerConfirmed !== true) throw editError('Confirma que acordaste el pedido con el cliente.');
+    const customerName = String(input.customerName ?? '').trim();
+    const deliveryAddress = String(input.deliveryAddress ?? '').trim();
+    if (!customerName || customerName.length > 160 || !deliveryAddress || deliveryAddress.length > 500) {
+      throw editError('Revisa el nombre y la dirección del cliente.');
+    }
+    const tenant = this.store.getState().tenants.find((item) => item.id === tenantId);
+    const payment = paymentMethodsForTenant(tenant).find((method) => method.id === normalizePaymentMethodId(input.paymentMethod));
+    if (!payment) throw editError('Selecciona un medio de pago habilitado por tu tienda.');
+    if (!Array.isArray(input.items) || !input.items.length || input.items.length > 100) throw editError('El pedido debe tener entre 1 y 100 productos.');
+    const products = await this.catalogForEditing(tenantId);
+    const seen = new Set();
+    const items = input.items.map((line) => {
+      const product = products.find((item) => item.sku === line?.sku);
+      if (!product || seen.has(line.sku)) throw editError('Hay un producto no disponible o repetido. Revisa el catálogo.');
+      seen.add(line.sku);
+      const quantity = Number(line.quantity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 999) throw editError(`Revisa la cantidad de ${product.name}.`);
+      if (!Number.isSafeInteger(product.price) || product.price <= 0) throw editError(`El producto ${product.name} no tiene un precio válido.`);
+      if (!Number.isFinite(product.stock) || product.stock < quantity) throw editError(`No hay existencias suficientes de ${product.name}.`);
+      if (line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw editError(`Cambió el precio de ${product.name}. Recarga el pedido y revisa el total.`, 'order_price_changed', 409);
+      return { sku: product.sku, name: product.name, presentation: product.presentation, unitPrice: product.price,
+        quantity, saleMode: 'units', requestedAmount: null, allowsSaleByAmount: product.allowsSaleByAmount,
+        lineTotal: product.price * quantity };
+    });
+    assertCommerceOrderAllowed(items, products);
+    const delivery = input.delivery !== false;
+    const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+    const policy = deliveryPolicyForTenant(tenant);
+    const exception = delivery && policy.deliveryMinimumSubtotal != null && subtotal < policy.deliveryMinimumSubtotal;
+    const reason = String(input.minimumExceptionReason ?? '').trim();
+    if (exception && (input.minimumException !== true || !reason)) {
+      throw editError('El pedido no alcanza el mínimo. Autoriza la excepción e indica el acuerdo con el cliente.', 'delivery_minimum_exception_required', 409);
+    }
+    const pricing = evaluateDeliveryPolicy({ tenant, items: items.map((item) => ({ ...item, product: products.find((product) => product.sku === item.sku) })),
+      delivery, draftVersion: 1, resolution: exception ? {
+        authorized: true, requestId: `manual-order:${conversationId}:1`, actorId, tenantId,
+        policyRevision: deliveryPolicyRevision(tenant), basketRevision: deliveryBasketRevision(items),
+        deliveryFee: policy.deliveryFee, minimumSubtotal: policy.deliveryMinimumSubtotal, minimumException: true, reason,
+      } : null });
+    assertDeliveryPricing(pricing);
+    const now = new Date().toISOString();
+    const order = { id: `ord-${crypto.randomUUID().slice(0, 10)}`, tenantId, conversationId, waId: conversation.waId,
+      customerName, deliveryAddress: delivery ? deliveryAddress : '', items, subtotal, pricing, delivery,
+      paymentMethod: payment.id, paymentMethodLabel: payment.label, status: 'pending_human_preparation', version: 1,
+      createdAt: now, updatedAt: now, statusHistory: [{ status: 'pending_human_preparation', at: now, actorId, source: 'manual_conversation' }],
+      sheetSyncStatus: this.outbox ? 'queued' : 'not_queued', manualSource: 'human_handoff' };
+    const sheetEntry = this.createOrderSheetCreateEntry(order);
+    this.store.mutate((state) => {
+      state.ordersByTenant ??= {};
+      state.ordersByTenant[tenantId] ??= [];
+      state.ordersByTenant[tenantId].unshift(order);
+      const current = state.conversations.find((item) => item.id === conversationId);
+      if (current) {
+        current.orderId = order.id;
+        current.orderStatus = order.status;
+        current.status = 'blocked';
+        current.zone = 'approval';
+        current.stage = 'handoff';
+        current.nextStep = 'Pedido armado por la tienda; pendiente de tomar para alistamiento.';
+        current.updatedAt = now;
+      }
+    });
+    if (this.store.persistNewOrderWithOutbox) await this.store.persistNewOrderWithOutbox(order, [sheetEntry].filter(Boolean));
+    else {
+      await this.store.persistOrder?.(tenantId, order.id);
+      if (sheetEntry) await this.store.enqueueOutbox?.(sheetEntry);
+    }
+    await this.store.persistConversation?.(conversationId);
+    this.events?.emit({ type: 'order.manual_created', tenantId, conversationId, detail: `Pedido manual ${order.id} creado`, metadata: { orderId: order.id, actorId } });
+    return { order, projection: sheetEntry ? 'queued' : 'not_queued' };
+  }
+
+  createOrderSheetCreateEntry(order) {
+    if (!this.outbox) return null;
+    return this.outbox.createEntry({ tenantId: order.tenantId, kind: 'order.sheet_create', aggregateType: 'order', aggregateId: order.id,
+      idempotencyKey: `order-sheet-create:${order.id}`, payload: { tenantId: order.tenantId, orderId: order.id,
+        conversationId: order.conversationId, traceId: this.store.getState().conversations?.find((item) => item.id === order.conversationId)?.traceId ?? null } });
+  }
+
   async edit({ orderId, tenantId, input, actorId }) {
     // Share the lock with status transitions, including dispatch. PostgreSQL
     // also compares the version under a row lock across different processes.
@@ -319,4 +427,32 @@ export class OrderService {
       },
     });
   }
+}
+
+function manualConversationSnapshot(conversation) {
+  return {
+    id: conversation.id,
+    customer: conversation.customer ?? conversation.profileName ?? conversation.waId,
+    waId: conversation.waId,
+    status: conversation.status,
+    stage: conversation.stage ?? null,
+    messages: (conversation.messages ?? []).slice(-30),
+  };
+}
+
+function manualDraftFromConversation(conversation, profile) {
+  const draft = conversation.orderDraft ?? {};
+  const items = (draft.items ?? []).map((item) => ({
+    sku: item.product?.sku ?? item.sku ?? item.skuHint ?? null,
+    quantity: Number.isInteger(Number(item.quantity)) && Number(item.quantity) > 0 ? Number(item.quantity) : 1,
+  })).filter((item) => item.sku);
+  return {
+    customerName: String(draft.customerName ?? conversation.customer ?? profile?.name ?? '').trim(),
+    deliveryAddress: String(draft.deliveryAddress ?? profile?.defaultAddress ?? '').trim(),
+    paymentMethod: draft.paymentMethod ?? profile?.preferredPaymentMethod ?? '',
+    delivery: draft.delivery !== false,
+    minimumException: false,
+    minimumExceptionReason: '',
+    items,
+  };
 }

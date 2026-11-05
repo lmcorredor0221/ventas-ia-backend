@@ -1,7 +1,7 @@
 import { launchMetaEmbeddedSignup } from './features/whatsapp/embeddedSignup.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
-import { patchJson, postJson } from './core/api/client.js';
+import { getJson, patchJson, postJson } from './core/api/client.js';
 import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
 import PaymentNotices from './features/orders/PaymentNotices.jsx';
 import OrderProgressCard, { OrderPricingSummary } from './features/orders/OrderProgressCard.jsx';
@@ -1447,7 +1447,7 @@ function App() {
           <AnalyticsView conversations={visibleConversations} events={visibleEvents} requests={visibleRequests} tools={toolList} usage={usageSummary} isPlatformAdmin={isPlatformAdmin} />
         )}
 
-        {activeView === 'config' && <Configuration key={tenant.id} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
+        {activeView === 'config' && <Configuration key={tenant.id} auth={auth} onNavigate={navigateToView} onSaveConfig={updateTenantConfig} tenant={tenant} tools={toolList} />}
       </section>
       {orderWorkspaceTarget?.tenantId === tenantId && <OrderWorkspace key={`${tenantId}:${orderWorkspaceTarget.id}`}
         orderId={orderWorkspaceTarget.id} tenantId={tenantId} headers={csrfHeaders(auth)}
@@ -6421,7 +6421,7 @@ function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
   );
 }
 
-function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
+function Configuration({ auth, onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
   const [agentName, setAgentName] = useState(tenant.config?.agentPolicy?.displayName ?? 'Rocío');
   const [agentNotice, setAgentNotice] = useState('');
@@ -6435,6 +6435,12 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [savingPayments, setSavingPayments] = useState(false);
   const [savingReplySettings, setSavingReplySettings] = useState(false);
   const [replySettingsNotice, setReplySettingsNotice] = useState(null);
+  const [googleResources, setGoogleResources] = useState(null);
+  const [googleSelection, setGoogleSelection] = useState({ spreadsheetId: '', rootFolderId: '', customerProfileFolderId: '' });
+  const [googleResourcesBusy, setGoogleResourcesBusy] = useState(false);
+  const [googleSelectionBusy, setGoogleSelectionBusy] = useState(false);
+  const [googleNotice, setGoogleNotice] = useState(null);
+  const [googleRangesBusy, setGoogleRangesBusy] = useState(false);
   const [llmDraft, setLlmDraft] = useState(() => ({
     phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
     phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -6474,6 +6480,67 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
       missingQuantity: tenant.config?.agentPolicy?.missingQuantity ?? tenant.config?.orderPolicy?.missingQuantity ?? 'ask',
     });
   }, [tenant]);
+  useEffect(() => {
+    setGoogleResources(null);
+    setGoogleSelection({ spreadsheetId: '', rootFolderId: '', customerProfileFolderId: '' });
+    setGoogleNotice(null);
+  }, [tenant.id]);
+  const applyGoogleResources = (data) => {
+    setGoogleResources(data);
+    setGoogleSelection({
+      spreadsheetId: data.current?.spreadsheet?.id ?? data.spreadsheets?.[0]?.id ?? '',
+      rootFolderId: data.current?.rootFolder?.id ?? '',
+      customerProfileFolderId: data.current?.customerProfileFolder?.id ?? '',
+    });
+  };
+  const loadGoogleResources = async () => {
+    setGoogleResourcesBusy(true);
+    setGoogleNotice(null);
+    try {
+      const data = await getJson(`/api/saas/tenants/${encodeURIComponent(tenant.id)}/google/resources`, { timeoutMs: 30000 });
+      applyGoogleResources(data);
+    } catch (error) {
+      setGoogleNotice({ type: 'error', text: error.message });
+    } finally {
+      setGoogleResourcesBusy(false);
+    }
+  };
+  const saveGoogleSelection = async () => {
+    if (!googleSelection.spreadsheetId) {
+      setGoogleNotice({ type: 'error', text: 'Selecciona o pega la hoja que contiene la pestaña Catalogo.' });
+      return;
+    }
+    setGoogleSelectionBusy(true);
+    setGoogleNotice(null);
+    try {
+      const result = await postJson(`/api/saas/tenants/${encodeURIComponent(tenant.id)}/google/resources/select`, googleSelection, {
+        headers: csrfHeaders(auth),
+        timeoutMs: 30000,
+      });
+      setGoogleResources(current => current ? { ...current, current: result.workspace } : current);
+      setGoogleNotice({ type: 'success', text: 'Archivo y carpetas guardados para esta tienda. El catálogo usará esta hoja.' });
+    } catch (error) {
+      setGoogleNotice({ type: 'error', text: error.message });
+    } finally {
+      setGoogleSelectionBusy(false);
+    }
+  };
+  const saveGoogleRanges = async () => {
+    setGoogleRangesBusy(true);
+    setGoogleNotice(null);
+    try {
+      await onSaveConfig({ googleSheets: {
+        catalogRange: llmDraft.catalogRange,
+        customerProfilesRange: llmDraft.customerProfilesRange,
+        ordersRange: llmDraft.ordersRange,
+      } });
+      setGoogleNotice({ type: 'success', text: 'Rangos guardados para esta tienda.' });
+    } catch (error) {
+      setGoogleNotice({ type: 'error', text: error.message });
+    } finally {
+      setGoogleRangesBusy(false);
+    }
+  };
   const saveCustomerReplySettings = async () => {
     setSavingReplySettings(true);
     setReplySettingsNotice(null);
@@ -6691,6 +6758,54 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
             <ShieldCheck size={16} />
             Revisar productos y archivos
           </button>
+          <div className="config-field-grid">
+            <label className="config-field">
+              <span><Database size={16} /> Archivo de catálogo de esta tienda</span>
+              <input list={`google-spreadsheets-${tenant.id}`} value={googleSelection.spreadsheetId} disabled={googleResourcesBusy || googleSelectionBusy} onChange={(event) => setGoogleSelection(current => ({ ...current, spreadsheetId: event.target.value }))} placeholder="Selecciona o pega el ID/enlace de Google Sheets" />
+              <datalist id={`google-spreadsheets-${tenant.id}`}>
+                {(googleResources?.spreadsheets ?? []).map((file) => <option key={file.id} value={file.id}>{file.name}</option>)}
+              </datalist>
+              <small>La hoja debe tener una pestaña «Catalogo». Cada tenant puede seleccionar su propio archivo.</small>
+            </label>
+            <label className="config-field">
+              <span><FileImage size={16} /> Carpeta raíz de la tienda (opcional)</span>
+              <input list={`google-folders-${tenant.id}`} value={googleSelection.rootFolderId} disabled={googleResourcesBusy || googleSelectionBusy} onChange={(event) => setGoogleSelection(current => ({ ...current, rootFolderId: event.target.value }))} placeholder="Selecciona o pega el ID/enlace de la carpeta" />
+            </label>
+            <label className="config-field">
+              <span><UserCheck size={16} /> Carpeta de clientes (opcional)</span>
+              <input list={`google-folders-${tenant.id}`} value={googleSelection.customerProfileFolderId} disabled={googleResourcesBusy || googleSelectionBusy} onChange={(event) => setGoogleSelection(current => ({ ...current, customerProfileFolderId: event.target.value }))} placeholder="Selecciona o pega el ID/enlace de la carpeta" />
+            </label>
+            <datalist id={`google-folders-${tenant.id}`}>
+              {(googleResources?.folders ?? []).map((file) => <option key={file.id} value={file.id}>{file.name}</option>)}
+            </datalist>
+          </div>
+          <div className="config-actions">
+            <button className="ghost-btn" type="button" disabled={googleResourcesBusy || googleSelectionBusy} onClick={loadGoogleResources}>
+              {googleResourcesBusy ? 'Cargando archivos…' : 'Cargar archivos de Google'}
+            </button>
+            <button className="approve-btn" type="button" disabled={googleSelectionBusy || !googleSelection.spreadsheetId} onClick={saveGoogleSelection}>
+              {googleSelectionBusy ? 'Guardando archivo…' : 'Guardar archivo seleccionado'}
+            </button>
+          </div>
+          {googleResources?.message && <p className="config-help">{googleResources.message}</p>}
+          {googleNotice && <p className="config-inline-notice" role={googleNotice.type === 'error' ? 'alert' : 'status'}>{googleNotice.text}</p>}
+          <div className="config-field-grid">
+            <label className="config-field">
+              <span><Store size={16} /> Rango de catálogo</span>
+              <input value={llmDraft.catalogRange} disabled={googleRangesBusy} onChange={(event) => setLlmDraft(current => ({ ...current, catalogRange: event.target.value }))} />
+            </label>
+            <label className="config-field">
+              <span><UserCheck size={16} /> Rango de clientes</span>
+              <input value={llmDraft.customerProfilesRange} disabled={googleRangesBusy} onChange={(event) => setLlmDraft(current => ({ ...current, customerProfilesRange: event.target.value }))} />
+            </label>
+            <label className="config-field">
+              <span><ShoppingBag size={16} /> Rango de pedidos</span>
+              <input value={llmDraft.ordersRange} disabled={googleRangesBusy} onChange={(event) => setLlmDraft(current => ({ ...current, ordersRange: event.target.value }))} />
+            </label>
+          </div>
+          <button className="ghost-btn" type="button" disabled={googleRangesBusy} onClick={saveGoogleRanges}>
+            {googleRangesBusy ? 'Guardando rangos…' : 'Guardar rangos'}
+          </button>
           <details className="advanced-config">
             <summary>Ver referencias técnicas</summary>
           <div className="config-field-grid">
@@ -6699,28 +6814,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
                 <Database size={16} />
                 Referencia segura de Google Sheets
               </span>
-            <input value={llmDraft.spreadsheetIdRef} readOnly />
-            </label>
-            <label className="config-field">
-              <span>
-                <Store size={16} />
-                Rango de catálogo
-              </span>
-            <input value={llmDraft.catalogRange} readOnly />
-            </label>
-            <label className="config-field">
-              <span>
-                <UserCheck size={16} />
-                Rango de clientes
-              </span>
-            <input value={llmDraft.customerProfilesRange} readOnly />
-            </label>
-            <label className="config-field">
-              <span>
-                <ShoppingBag size={16} />
-                Rango de pedidos
-              </span>
-            <input value={llmDraft.ordersRange} readOnly />
+            <input value={googleResources?.current?.spreadsheet?.id ?? googleSelection.spreadsheetId ?? llmDraft.spreadsheetIdRef} readOnly />
             </label>
           </div>
           <details className="advanced-config">
@@ -6731,14 +6825,14 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
                   <FileImage size={16} />
                   Carpeta raíz
                 </span>
-                <input value={llmDraft.rootFolderRef} readOnly />
+                <input list={`google-folders-${tenant.id}`} value={googleSelection.rootFolderId} disabled={googleResourcesBusy || googleSelectionBusy} onChange={(event) => setGoogleSelection(current => ({ ...current, rootFolderId: event.target.value }))} placeholder="ID o enlace de carpeta" />
               </label>
               <label className="config-field">
                 <span>
                   <UserCheck size={16} />
                   Carpeta de clientes
                 </span>
-                <input value={llmDraft.customerProfileFolderRef} readOnly />
+                <input list={`google-folders-${tenant.id}`} value={googleSelection.customerProfileFolderId} disabled={googleResourcesBusy || googleSelectionBusy} onChange={(event) => setGoogleSelection(current => ({ ...current, customerProfileFolderId: event.target.value }))} placeholder="ID o enlace de carpeta" />
               </label>
               <label className="config-field">
                 <span>
@@ -6752,7 +6846,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
           </details>
           <div className="isolation-note">
             <ShieldCheck size={18} />
-            <span>La conexión y los productos se revisan desde la guía de puesta en marcha.</span>
+            <span>La conexión y los archivos son independientes por tienda. VIA valida que cada hoja seleccionada sea accesible y tenga la pestaña Catalogo.</span>
           </div>
         </article>
         )}

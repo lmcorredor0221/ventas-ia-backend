@@ -204,6 +204,50 @@ export class GoogleWorkspaceService {
       },
     });
   }
+
+  async getFileMetadata({ accessToken, fileId }) {
+    const fields = 'id,name,mimeType,webViewLink,parents,modifiedTime,trashed';
+    return googleFetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(fields)}`, {
+      method: 'GET',
+      accessToken,
+    });
+  }
+
+  async listFiles({ accessToken, mimeType, parentId = null, pageSize = 100 }) {
+    const clauses = ['trashed = false'];
+    if (mimeType) clauses.push(`mimeType = '${String(mimeType).replace(/'/g, "\\'")}'`);
+    if (parentId) clauses.push(`'${String(parentId).replace(/'/g, "\\'")}' in parents`);
+    const params = new URLSearchParams({
+      q: clauses.join(' and '),
+      spaces: 'drive',
+      pageSize: String(Math.min(Math.max(Number(pageSize) || 100, 1), 1000)),
+      orderBy: 'modifiedTime desc,name',
+      fields: 'files(id,name,mimeType,webViewLink,parents,modifiedTime,trashed),nextPageToken',
+    });
+    return googleFetch(`${DRIVE_API}/files?${params.toString()}`, {
+      method: 'GET',
+      accessToken,
+    });
+  }
+
+  async getSpreadsheetMetadata({ accessToken, spreadsheetId }) {
+    const fields = 'spreadsheetId,properties(title),sheets(properties(sheetId,title,index))';
+    return googleFetch(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=${encodeURIComponent(fields)}`, {
+      method: 'GET',
+      accessToken,
+    });
+  }
+
+  async listSelectableResources({ accessToken }) {
+    const [spreadsheets, folders] = await Promise.all([
+      this.listFiles({ accessToken, mimeType: 'application/vnd.google-apps.spreadsheet' }),
+      this.listFiles({ accessToken, mimeType: 'application/vnd.google-apps.folder' }),
+    ]);
+    return {
+      spreadsheets: (spreadsheets.files ?? []).map(publicDriveFile),
+      folders: (folders.files ?? []).map(publicDriveFile),
+    };
+  }
 }
 
 export function sandboxWorkspaceForTenant(tenant, connectionMode = 'sandbox_contract') {
@@ -294,4 +338,15 @@ function columnName(count) {
 function shorten(value, max = 500) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function publicDriveFile(file) {
+  return {
+    id: file.id,
+    name: file.name ?? file.id,
+    mimeType: file.mimeType ?? null,
+    url: file.webViewLink ?? null,
+    parents: Array.isArray(file.parents) ? file.parents : [],
+    modifiedTime: file.modifiedTime ?? null,
+  };
 }

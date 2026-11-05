@@ -29,7 +29,10 @@ function googleConnectionRequiredResult(message) {
 export class ToolRegistry {
   constructor({ store, events, usage, config, googleWorkspace, secretVault }) {
     this.store = store;
-    this.events = events;
+    // Direct tool contracts may instantiate the registry without the event
+    // bus. Telemetry must remain best-effort and never make a catalog read
+    // fail merely because no observer was supplied.
+    this.events = events ?? { emit() {} };
     this.usage = usage;
     this.config = config;
     this.googleWorkspace = googleWorkspace;

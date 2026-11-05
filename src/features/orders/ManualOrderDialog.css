@@ -21,6 +21,12 @@
 .manual-order-consent input { flex: 0 0 20px; width: 20px; height: 20px; margin-top: 2px; }
 .manual-order-error { color: #a52222; }
 .manual-order-help { color: #516154; font-size: .9rem; }
+.manual-order-conversation { margin: 18px 0; padding: 14px; border: 1px solid #d6ded9; border-radius: 12px; background: #f7fbf8; }
+.manual-order-conversation h3 { margin: 0 0 10px; font-size: 1rem; }
+.manual-order-conversation-list { display: grid; gap: 8px; max-height: 230px; overflow: auto; }
+.manual-order-message { display: grid; gap: 3px; padding: 8px 10px; border-radius: 8px; background: white; font-size: .9rem; }
+.manual-order-message strong { font-size: .78rem; color: #516154; }
+.manual-order-message span { white-space: pre-wrap; }
 .manual-order-dialog footer { flex-wrap: wrap; padding-top: 14px; }
 @media (max-width: 600px) {
   .manual-order-dialog { padding: 18px; }

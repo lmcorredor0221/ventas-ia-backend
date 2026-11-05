@@ -52,6 +52,44 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     }
   });
 
+  // A human handoff must remain actionable: the tendero needs the exact
+  // conversation context and a tenant-scoped way to turn the agreed request
+  // into the same operational order used by the automated flow.
+  router.get('/conversations/:id/manual-order', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
+      return res.json(await orders.manualOrderContext({ conversationId: conversation.id, tenantId: conversation.tenantId }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/conversations/:id/manual-order', async (req, res, next) => {
+    try {
+      const conversation = await readConversation(store, req.params.id);
+      if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
+      const actorId = req.auth?.user?.id ?? 'local-owner';
+      const result = await orders.createManualOrder({
+        conversationId: conversation.id,
+        tenantId: conversation.tenantId,
+        input: req.body ?? {},
+        actorId,
+      });
+      auth.recordTenantAction(req, {
+        tenantId: conversation.tenantId,
+        action: 'order.manual_created',
+        resource: result.order.id,
+        metadata: { conversationId: conversation.id, actorId },
+      });
+      return res.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.delete('/conversations/:id', async (req, res, next) => {
     try {
       const conversation = await readConversation(store, req.params.id);
