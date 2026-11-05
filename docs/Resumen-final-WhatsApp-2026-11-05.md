@@ -1,6 +1,6 @@
 # Resumen de pedido por WhatsApp
 
-Estado: implementado y validado localmente el 5 de noviembre de 2026. Commit, push y despliegue autorizados por el usuario; publicación en curso. No se enviaron mensajes reales ni se modificaron pedidos de producción.
+Estado: implementado y validado localmente el 5 de noviembre de 2026. Commit y push completados en ambos repositorios. Despliegue de producción bloqueado por suspensión de Render por facturación; detalle y procedimiento de continuación al final. No se enviaron mensajes reales ni se modificaron pedidos de producción.
 
 ## Objetivo aprobado
 
@@ -119,3 +119,27 @@ La prueba de interfaz se ejecutó con `order-edit-ui-server.mjs`, Vite local y `
 - La ventana de sesión se estima con los mensajes entrantes registrados; Meta conserva la decisión final de aceptación/entrega. Una notificación omitida por ventana cerrada no se reactiva automáticamente al recibir otro mensaje.
 - Un pedido actualizado después de una edición solo se notifica si todavía está por preparar o preparando cuando lo consume la cola. Se informa una omisión si ya cambió de revisión/etapa.
 - Publicación en curso. Antes de publicar se detectó el servicio Render `srv-db7sqqmq1p3s73elv1eg` suspendido, con causa `billing`, desde `2026-11-05T12:15:15Z`; `/health/ready` devuelve HTTP 503. El último deploy figura `live`, pero eso no acredita disponibilidad del servicio. No se cambian planes ni métodos de pago. El cierre del release debe registrar el resultado efectivo de cada proveedor.
+
+## Release solicitado — bloqueo externo, 5 de noviembre de 2026
+
+| Componente | Commit y rama remota | Resultado |
+|---|---|---|
+| Backend | `f0ff5f396732d9ea1ea8cad0ea997cdd0b1de131`, `backend/codex/backend-plan-payload-20261020` | Commit y push verificados. Render rechazó la creación del deploy con HTTP 400: `cannot deploy suspended service`. No se creó un nuevo despliegue. |
+| Frontend | `db3804712b0d72754db4bb6498920f6d7d604c85`, `frontend/codex/release-frontend-auditor-20261105` | Commit y push verificados; compilación de release exitosa. No se promovió a `frontend/main`, para publicar después del backend compatible. |
+
+Los dos commits tienen el mismo árbol `src/`: `9bd7bf65a591f27b52b6bd19d3b92ed16f763523`. El frontend conserva la configuración publicada; su único archivo cambiado es `src/features/orders/OrderWorkspace.jsx`. Bundle construido: `index-DCd633lu.js`.
+
+Comprobación de Render: servicio suspendido con `suspenders: ["billing"]`, auto-deploy desactivado, rama configurada `main`, plan `free`. `/health/ready` devuelve HTTP 503. No se infiere si se debe a tarjeta, factura, cuota u otra condición de facturación: la respuesta de la API no lo especifica. La suspensión ocurrió después de la verificación del release previo y antes de este intento de publicación. No se modificó el plan ni se intentó cobrar o cambiar métodos de pago.
+
+El conector de Render pide reconexión; la CLI autenticada permitió verificar el estado y solicitar el deploy. Al consultar los despliegues de Vercel, el conector devolvió HTTP 403 por autorización del equipo `team_lMrNrj3Iuv7I2LBt4nm3GQOG`; se generó un enlace temporal de renovación para el usuario. El estado de cualquier preview disparado por el push de la rama de release no quedó verificado. Producción frontend permanece en `de6699b24e5925c7c2d043c3c8f254965b85874f` según el remoto `frontend/main` comprobado; no se asegura disponibilidad del backend basándose en un deploy histórico `live`.
+
+### Continuación cuando se resuelva la facturación
+
+1. Comprobar que Render ya no está suspendido, manteniendo el servicio y workspace de VIA. El usuario ya autorizó este despliegue.
+2. Consultar los deploys para evitar duplicados; crear uno con el commit exacto `f0ff5f396732d9ea1ea8cad0ea997cdd0b1de131`:
+   `render deploys create srv-db7sqqmq1p3s73elv1eg --commit f0ff5f396732d9ea1ea8cad0ea997cdd0b1de131 --confirm --output json`.
+3. Esperar `live`, comprobar SHA, `/health/ready` y registros de inicio. No usar «último commit de main»: la rama de runtime del repositorio es distinta.
+4. En `C:/Users/Messi/.codex/worktrees/via-release-20261105/frontend`, hacer fetch y comprobar que `frontend/main` sigue en `de6699b...`. Si no hay cambios remotos, publicar `db380471...` mediante `git push frontend HEAD:main`, sin forzar. Si hubo cambios, integrarlos y verificar antes de publicar.
+5. Tras renovar el acceso del equipo Vercel, comprobar el deploy de producción por SHA y alias `via.leanagentbuilder.com`, HTTP de frontend/API y protección de rutas. Registrar IDs y horas reales de cierre aquí.
+
+No se requiere repetir las pruebas locales por estos bloqueos si el código no cambia. Las pruebas de funcionalidad no sustituyen la verificación pendiente de producción.

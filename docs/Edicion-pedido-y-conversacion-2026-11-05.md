@@ -2,7 +2,7 @@
 
 Implementado y verificado localmente el 5 de noviembre de 2026. El usuario autorizó posteriormente commit, push y despliegue. Se aplica a pedidos ya registrados, mientras estén por preparar o en alistamiento. El cierre de producción se registra al final de este documento cuando se verifiquen ambos despliegues.
 
-Actualización local posterior, aún sin publicar: [Resumen final por WhatsApp](Resumen-final-WhatsApp-2026-11-05.md). Esa versión añade el envío asíncrono del resumen al guardar una edición acordada. La descripción de «guardar sin enviar WhatsApp» que sigue corresponde al release anterior, efectivamente publicado.
+Actualización posterior con commit y push, pendiente de producción por suspensión de Render por facturación: [Resumen final por WhatsApp](Resumen-final-WhatsApp-2026-11-05.md). Esa versión añade el envío asíncrono del resumen al guardar una edición acordada. La descripción de «guardar sin enviar WhatsApp» que sigue corresponde al release anterior. Su disponibilidad registrada al final es histórica: Render quedó suspendido después, a las 12:15 UTC del 5 de noviembre.
 
 ## Experiencia
 
