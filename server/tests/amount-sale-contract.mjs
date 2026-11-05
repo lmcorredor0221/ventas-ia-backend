@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import { validateCatalogCsv, catalogRowsToSheetValues, catalogRowToProduct } from '../services/catalogImportService.js';
+import { catalogLineTotal, evaluateDeliveryPolicy } from '../domain/deliveryPolicy.js';
+const csv='sku,nombre,precio,stock,permite_venta_por_valor\nSAL,Salchichón,5000,10,TRUE\nCOC,Coca-Cola,3200,10,FALSE';
+const result=validateCatalogCsv(csv);
+assert.equal(result.valid,true);
+const [sal,coc]=result.rows.map(catalogRowToProduct);
+assert.equal(sal.allowsSaleByAmount,true);
+assert.equal(coc.allowsSaleByAmount,false);
+assert.equal(catalogRowsToSheetValues(result.rows)[0].at(-1),'permite_venta_por_valor');
+const amount={product:sal,saleMode:'amount',requestedAmount:5000,quantity:null};
+assert.equal(catalogLineTotal(amount),5000);
+assert.equal(catalogLineTotal({...amount,product:coc}),null);
+assert.equal(catalogLineTotal({product:sal,budgetAmount:5000,quantity:null}),null);
+assert.equal(catalogLineTotal({...amount,requestedAmount:-1}),null);
+assert.equal(catalogLineTotal({...amount,quantity:1}),null,'Do not disguise an amount as physical units');
+const pricing=evaluateDeliveryPolicy({tenant:{id:'a',config:{orderPolicy:{deliveryFee:2000,deliveryMinimumSubtotal:0}}},
+ items:[amount,{product:coc,quantity:1}],delivery:true});
+assert.equal(pricing.subtotal,8200); assert.equal(pricing.total,10200); assert.equal(pricing.canConfirm,true);
+assert.equal(catalogRowToProduct(validateCatalogCsv('sku,nombre,precio,stock\nX,Old,100,1').rows[0]).allowsSaleByAmount,false);
+assert.equal(validateCatalogCsv(csv.replace('TRUE','sometimes')).valid,false);
+console.log('PASS amount sale catalog and arithmetic contracts');

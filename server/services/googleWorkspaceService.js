@@ -4,7 +4,7 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const SHEETS_API = 'https://sheets.googleapis.com/v4';
 
 export const GOOGLE_WORKSPACE_SHEETS = [
-  { name: 'Catalogo', range: 'Catalogo!A1:P1000', columns: ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id', 'descripcion', 'etiquetas', 'familia_producto', 'presentacion_normalizada', 'atributos_json', 'origen_catalogo'] },
+  { name: 'Catalogo', range: 'Catalogo!A1:Q1000', columns: ['sku', 'nombre', 'categoria', 'marca', 'presentacion', 'precio', 'stock', 'aliases', 'activo', 'drive_file_id', 'descripcion', 'etiquetas', 'familia_producto', 'presentacion_normalizada', 'atributos_json', 'origen_catalogo', 'permite_venta_por_valor'] },
   { name: 'Clientes', range: 'Clientes!A1:H1000', columns: ['telefono_whatsapp', 'nombre', 'direccion_principal', 'barrio', 'notas', 'preferencias', 'creado_en', 'actualizado_en'] },
   { name: 'Pedidos', range: 'Pedidos!A1:M1000', columns: ['pedido_id', 'telefono_whatsapp', 'cliente', 'direccion', 'items_json', 'subtotal', 'estado', 'handoff_id', 'creado_en', 'actualizado_en', 'origen', 'llm_modelo', 'traza'] },
   { name: 'Configuracion', range: 'Configuracion!A1:D200', columns: ['clave', 'valor', 'descripcion', 'actualizado_en'] },

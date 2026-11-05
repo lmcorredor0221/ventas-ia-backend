@@ -1,4 +1,13 @@
+import { paymentMethodsForTenant, normalizePaymentMethodId, paymentMethodLabel } from '../domain/paymentMethods.js';
+import { evaluateDeliveryPolicy, deliveryPolicyForTenant, deliveryPolicyRevision, normalizeDeliveryAmount, catalogLineTotal } from '../domain/deliveryPolicy.js';
+export { paymentMethodsForTenant } from '../domain/paymentMethods.js';
 import { appendAuditEvent } from './authService.js';
+import { ConversationGroundingCoordinator } from './conversationGroundingCoordinator.js';
+import { GroundedDecisionAgent } from './groundedDecisionAgent.js';
+import { OrderDataAuditor } from './orderDataAuditor.js';
+import { orderDataRevision } from '../domain/orderDataAudit.js';
+import { quoteBreakdownWasCommunicated } from './llmReplyComposer.js';
+import { applySemanticCart, orderDraftBlockingFields } from '../domain/groundingContracts.js';
 import {
   advanceOrderDraft,
   catalogSearchTextForItem,
@@ -19,6 +28,11 @@ export class AgentRuntime {
     this.orders = orders;
     this.manualSweepTimer = null;
     this.inboundBatchLocks = new Map();
+    this.deliveryReviewLocks = new Set();
+    this.grounding = new ConversationGroundingCoordinator({ tools, events, config,
+      agent: new GroundedDecisionAgent({ gateway: planner.gateway, getContext: (id) => planner.getPlannerContext(id), events, usage, config }) });
+    this.orderAuditor = new OrderDataAuditor({ gateway: planner.gateway,
+      getContext: id => planner.getPlannerContext(id), events, usage, config });
   }
 
   start() {
@@ -62,6 +76,21 @@ export class AgentRuntime {
       if (!claimed) return { duplicate: true, conversation };
       await this.addInboundMessages(conversation.id, inboundPayloads);
       await this.patchConversation(conversation.id, { manualLastActivityAt: new Date().toISOString() });
+      // Human attention remains in control. Classify an attachment contextually
+      // to surface a receipt, without sending an automatic message or unpausing AI.
+      if (normalized.mediaRef) {
+        const currentConversation = structuredClone(await this.getConversation(conversation.id));
+        const paymentOrderContext = this.paymentOrderContext(tenantId, normalized.waId, conversation.id);
+        try {
+          const plan = await this.planner.plan({ tenantId, conversationId: conversation.id, normalized,
+            conversation: { ...currentConversation, paymentOrderContext } });
+          if (plan.intent === 'payment_confirmation') await this.handlePaymentNotice({ tenantId, conversationId: conversation.id,
+            normalized, plan, currentConversation, paymentOrderContext, silent: true });
+        } catch (error) {
+          this.events.emit({ type: 'payment.notice.classification_failed', tenantId, conversationId: conversation.id,
+            detail: 'Adjunto conservado para la tienda; no se pudo clasificar su finalidad.', metadata: { messageId: normalized.messageId } });
+        }
+      }
       return {
         duplicate: false,
         manual: true,
@@ -238,6 +267,8 @@ export class AgentRuntime {
         role: 'user',
         text: payload.text || `[${payload.messageType}]`,
         providerMessageId: payload.messageId,
+        messageType: payload.messageType,
+        mediaRef: payload.mediaRef ?? null,
       });
     }
   }
@@ -255,8 +286,14 @@ export class AgentRuntime {
       await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
     }
 
-    const currentConversation = await this.getConversation(conversationId);
-    const plan = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile, conversation: currentConversation });
+    const currentConversation = structuredClone(await this.getConversation(conversationId));
+    // Read-only references for the LLM: no old basket is restored or order reopened.
+    const paymentOrderContext = this.paymentOrderContext(tenantId, normalized.waId, conversationId);
+    const pendingHumanRequests = this.store.getState().pendingRequests.filter(r => r.tenantId === tenantId
+      && r.conversationId === conversationId && r.status === 'pending')
+      .map(({ id, type, action, context, contextSnapshot }) => ({ id, type, action, context, orderId: contextSnapshot?.orderId }));
+    const plan = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile,
+      conversation: { ...currentConversation, paymentOrderContext, pendingHumanRequests } });
     await this.patchConversation(conversationId, {
       reasoningPlan: plan,
       lastTool: 'llm_core',
@@ -264,6 +301,10 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
+
+    if (plan.intent === 'payment_confirmation') {
+      return this.handlePaymentNotice({ tenantId, conversationId, normalized, plan, currentConversation, paymentOrderContext });
+    }
 
     if (plan.intent === 'greeting' || plan.intent === 'general_query') {
       return this.handleContextualConversation({ tenantId, conversationId, normalized, plan });
@@ -274,6 +315,14 @@ export class AgentRuntime {
     }
 
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
+      if (!normalized.mediaRef && normalized.messageType !== 'image' && currentConversation?.orderDraft?.pricing?.delivery
+        && ['below_minimum', 'configuration_incomplete'].includes(currentConversation.orderDraft.pricing.status)) {
+        await this.requestDeliveryReview({ tenantId, conversationId, pricing: currentConversation.orderDraft.pricing,
+          draft: currentConversation.orderDraft, text: normalized.text });
+        await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: { action: 'send_session_message',
+          wa_id: normalized.waId, text: 'Te conecto con la tienda para revisar las condiciones del domicilio. Conservamos los productos que elegiste.' } });
+        return { summary: 'Delivery conditions sent to human review', plan };
+      }
       await this.tools.call('human_handoff', tenantId, conversationId, {
         reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente' : 'Cliente solicita asesor humano',
         assigned_team: 'ventas',
@@ -293,6 +342,7 @@ export class AgentRuntime {
       await this.tools.call('approval_gate', tenantId, conversationId, {
         gate_key: 'discount_exception',
         proposed_action: 'Aprobar descuento comercial',
+        context_snapshot: { plan, customerMessage: normalized.text, orderDraft: currentConversation?.orderDraft },
         payload_summary: {
           reason: 'El cliente solicita una excepcion de descuento fuera de politica delegada.',
           consequence: 'Al aprobar, el agente enviara cotizacion ajustada y esperara confirmacion.',
@@ -304,18 +354,6 @@ export class AgentRuntime {
         text: 'Estoy validando el descuento con el equipo comercial. Te aviso apenas quede aprobado.',
       } });
       return { summary: 'Discount approval requested', plan };
-    }
-
-    if (plan.intent === 'payment_confirmation') {
-      await this.tools.call('approval_gate', tenantId, conversationId, {
-        gate_key: 'payment_confirmation',
-        proposed_action: 'Registrar confirmacion de pago',
-        payload_summary: {
-          reason: 'Registrar pago requiere aprobacion antes de escritura transaccional.',
-          consequence: 'Al aprobar, se actualizara el estado del pedido.',
-        },
-      });
-      return { summary: 'Payment write approval requested', plan };
     }
 
     if (plan.intent === 'order_confirmation') {
@@ -333,8 +371,67 @@ export class AgentRuntime {
     return this.handleCatalogQuery({ tenantId, conversationId, normalized, plan });
   }
 
+  paymentOrderContext(tenantId, waId, conversationId) {
+    return (this.store.getState().ordersByTenant?.[tenantId] ?? [])
+      .filter(order => order.tenantId === tenantId && (order.customerWaId === waId || order.waId === waId
+        || this.store.getState().conversations.some(c => c.id === order.conversationId && c.tenantId === tenantId && c.waId === waId)))
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+      .slice(0, 5).map(order => ({ id: order.id, status: order.status, paymentMethod: order.paymentMethod,
+        createdAt: order.createdAt, currentConversation: order.conversationId === conversationId }));
+  }
+
+  async handlePaymentNotice({ tenantId, conversationId, normalized, plan, currentConversation, paymentOrderContext, silent = false }) {
+    const reportOrderId = plan.semanticFrame?.paymentReport?.relatedOrderId;
+    const orderId = paymentOrderContext.some(order => order.id === reportOrderId) ? reportOrderId : null;
+    const attachment = normalized.mediaRef ? { mediaRef: normalized.mediaRef, messageType: normalized.messageType,
+      providerMessageId: normalized.messageId } : null;
+    let duplicate;
+    const notice = { id: `payment-notice-${crypto.randomUUID()}`, tenantId, conversationId,
+      orderId, kind: attachment ? 'receipt' : 'declaration', attachment,
+      providerMessageId: normalized.messageId, customerWaId: normalized.waId,
+      customerName: currentConversation.customer, text: normalized.text ?? '',
+      paymentVerified: false, informational: true, createdAt: new Date().toISOString() };
+    // Existing conversation JSON persists the notice. No financial state, new
+    // approval task or order transition is created by a customer declaration.
+    this.store.mutate(state => {
+      const current = state.conversations.find(c => c.id === conversationId && c.tenantId === tenantId);
+      if (!current) throw new Error('Conversation unavailable for payment notice');
+      const notices = current.paymentNotices ??= [];
+      duplicate = notices.find(n => n.providerMessageId === normalized.messageId
+        || (attachment && n.attachment?.mediaRef === attachment.mediaRef));
+      if (!duplicate) notices.push(notice);
+      // Read the latest state when appending, never replace notices with the
+      // interpreter's older snapshot. The inbound worker also holds its WA lease.
+      if (current.stage === 'planning' && current.reasoningPlan === plan) Object.assign(current, {
+        stage: currentConversation.stage, zone: currentConversation.zone, progress: currentConversation.progress,
+        nextStep: currentConversation.nextStep,
+      });
+      current.updatedAt = new Date().toISOString();
+    });
+    await this.store.persistConversation?.(conversationId);
+    if (!duplicate) await this.events.emitAndWait({ type: 'payment.notice.created', tenantId, conversationId,
+      detail: attachment ? 'Comprobante recibido: aviso informativo para la tienda.' : 'El cliente declara un pago: aviso informativo para la tienda.',
+      metadata: { noticeId: notice.id, orderId, hasAttachment: Boolean(attachment), paymentVerified: false } });
+    if (silent) return { summary: 'Payment notice recorded during manual attention', plan };
+    const fallbackText = attachment
+      ? 'Recibimos tu comprobante y dejamos el aviso a la tienda. VIA no verifica el pago ni modifica pedidos con este aviso.'
+      : 'Gracias por avisar. Dejamos tu declaración a la tienda. Este mensaje no trae un comprobante adjunto; VIA no verifica el pago ni modifica pedidos con este aviso.';
+    const text = await this.composeCustomerReply({ tenantId, conversationId, fallbackText, facts: {
+      kind: 'payment_notice', customerMessage: normalized.text, storeNotified: true,
+      attachmentReceived: Boolean(attachment), paymentVerified: false, orderId,
+      orderAssociationNeeded: !orderId && paymentOrderContext.length > 0,
+      orderStateUnchanged: true, nextAction: 'acknowledge_payment_notice',
+    } });
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized,
+      payload: { action: 'send_session_message', wa_id: normalized.waId, text } });
+    return { summary: 'Payment notice recorded; no verification required', plan };
+  }
+
   async handleContextualConversation({ tenantId, conversationId, normalized, plan }) {
     const tenant = await this.getTenant(tenantId);
+    const conversation = await this.getConversation(conversationId);
+    const pendingRequest = this.store.getState().pendingRequests.find(r => r.tenantId === tenantId
+      && r.conversationId === conversationId && r.status === 'pending');
     const assistantName = tenant?.config?.agentPolicy?.assistantName
       ?? tenant?.config?.agentPolicy?.agentName
       ?? null;
@@ -350,18 +447,23 @@ export class AgentRuntime {
       facts: {
         kind: plan.intent,
         customerMessage: normalized.text,
-        requiredTerms: assistantName ? [assistantName] : [],
+        contextualDecision: { conversationAct: plan.semanticFrame?.conversationAct,
+          catalogSearchReady: plan.semanticFrame?.catalogSearchReady, proposedAction: plan.semanticFrame?.proposedAction,
+          ambiguities: plan.semanticFrame?.ambiguities, summary: plan.semanticFrame?.reasoningSummary },
+        attachmentReceived: Boolean(normalized.mediaRef),
+        humanRequest: pendingRequest ? { id: pendingRequest.id, context: pendingRequest.context, status: 'pending' } : null,
+        requiredTerms: plan.intent === 'greeting' && assistantName ? [assistantName] : [],
       },
     });
 
     await this.patchConversation(conversationId, {
-      stage: 'conversation',
-      zone: 'agent',
-      status: 'live',
+      stage: pendingRequest ? (conversation?.stage ?? 'handoff') : 'conversation',
+      zone: pendingRequest ? 'approval' : 'agent',
+      status: pendingRequest ? (pendingRequest.type === 'approval.requested' ? 'approval_required' : 'blocked') : 'live',
       value: 'Consulta conversacional',
       progress: 30,
       need: normalized.text,
-      nextStep: 'Esperar la siguiente necesidad del cliente.',
+      nextStep: pendingRequest?.consequence ?? 'Esperar la siguiente necesidad del cliente.',
       lastTool: 'llm_core',
     });
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
@@ -405,6 +507,7 @@ export class AgentRuntime {
   }
 
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
+    if (this.config.llmGroundingEnabled) return this.handleGroundedCatalogQuery({ tenantId, conversationId, normalized, plan });
     const text = normalized.text ?? '';
     // En una consulta de catalogo el planner puede dejar el pedido legado
     // vacio y conservar los items unicamente en el marco semantico. El
@@ -538,25 +641,93 @@ export class AgentRuntime {
     return { summary: selected ? 'Catalog quote sent' : 'Catalog search needs review', plan };
   }
 
-  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile }) {
+  async groundCatalogTurn({ tenantId, conversationId, normalized, plan, items, validatedSelection }) {
+    const conversation = await this.getConversation(conversationId);
     const tenant = await this.getTenant(tenantId);
+    const policyRevision = deliveryPolicyRevision(tenant);
+    const revision = (c) => JSON.stringify([c?.orderDraft?.version, c?.status, c?.manualMode,
+      c?.messages?.filter((m) => m.role === 'user').map((m) => m.providerMessageId ?? m.id)]);
+    const expected = revision(conversation);
+    const isCurrent = async () => revision(await this.getConversation(conversationId)) === expected
+      && deliveryPolicyRevision(await this.getTenant(tenantId)) === policyRevision
+      && !(await this.responseFreshness({ tenantId, conversationId, normalized })).stale;
+    const result = await this.grounding.resolve({ tenantId, conversationId, traceId: normalized.traceId, items,
+      frame: plan.semanticFrame, conversation, tenant, isCurrent, validatedSelection });
+    return { ...result, isCurrent };
+  }
+
+  async handleGroundedCatalogQuery({ tenantId, conversationId, normalized, plan }) {
+    const items = plan.order?.items ?? [];
+    // An empty interpretation is not authority to turn the entire message
+    // into a product. The composer retains the interpreter's contextual act.
+    if (!items.length || plan.semanticFrame?.catalogSearchReady === false) {
+      return this.handleContextualConversation({ tenantId, conversationId, normalized, plan });
+    }
+    const grounded = await this.groundCatalogTurn({ tenantId, conversationId, normalized, plan, items });
+    if (grounded.aborted) return { summary: 'Grounding superseded by newer conversation state', plan };
+    grounded.resolutions.forEach((resolution, index) => this.recordCatalogDecision({ tenantId, conversationId,
+      traceId: normalized.traceId, rawItemId: items[index].rawItemId,
+      query: grounded.observations[index].searched.join(' | '), rows: grounded.observations[index].rows,
+      selected: resolution.product, presentedRows: resolution.product ? [resolution.product] : resolution.options.map((c) => c.product),
+      decision: ['resolved', 'needs_selection'].includes(resolution.status) ? 'catalog_option_proposed' : 'catalog_no_match',
+      resolutionStatus: resolution.status, reason: resolution.reason }));
+    const products = grounded.resolutions.flatMap((r) => r.product ? [r.product] : r.options.map((o) => o.product));
+    const unresolved = grounded.resolutions.filter((r) => ['human_review', 'unavailable'].includes(r.status));
+    const needsHumanReview = unresolved.length > 0 || grounded.nextAction === 'human_review';
+    const parts = grounded.resolutions.map((r, index) => r.product
+      ? `${describeCatalogProduct(r.product)}: ${formatCurrency(r.product.price)}.`
+      : r.status === 'needs_selection'
+        ? `Para ${items[index].rawText ?? items[index].rawName}: ${r.options.map((o) => `${describeCatalogProduct(o.product)} (${formatCurrency(o.price)})`).join('; ')}. ${r.question || '¿Cuál prefieres?'}`
+        : `La tienda debe validar ${items[index].rawText ?? items[index].rawName}; no pude confirmar esa referencia.`);
+    const text = await this.composeCustomerReply({ tenantId, conversationId, fallbackText: parts.join(' '),
+      facts: { kind: 'grounded_catalog', products, nextAction: needsHumanReview ? 'human_review' : grounded.nextAction,
+        catalogEvidence: grounded.observations.map((o, i) => ({ subject: items[i].rawText,
+          searched: o.searched, coverage: 'partial_search', candidates: o.rows,
+          // Candidate attributes remain intact above; do not duplicate the full
+          // candidateSet, products and scores inside every resolution as well.
+          resolution: { status: grounded.resolutions[i].status, reason: grounded.resolutions[i].reason,
+            question: grounded.resolutions[i].question, selectedSku: grounded.resolutions[i].product?.sku,
+            optionSkus: grounded.resolutions[i].options.map(option => option.product.sku) } })),
+        customerMessage: normalized.text } });
+    if (!await grounded.isCurrent()) return { summary: 'Grounded reply superseded', plan };
+    await this.patchConversation(conversationId, { stage: needsHumanReview ? 'handoff' : 'catalog',
+      status: needsHumanReview ? 'blocked' : 'live', zone: needsHumanReview ? 'approval' : 'agent', need: normalized.text,
+      catalogGrounding: { items, resolutions: grounded.resolutions, nextAction: grounded.nextAction },
+      pendingQuestion: { kind: needsHumanReview ? 'human_review' : 'catalog_selection', rawItemIds: items.map((item) => item.rawItemId) },
+      nextStep: needsHumanReview ? 'La tienda valida la consulta pendiente.' : 'Esperar selección o continuación del cliente.' });
+    if (needsHumanReview) await this.tools.call('human_handoff', tenantId, conversationId, {
+      reason: unresolved.length ? 'Validar referencias sin evidencia suficiente' : 'Consultar condiciones con la tienda', assigned_team: 'ventas',
+      context_snapshot: { summary: normalized.text, customerMessage: normalized.text, plan, items, resolutions: grounded.resolutions } });
+    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: { action: 'send_session_message', wa_id: normalized.waId, text } });
+    return { summary: needsHumanReview ? 'Grounded catalog needs human review' : 'Grounded catalog options sent', plan };
+  }
+
+  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, validatedSelection, commercialRequoteAttempt = 0 }) {
+    const tenant = await this.getTenant(tenantId);
+    const initialConversation = await this.getConversation(conversationId);
+    if (this.config.llmGroundingEnabled) {
+      plan = { ...plan, order: { ...plan.order, items: applySemanticCart(initialConversation?.orderDraft?.items,
+        plan.order?.items, plan.semanticFrame?.cartMutation) } };
+    }
+    const grounded = this.config.llmGroundingEnabled ? await this.groundCatalogTurn({ tenantId, conversationId, normalized, plan, items: plan.order?.items ?? [], validatedSelection }) : null;
+    if (grounded?.aborted) return { summary: 'Grounding superseded by newer conversation state', plan };
     const paymentMethods = paymentMethodsForTenant(tenant);
     const customerDelta = plan.semanticFrame?.customerDelta ?? {};
     const orderCustomer = {
       ...(customerProfile ?? {}),
-      name: customerDelta.name ?? customerProfile?.name ?? null,
-      defaultAddress: customerDelta.address ?? customerProfile?.defaultAddress ?? null,
+      name: customerDelta.name ?? initialConversation?.orderDraft?.customerName ?? customerProfile?.name ?? null,
+      defaultAddress: customerDelta.address ?? initialConversation?.orderDraft?.deliveryAddress ?? customerProfile?.defaultAddress ?? null,
     };
     const orderItems = [];
     for (const [index, item] of (plan.order?.items ?? []).entries()) {
-      const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
+      const catalog = grounded ? { rows: grounded.observations[index].rows } : await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         range: tenant?.config?.googleSheets?.range,
         filters: deliveryItemFiltersFromPlan(plan, item, index),
         cache_policy: 'short_ttl',
       });
       const rawItemId = item.rawItemId ?? `item-${index + 1}:${normalizeText(item.rawName ?? item.catalogQuery ?? '')}`;
-      const resolution = resolveCatalogItem({ item: { ...item, rawItemId }, rows: catalog.rows });
-      const product = resolution.status === 'resolved' ? resolution.product : null;
+      const resolution = grounded?.resolutions[index] ?? resolveCatalogItem({ item: { ...item, rawItemId }, rows: catalog.rows });
+      const product = ['resolved', 'human_review'].includes(resolution.status) ? resolution.product ?? null : null;
       this.recordCatalogDecision({
         tenantId,
         conversationId,
@@ -583,16 +754,51 @@ export class AgentRuntime {
           reason: resolution.reason,
           candidateCount: resolution.candidateSet.candidates.length,
         },
-        lineTotal: product && item.quantity ? product.price * item.quantity : product && item.budgetAmount ? item.budgetAmount : null,
+        lineTotal: product && resolution.status === 'resolved' ? catalogLineTotal({ ...item, product }) : null,
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
       });
     }
 
     const currentConversation = await this.getConversation(conversationId);
     const previousDraft = currentConversation?.orderDraft;
-    const effectiveOrderItems = previousDraft && isAdditiveOrderText(normalized.text)
+    let effectiveOrderItems = !grounded && previousDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
       : orderItems;
+
+    let dataAudit = null;
+    const auditCandidate = { items: effectiveOrderItems, delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
+      customerName: orderCustomer.name, deliveryAddress: orderCustomer.defaultAddress,
+      paymentMethod: customerDelta.unavailablePaymentPreference ? null : customerDelta.paymentPreference
+        ?? plan.order?.paymentMethod ?? previousDraft?.paymentMethod ?? orderCustomer.preferences?.preferredPaymentMethod ?? null };
+    const auditReady = paymentMethods.some(m => m.id === auditCandidate.paymentMethod)
+      && requiredCustomerFields({ requiredFields: tenant?.config?.orderPolicy?.customerRequiredFields,
+        delivery: auditCandidate.delivery, customerProfile: orderCustomer, customerDelta }).length === 0;
+    if (grounded && this.config.llmOrderAuditEnabled && effectiveOrderItems.length > 0
+      && auditReady && grounded.resolutions.every(r => r.status === 'resolved') && (grounded.nextAction === 'confirm_order'
+      || (grounded.nextAction === 'continue_order' && effectiveOrderItems.length > 0
+        && effectiveOrderItems.every(i => i.product && catalogLineTotal(i) !== null))
+      || (plan.semanticFrame?.collectionComplete === true && !['answer_question', 'human_review'].includes(grounded.nextAction)))) {
+      const catalog = new Map(grounded.observations.flatMap(o => o.rows).map(p => [p.sku, { ...p, tenantId }]));
+      // Recover evidence for previously selected lines even if the interpreter
+      // dropped one. Never authorize restoring a product from stale memory alone.
+      for (const old of previousDraft?.items ?? []) {
+        if (old.product?.sku && !catalog.has(old.product.sku)) {
+          const result = await this.tools.call('google_sheets_read_table', tenantId, conversationId,
+            { filters: { sku: old.product.sku }, cache_policy: 'short_ttl' });
+          for (const p of result.rows ?? []) if (!p.tenantId || p.tenantId === tenantId) catalog.set(p.sku, { ...p, tenantId });
+        }
+      }
+      dataAudit = await this.orderAuditor.audit({ tenant, conversation: currentConversation, draft: auditCandidate,
+        catalog: [...catalog.values()], paymentMethods, traceId: normalized.traceId });
+      if (!await grounded.isCurrent()) return { summary: 'Order audit superseded by newer state', plan };
+      if (['approve', 'correct'].includes(dataAudit.verdict)) {
+        effectiveOrderItems = dataAudit.draft.items;
+        plan = { ...plan, order: { ...plan.order, delivery: dataAudit.draft.delivery },
+          missingFields: (plan.missingFields ?? []).filter(f => !/^(quantity|product|stock|presentation|commercial_review):/.test(f)) };
+        orderCustomer.name = dataAudit.draft.customerName;
+        orderCustomer.defaultAddress = dataAudit.draft.deliveryAddress;
+      } else grounded.nextAction = dataAudit.verdict === 'clarify' ? 'ask_clarification' : 'human_review';
+    }
 
     const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
     const driveFileIds = [...new Set(selectedRows.map((row) => row.driveFileId).filter(Boolean))];
@@ -605,19 +811,22 @@ export class AgentRuntime {
       : { status: 'not_requested', files: [], source_refs: [] };
 
     const missingFields = [
-      ...(isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
+      ...(!grounded && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
       ...(plan.missingFields ?? []),
       ...requiredCustomerFields({
         requiredFields: tenant?.config?.orderPolicy?.customerRequiredFields,
         delivery: Boolean(plan.order?.delivery ?? plan.semanticFrame?.delivery),
-        customerProfile,
+        customerProfile: orderCustomer,
         customerDelta,
       }),
     ];
     if (!effectiveOrderItems.length) missingFields.push('order_items');
+    if (dataAudit && !['approve', 'correct'].includes(dataAudit.verdict)) missingFields.push('order_data_review');
     for (const item of effectiveOrderItems) {
+      if (grounded && (item.saleMode === 'amount' ? catalogLineTotal(item) === null
+        : !Number.isSafeInteger(item.quantity) || item.quantity <= 0)) missingFields.push(`quantity:${item.catalogQuery}`);
+      if (grounded && item.resolution?.status === 'human_review') missingFields.push(`commercial_review:${item.rawItemId}`);
       if (item.product) removeResolvedProductMissingFields(missingFields, item);
-      if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
       if (!item.product) {
         if (item.resolution?.status === 'needs_selection') missingFields.push(`presentation:${item.rawItemId}`);
         else if (item.resolution?.reason === 'insufficient_stock') missingFields.push(`stock:${item.catalogQuery}`);
@@ -628,37 +837,105 @@ export class AgentRuntime {
         missingFields.push(`presentation:${item.catalogQuery}`);
       }
     }
-    const paymentMethod = plan.order?.paymentMethod
+    const proposedPayment = (dataAudit && ['approve', 'correct'].includes(dataAudit.verdict) ? dataAudit.draft.paymentMethod : null)
+      ?? (grounded && customerDelta.paymentPreference ? customerDelta.paymentPreference : null)
+      ?? plan.order?.paymentMethod
       ?? previousDraft?.paymentMethod
       ?? orderCustomer.preferences?.preferredPaymentMethod
       ?? null;
+    const paymentMethod = !customerDelta.unavailablePaymentPreference && paymentMethods.some(m => m.id === proposedPayment) ? proposedPayment : null;
     if (!paymentMethod) missingFields.push('payment_method');
-    const normalizedMissingFields = dedupeOrderMissingFields(missingFields);
+    const normalizedMissingFields = dedupeOrderMissingFields(grounded ? missingFields.filter((field) =>
+      !(field === 'customer_name' && orderCustomer.name)
+      && !(field === 'delivery_address' && orderCustomer.defaultAddress)
+      && !(field === 'payment_method' && paymentMethod)) : missingFields);
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
-    const requiresHumanResolution = needsHumanProductResolution(normalizedMissingFields);
-    const replyMissingFields = nextInteractionMissingFields(normalizedMissingFields);
+    const pricing = evaluateDeliveryPolicy({ tenant, items: effectiveOrderItems,
+      delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
+      draftVersion: Number(previousDraft?.version ?? 0) + 1, resolution: initialConversation?.deliveryResolution });
+    this.events.emit({ type: 'delivery.policy.evaluated', tenantId, conversationId, detail: pricing.status,
+      metadata: { pricing, traceId: normalized.traceId } });
+    if (grounded && ['below_minimum', 'configuration_incomplete'].includes(pricing.status) && grounded.nextAction === 'confirm_order') {
+      // Repair only a decision that contradicts the fresh commercial facts.
+      // The backend blocks the write; the LLM still chooses how to continue.
+      try {
+        const decision = await this.grounding.agent.decide({ tenantId, conversationId, traceId: normalized.traceId,
+          round: 'commercial_repair', canRefine: false, remainingMs: this.config.llmRequestTimeoutMs ?? 15000,
+          frame: plan.semanticFrame, commerce: { policy: deliveryPolicyForTenant(tenant), pricing, authoritative: true },
+          context: { orderDraft: previousDraft, messages: initialConversation.messages?.slice(-8), pendingQuestion: initialConversation.pendingQuestion },
+          observations: effectiveOrderItems.map(item => ({ item, candidates: item.product ? [item.product] : [] })),
+          correction: 'No se puede confirmar esta cotización. Decide cómo responder según el contexto: aclarar, responder, invitar a agregar o escalar.' });
+        grounded.nextAction = ['answer_question', 'invite_additions', 'ask_more', 'ask_clarification', 'human_review'].includes(decision.nextAction) ? decision.nextAction : 'human_review';
+      } catch { grounded.nextAction = 'human_review'; }
+    }
+    const requiresHumanResolution = needsHumanProductResolution(normalizedMissingFields) || grounded?.nextAction === 'human_review'
+      || grounded?.resolutions.some(resolution => resolution.status === 'human_review');
+    const answerQuestion = grounded?.nextAction === 'answer_question';
+    const askMore = ['ask_more', 'invite_additions'].includes(grounded?.nextAction) && !requiresHumanResolution && effectiveOrderItems.length > 0
+      && effectiveOrderItems.every((item) => item.product && catalogLineTotal(item) !== null);
+    const auditNeedsClarification = dataAudit?.verdict === 'clarify';
+    const replyMissingFields = auditNeedsClarification ? ['order_data_review'] : askMore ? [] : nextInteractionMissingFields(normalizedMissingFields);
+    const auditAllowsQuote = !this.config.llmOrderAuditEnabled || !grounded
+      || (dataAudit && ['approve', 'correct'].includes(dataAudit.verdict));
+    const canQuote = Boolean(auditAllowsQuote) && normalizedMissingFields.length === 0 && !askMore && !answerQuestion && !requiresHumanResolution && pricing.canConfirm;
+    // One outgoing interaction contract is shared by the LLM and the sender.
+    // A data clarification supersedes ordinary checkout fields; it must not
+    // carry payment/confirmation buttons from the pre-audit draft.
+    const selectionItem = !requiresHumanResolution && !auditNeedsClarification && !answerQuestion
+      ? effectiveOrderItems.find(item => item.resolution?.status === 'needs_selection') : null;
+    const replyInteraction = selectionItem
+      ? { kind: 'product_variant', rawItemId: selectionItem.rawItemId,
+        options: selectionItem.presentationOptions.map(p => ({ sku: p.sku, name: p.name, presentation: p.presentation })) }
+      : canQuote ? { kind: 'confirmation' }
+        : !requiresHumanResolution && !auditNeedsClarification && !answerQuestion && pricing.canConfirm && replyMissingFields.includes('payment_method')
+          ? { kind: 'payment_method', options: paymentMethods }
+          : { kind: 'none' };
     const reply = requiresHumanResolution
       ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields: normalizedMissingFields, customerProfile: orderCustomer })
       : buildOrderReply({ orderItems: effectiveOrderItems, missingFields: replyMissingFields, customerProfile: orderCustomer, subtotal, paymentMethods });
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
-      fallbackText: reply,
+      fallbackText: pricing.delivery ? this.deliveryQuoteFallback({ pricing, items: effectiveOrderItems, requiresHumanResolution })
+        : askMore ? `Tengo estos productos: ${effectiveOrderItems.map((item) => `${item.quantity ?? '?'} x ${describeCatalogProduct(item.product)}`).join(', ')}. Subtotal: ${formatCurrency(subtotal)}. ¿Deseas agregar algo más o ajustar el pedido?` : reply,
       facts: {
         kind: requiresHumanResolution ? 'human_resolution' : 'order_quote',
+        orderCreated: false,
+        nextAction: requiresHumanResolution ? 'human_review' : answerQuestion ? 'answer_question' : replyMissingFields.length ? 'ask_clarification' : grounded?.nextAction,
+        canConfirm: Boolean(auditAllowsQuote) && normalizedMissingFields.length === 0 && !askMore && !answerQuestion && !requiresHumanResolution && pricing.canConfirm,
+        customerMessage: normalized.text,
+        replyInteraction,
+        validatedSelection,
+        dataAudit: dataAudit ? { verdict: dataAudit.verdict, reason: dataAudit.reason, corrections: dataAudit.corrections } : null,
+        pricing,
+        orderItems: effectiveOrderItems,
+        unavailablePaymentPreference: customerDelta.unavailablePaymentPreference,
         products: effectiveOrderItems.map((item) => item.product).filter(Boolean),
         subtotal,
         paymentMethod,
         paymentMethods,
         missingFields: replyMissingFields,
-        requiredTerms: [
-          ...effectiveOrderItems.map((item) => item.product).filter(Boolean).map(describeCatalogProduct),
+        requiredTerms: answerQuestion || auditNeedsClarification ? [] : [
+          // A new/changed basket needs identifiable products. An unchanged
+          // basket is already in the conversation: do not reject a natural
+          // payment/fee reply merely because it does not repeat every name.
+          ...(!initialConversation?.orderDraft || (plan.semanticFrame?.items?.length ?? 0) > 0
+            ? effectiveOrderItems.map((item) => item.product).filter(Boolean).map(describeCatalogProduct) : []),
           ...replyMissingFields.filter((field) => ['customer_name', 'delivery_address'].includes(field)).map((field) => field === 'customer_name' ? 'nombre' : 'direccion'),
         ],
       },
     });
-    const canQuote = normalizedMissingFields.length === 0;
+    if (pricing.policyRevision !== deliveryPolicyRevision(await this.getTenant(tenantId))) {
+      this.events.emit({ type: 'delivery.policy.quote_invalidated', tenantId, conversationId,
+        detail: 'policy_changed_during_composition', metadata: { traceId: normalized.traceId } });
+      if (commercialRequoteAttempt === 0) return this.handleDeliveryOrder({ tenantId, conversationId, normalized, plan,
+        customerProfile, validatedSelection, commercialRequoteAttempt: 1 });
+      await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: { action: 'send_session_message',
+        wa_id: normalized.waId, text: 'La tienda está actualizando las condiciones del domicilio. Necesito comprobarlas antes de darte el total.' } });
+      return { summary: 'Commercial policy changed repeatedly; no obsolete quote sent' };
+    }
+    if (grounded && !await grounded.isCurrent()) return { summary: 'Grounded order superseded', plan };
 
     const nextDraft = advanceOrderDraft(previousDraft, {
       delivery: plan.order?.delivery ?? previousDraft?.delivery ?? false,
@@ -670,17 +947,23 @@ export class AgentRuntime {
       deliveryAddress: orderCustomer.defaultAddress,
       driveRefs: drive.source_refs ?? [],
       driveStatus: drive.status,
+      pricing,
+      dataAudit: dataAudit && ['approve', 'correct'].includes(dataAudit.verdict)
+        ? { revision: dataAudit.revision, verdict: dataAudit.verdict, corrections: dataAudit.corrections,
+          durationMs: dataAudit.durationMs, auditedAt: new Date().toISOString() } : null,
     });
     await this.patchConversation(conversationId, {
       stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
       zone: requiresHumanResolution ? 'approval' : canQuote ? 'quote' : 'agent',
       status: requiresHumanResolution ? 'blocked' : 'live',
-      value: canQuote ? formatCurrency(subtotal) : 'Pendiente',
+      value: canQuote ? formatCurrency(pricing.total) : 'Pendiente',
       progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
       need: normalized.text,
       nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: 'google_drive_file_picker',
       orderDraft: nextDraft,
+      ...(grounded ? { pendingQuestion: { kind: requiresHumanResolution ? 'human_review' : answerQuestion ? 'customer_question' : askMore ? 'collection' : canQuote ? 'confirmation' : 'clarification',
+        fields: replyMissingFields, rawItemIds: effectiveOrderItems.filter((item) => !item.product).map((item) => item.rawItemId), draftVersion: nextDraft.version } } : {}),
     });
     this.recordOrderDraftTransition({
       tenantId,
@@ -690,9 +973,12 @@ export class AgentRuntime {
       reason: 'catalog_resolution',
     });
 
-    if (requiresHumanResolution) {
+    if (requiresHumanResolution && pricing.delivery && ['below_minimum', 'configuration_incomplete'].includes(pricing.status)
+      && !needsHumanProductResolution(normalizedMissingFields)) {
+      await this.requestDeliveryReview({ tenantId, conversationId, pricing, draft: nextDraft, text: normalized.text });
+    } else if (requiresHumanResolution) {
       await this.tools.call('human_handoff', tenantId, conversationId, {
-        reason: 'Validar producto no encontrado, no inferible o sin stock',
+        reason: 'Validar productos o condiciones comerciales pendientes',
         urgency: 'Alta',
         assigned_team: 'ventas',
         context_snapshot: {
@@ -707,17 +993,16 @@ export class AgentRuntime {
       });
     }
 
-    if (!customerProfile && canQuote && customerDelta.name) {
+    if (!customerProfile && (grounded ? orderCustomer.name && (!nextDraft.delivery || orderCustomer.defaultAddress) : canQuote && customerDelta.name)) {
       await this.tools.call('google_sheets_customer_profile_upsert', tenantId, conversationId, {
         wa_id: normalized.waId,
-        name: customerDelta.name,
-        defaultAddress: customerDelta.address ?? null,
+        name: orderCustomer.name,
+        defaultAddress: orderCustomer.defaultAddress ?? null,
         preferences: { channel: 'whatsapp', deliveryDefault: Boolean(plan.order?.delivery) },
       });
     }
 
-    const selectionItem = effectiveOrderItems.find((item) => item.resolution?.status === 'needs_selection');
-    const productSelectionOffer = !requiresHumanResolution && selectionItem
+    const productSelectionOffer = replyInteraction.kind === 'product_variant'
       ? await this.createProductSelectionOffer({
         tenantId,
         conversationId,
@@ -726,23 +1011,33 @@ export class AgentRuntime {
         body: customerReply,
       })
       : null;
-    const paymentOffer = !requiresHumanResolution && !productSelectionOffer && replyMissingFields.includes('payment_method')
+    const paymentOffer = replyInteraction.kind === 'payment_method'
       ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods, body: customerReply, draftVersion: nextDraft.version })
       : null;
-    const confirmationOffer = !requiresHumanResolution && !productSelectionOffer && canQuote
+    const confirmationOffer = replyInteraction.kind === 'confirmation'
       ? await this.createConfirmationOffer({ tenantId, conversationId, body: customerReply, draftVersion: nextDraft.version })
       : null;
-    await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
+    const sent = await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: customerReply,
       ...((productSelectionOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productSelectionOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
     } });
+    if (sent?.accepted && !requiresHumanResolution && normalizedMissingFields.length === 0
+      && quoteBreakdownWasCommunicated(customerReply, pricing)
+      && (await this.getConversation(conversationId))?.orderDraft?.version === nextDraft.version) {
+      const communicatedQuote = { draftVersion: nextDraft.version, policyRevision: pricing.policyRevision,
+        basketRevision: pricing.basketRevision, total: pricing.total, delivery: pricing.delivery,
+        providerMessageId: sent.provider_message_id, sentAt: new Date().toISOString() };
+      await this.patchConversation(conversationId, { communicatedQuote });
+      this.events.emit({ type: 'order.quote.communicated', tenantId, conversationId,
+        detail: 'Complete commercial quote accepted by messaging provider', metadata: communicatedQuote });
+    }
 
     return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
   }
 
-  recordCatalogDecision({ tenantId, conversationId, traceId = null, rawItemId = null, query, rows = [], presentedRows = [], selected = null, decision, reason }) {
+  recordCatalogDecision({ tenantId, conversationId, traceId = null, rawItemId = null, query, rows = [], presentedRows = [], selected = null, decision, resolutionStatus = null, reason }) {
     const catalogEvidence = (catalogRows) => catalogRows.slice(0, 10).map((row) => ({
       sku: row.sku ?? null,
       name: row.name ?? null,
@@ -769,6 +1064,7 @@ export class AgentRuntime {
         rawItemId,
         query: String(query ?? '').slice(0, 240),
         decision,
+        ...(resolutionStatus ? { resolutionStatus } : {}),
         reason,
         selectedSku: selected?.sku ?? null,
         selectedName: selected?.name ?? null,
@@ -806,11 +1102,23 @@ export class AgentRuntime {
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const activeConversation = await this.getConversation(conversationId);
     const savedDraft = activeConversation?.orderDraft;
-    const orderDraft = savedDraft ?? plan.order;
-    const confirmationMissing = [...new Set([
-      ...(orderDraft?.missingFields ?? []),
-      ...(orderDraft?.paymentMethod ? [] : ['payment_method']),
-    ])];
+    if (this.config.llmGroundingEnabled && ((plan.semanticFrame?.items?.length ?? 0) > 0
+      || Object.values(plan.semanticFrame?.customerDelta ?? {}).some(v => v != null && v !== '')
+      || (typeof plan.semanticFrame?.delivery === 'boolean' && savedDraft && plan.semanticFrame.delivery !== savedDraft.delivery)
+      || (plan.semanticFrame?.cartMutation?.removeItemIds?.length ?? 0) > 0
+      || plan.semanticFrame?.cartMutation?.mode === 'snapshot')) {
+      // Consent to an old quote never authorizes an unpriced cart change in
+      // the same turn. Resolve the LLM's delta and quote the new draft first.
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile });
+    }
+    const tenant = await this.getTenant(tenantId);
+    const baseDraft = savedDraft ?? plan.order;
+    const currentPricing = evaluateDeliveryPolicy({ tenant, items: baseDraft?.items,
+      delivery: baseDraft?.delivery, draftVersion: baseDraft?.version, resolution: activeConversation?.deliveryResolution });
+    const changedPricing = baseDraft?.pricing && (baseDraft.pricing.policyRevision !== currentPricing.policyRevision
+      || baseDraft.pricing.basketRevision !== currentPricing.basketRevision || baseDraft.pricing.total !== currentPricing.total);
+    const orderDraft = { ...baseDraft, pricing: currentPricing };
+    const confirmationMissing = orderDraftBlockingFields(orderDraft);
     if (confirmationMissing.length) {
       return this.handleOrderClarification({
         tenantId,
@@ -824,28 +1132,66 @@ export class AgentRuntime {
         },
       });
     }
+    const communicated = activeConversation.communicatedQuote;
+    const currentQuoteWasCommunicated = Boolean(communicated?.providerMessageId
+      && communicated.draftVersion === baseDraft?.version
+      && communicated.policyRevision === currentPricing.policyRevision
+      && communicated.basketRevision === currentPricing.basketRevision
+      && communicated.total === currentPricing.total && communicated.delivery === currentPricing.delivery);
+    const needsAudit = this.config.llmGroundingEnabled && this.config.llmOrderAuditEnabled
+      && baseDraft?.dataAudit?.revision !== orderDataRevision(baseDraft, tenant);
+    if (needsAudit || changedPricing || (baseDraft?.pricing && activeConversation.pendingQuestion?.kind !== 'confirmation' && !currentQuoteWasCommunicated)) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile,
+        plan: { ...plan, intent: 'order_clarification', semanticFrame: { ...plan.semanticFrame, items: [], customerDelta: {},
+          delivery: baseDraft.delivery, collectionComplete: true, cartMutation: { mode: 'delta' } },
+        order: { delivery: baseDraft.delivery, items: [] }, missingFields: [] } });
+    }
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
     const customerName = orderDraft.customerName ?? customerProfile?.name ?? normalized.profileName ?? normalized.waId;
     const deliveryAddress = orderDraft.deliveryAddress ?? customerProfile?.defaultAddress ?? 'Dirección pendiente por confirmar';
-    const order = await this.tools.call('google_sheets_order_write', tenantId, conversationId, {
+    let order;
+    try {
+      order = await this.tools.call('google_sheets_order_write', tenantId, conversationId, {
       wa_id: normalized.waId,
       customer_name: customerName,
       delivery_address: deliveryAddress,
       items: (orderDraft.items ?? []).map((item) => ({
         sku: item.product?.sku ?? item.skuHint,
         name: item.product?.name ?? item.catalogQuery,
+        presentation: item.product?.presentation ?? item.product?.normalizedPresentation ?? null,
         quantity: item.quantity,
+        saleMode: item.saleMode ?? null,
+        requestedAmount: item.requestedAmount ?? null,
+        allowsSaleByAmount: item.product?.allowsSaleByAmount === true,
+        budgetAmount: item.budgetAmount ?? null,
         unitPrice: item.product?.price ?? null,
         lineTotal: item.lineTotal ?? null,
       })),
       subtotal: orderDraft.subtotal,
+      pricing: currentPricing,
+      delivery: orderDraft.delivery,
+      paymentMethod: orderDraft.paymentMethod,
       status: 'pending_human_preparation',
-    });
+      });
+    } catch (error) {
+      if (error.code !== 'delivery_policy_revision_conflict') throw error;
+      // PostgreSQL may detect a tariff update after the preceding read. No
+      // order was committed; ask the LLM to explain the current quote again.
+      this.events.emit({ type: 'delivery.policy.quote_invalidated', tenantId, conversationId,
+        detail: 'policy_changed_before_commit', metadata: { traceId: normalized.traceId } });
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile,
+        plan: { ...plan, intent: 'order_clarification', semanticFrame: { ...plan.semanticFrame, items: [], customerDelta: {},
+          delivery: baseDraft.delivery, collectionComplete: true, cartMutation: { mode: 'delta' } },
+          order: { delivery: baseDraft.delivery, items: [] }, missingFields: [] } });
+    }
 
-    const confirmedItems = (orderDraft.items ?? []).map((item) => ({
-      name: item.product?.name ?? item.catalogQuery ?? item.skuHint ?? 'Producto por validar',
-      quantity: item.quantity ?? 1,
-      unitPrice: item.product?.price ?? null,
+    const confirmedItems = (order.order.items ?? []).map((item) => ({
+      name: item.name,
+      presentation: item.presentation,
+      quantity: item.saleMode === 'amount' ? null : item.quantity ?? 1,
+      saleMode: item.saleMode ?? null,
+      requestedAmount: item.requestedAmount ?? null,
+      unitPrice: item.unitPrice ?? null,
       lineTotal: item.lineTotal ?? null,
     }));
     await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -853,9 +1199,10 @@ export class AgentRuntime {
       urgency: 'Alta',
       assigned_team: 'operaciones',
       context_snapshot: {
-        summary: 'Pedido confirmado por WhatsApp; requiere preparacion y entrega humana.',
+        summary: order.order.delivery === false ? 'Pedido confirmado sin domicilio incluido; requiere preparación y coordinación con el cliente.' : 'Pedido confirmado por WhatsApp; requiere preparacion y entrega humana.',
         orderId: order.order.id,
         subtotal: orderDraft.subtotal,
+        pricing: currentPricing,
         action: 'prepare_delivery_order',
         customerName,
         customerWaId: normalized.waId,
@@ -869,7 +1216,7 @@ export class AgentRuntime {
       stage: 'handoff',
       zone: 'approval',
       status: 'blocked',
-      value: formatCurrency(orderDraft.subtotal ?? 0),
+      value: formatCurrency(currentPricing.total),
       progress: 82,
       nextStep: 'Humano prepara el pedido y coordina entrega.',
       lastTool: 'google_sheets_order_write',
@@ -879,7 +1226,7 @@ export class AgentRuntime {
     await this.sendCustomerMessage({ tenantId, conversationId, normalized, payload: {
       action: 'send_session_message',
       wa_id: normalized.waId,
-      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Dirección: ${deliveryAddress}. La tienda lo alista y coordina la entrega. Referencia: ${order.order.id}.`,
+      text: `Pedido confirmado y registrado: ${formatOrderItems(confirmedItems)}. Productos: ${formatCurrency(order.order.pricing.subtotal)}. ${order.order.delivery === false ? 'No incluye servicio de domicilio.' : `Domicilio: ${formatCurrency(order.order.pricing.deliveryFee)}.`} Total: ${formatCurrency(order.order.pricing.total)}. Pago: ${paymentMethodLabel(order.order.paymentMethod, paymentMethodsForTenant(tenant))}. ${order.order.delivery === false ? 'La tienda lo alista; acuerda con ella cómo recibirlo.' : `Dirección: ${order.order.deliveryAddress}. La tienda lo alista y coordina la entrega.`} Referencia: ${order.order.id}.`,
     } });
     this.usage?.recordConfirmedDelivery(tenantId, {
       conversationId,
@@ -892,6 +1239,9 @@ export class AgentRuntime {
   }
 
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile }) {
+    if (this.config.llmGroundingEnabled && plan.semanticFrame) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile });
+    }
     const activeConversation = await this.getConversation(conversationId);
     // El plan de aclaracion describe solo el ultimo mensaje. El pedido ya
     // resuelto (SKU, precio y cantidad) vive en la conversacion y no puede
@@ -956,8 +1306,9 @@ export class AgentRuntime {
       customerName: profileForDraft.name,
       deliveryAddress: profileForDraft.defaultAddress,
     });
-    const canQuote = nextDraft.missingFields.length === 0;
     const tenant = await this.getTenant(tenantId);
+    this.refreshDraftDeliveryPricing(nextDraft, tenant, activeConversation?.deliveryResolution);
+    const canQuote = nextDraft.missingFields.length === 0;
     const paymentMethods = nextDraft.paymentMethods?.length ? nextDraft.paymentMethods : paymentMethodsForTenant(tenant);
     nextDraft.paymentMethods = paymentMethods;
     const replyMissingFields = nextInteractionMissingFields(nextDraft.missingFields);
@@ -968,6 +1319,7 @@ export class AgentRuntime {
       fallbackText: reply,
       facts: {
         kind: 'order_clarification',
+        pricing: nextDraft.pricing, canConfirm: canQuote, orderItems: nextDraft.items,
         products: (nextDraft.items ?? []).map((item) => item.product).filter(Boolean),
         subtotal: nextDraft.subtotal,
         missingFields: replyMissingFields,
@@ -982,7 +1334,8 @@ export class AgentRuntime {
       stage: canQuote ? 'quote' : 'clarification',
       zone: canQuote ? 'quote' : 'agent',
       status: 'live',
-      value: canQuote ? formatCurrency(nextDraft.subtotal) : 'Pendiente',
+      value: canQuote ? formatCurrency(nextDraft.pricing.total) : 'Pendiente',
+      pendingQuestion: { kind: canQuote ? 'confirmation' : 'customer_details' },
       progress: canQuote ? 64 : 48,
       nextStep: canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: collected.name || collected.defaultAddress ? 'google_sheets_customer_profile_upsert' : 'llm_core',
@@ -1012,7 +1365,109 @@ export class AgentRuntime {
     return { summary: canQuote ? 'Order clarified and quote sent' : 'Order still needs clarification', plan };
   }
 
-  async resolveHumanRequest(requestId, { outcome, note, approverId = 'local-admin', responseMode = 'none' }) {
+  deliveryQuoteFallback({ pricing, items, requiresHumanResolution }) {
+    const lines = items.filter(i => i.product).map(i => i.saleMode === 'amount'
+      ? `${describeCatalogProduct(i.product)} por valor de ${formatCurrency(i.requestedAmount)}`
+      : `${i.quantity ?? '?'} x ${describeCatalogProduct(i.product)} (${formatCurrency(i.product.price)} c/u)`);
+    return [`Productos: ${lines.join(', ') || 'pendientes de aclarar'}. Subtotal${pricing.status === 'basket_incomplete' ? ' parcial' : ''}: ${formatCurrency(pricing.subtotal)}.`,
+      pricing.deliveryFee == null ? 'La tarifa del domicilio está pendiente de definir por la tienda.' : `Domicilio: ${formatCurrency(pricing.deliveryFee)}.`,
+      pricing.minimumSubtotal == null ? 'La tienda debe definir el pedido mínimo para domicilio.' : `Mínimo en productos para domicilio: ${formatCurrency(pricing.minimumSubtotal)}.`,
+      pricing.shortfall > 0 && !pricing.canConfirm ? `Faltan ${formatCurrency(pricing.shortfall)} en productos para cumplirlo.` : '',
+      pricing.total != null ? `${pricing.canConfirm ? 'Total' : 'Importe provisional, sujeto a resolver los pendientes'}: ${formatCurrency(pricing.total)}.` : '',
+      requiresHumanResolution ? 'La tienda revisará tu solicitud antes de confirmar.' : 'Conservamos tu pedido para continuar.'].filter(Boolean).join(' ');
+  }
+
+  refreshDraftDeliveryPricing(draft, tenant, resolution) {
+    draft.pricing = evaluateDeliveryPolicy({ tenant, items: draft.items, delivery: draft.delivery, draftVersion: draft.version, resolution });
+    draft.missingFields = orderDraftBlockingFields({ ...draft,
+      missingFields: (draft.missingFields ?? []).filter(field => !field.startsWith('delivery_policy:')) });
+  }
+
+  async requestDeliveryReview({ tenantId, conversationId, pricing, draft, text }) {
+    const existing = this.store.getState().pendingRequests.find(r => r.tenantId === tenantId && r.conversationId === conversationId
+      && r.action === 'delivery_policy_review' && r.status === 'pending');
+    const snapshot = { action: 'delivery_policy_review', summary: text, pricing, orderDraft: draft,
+      items: draft.items, subtotal: pricing.subtotal, customerName: draft.customerName,
+      deliveryAddress: draft.deliveryAddress, paymentMethod: draft.paymentMethod };
+    if (existing) {
+      this.store.mutate(s => { const r = s.pendingRequests.find(r => r.id === existing.id); r.contextSnapshot = snapshot; r.context = text; });
+      await this.store.persistPendingRequest?.(existing.id);
+    } else await this.tools.call('human_handoff', tenantId, conversationId, {
+      reason: 'Revisar condiciones comerciales del domicilio', assigned_team: 'ventas', context_snapshot: snapshot });
+    await this.patchConversation(conversationId, { status: 'blocked', zone: 'approval', stage: 'handoff',
+      pendingQuestion: { kind: 'human_review' }, nextStep: 'La tienda revisa tarifa o mínimo antes de solicitar confirmación.' });
+  }
+
+  async resolveDeliveryReview(requestId, { outcome, note, approverId, deliveryResolution }) {
+    if (this.deliveryReviewLocks.has(requestId)) throw Object.assign(new Error('Esta revisión está siendo atendida.'), { statusCode: 409 });
+    this.deliveryReviewLocks.add(requestId);
+    try {
+      return await this.resolveDeliveryReviewOnce(requestId, { outcome, note, approverId, deliveryResolution });
+    } finally { this.deliveryReviewLocks.delete(requestId); }
+  }
+
+  async resolveDeliveryReviewOnce(requestId, { outcome, note, approverId, deliveryResolution }) {
+    const request = this.store.getState().pendingRequests.find(r => r.id === requestId);
+    if (request?.status !== 'pending') throw Object.assign(new Error('Esta revisión ya fue atendida.'), { statusCode: 409 });
+    if (!['approved', 'denied'].includes(outcome) || !approverId || !String(note ?? '').trim()) {
+      throw Object.assign(new Error('La resolución comercial requiere responsable, decisión y motivo.'), { statusCode: 400 });
+    }
+    const conversation = await this.getConversation(request.conversationId);
+    const tenant = await this.getTenant(request.tenantId);
+    const draft = conversation.orderDraft;
+    const current = evaluateDeliveryPolicy({ tenant, items: draft?.items, delivery: draft?.delivery, draftVersion: draft?.version });
+    const quoted = request.contextSnapshot.pricing;
+    if (current.policyRevision !== quoted.policyRevision || current.basketRevision !== quoted.basketRevision) {
+      throw Object.assign(new Error('La canasta o las condiciones cambiaron. Actualiza la revisión antes de resolver.'), { statusCode: 409 });
+    }
+    let resolution = null;
+    if (outcome === 'approved') {
+      if (!deliveryResolution || typeof deliveryResolution.minimumException !== 'boolean') {
+        throw Object.assign(new Error('Selecciona explícitamente las condiciones autorizadas.'), { statusCode: 400 });
+      }
+      resolution = { authorized: true, requestId, actorId: approverId, tenantId: tenant.id,
+        policyRevision: current.policyRevision, basketRevision: current.basketRevision,
+        minimumException: deliveryResolution.minimumException,
+        deliveryFee: normalizeDeliveryAmount(deliveryResolution.deliveryFee),
+        minimumSubtotal: normalizeDeliveryAmount(deliveryResolution.minimumSubtotal),
+        note: String(note).trim(), approvedAt: new Date().toISOString() };
+      // This task may resolve delivery conditions only, never missing products.
+      const evaluated = evaluateDeliveryPolicy({ tenant, items: draft.items, delivery: draft.delivery, resolution });
+      if (!evaluated.canConfirm) throw Object.assign(new Error('Las condiciones autorizadas aún no permiten cotizar este domicilio.'), { statusCode: 400 });
+    }
+    this.store.mutate(s => { const r = s.pendingRequests.find(r => r.id === requestId);
+      Object.assign(r, { status: outcome === 'approved' ? 'resolved' : 'denied', approverId,
+        resolutionNote: String(note).trim(), deliveryResolution: resolution, resolvedAt: new Date().toISOString() }); });
+    await this.store.persistPendingRequest?.(requestId);
+    await this.patchConversation(conversation.id, { deliveryResolution: resolution, status: outcome === 'approved' ? 'live' : 'blocked',
+      pendingQuestion: { kind: 'delivery_review_resolved' }, nextStep: outcome === 'approved' ? 'Cotizar condiciones autorizadas al comprador.' : 'La tienda no autorizó la excepción.' });
+    this.events.emit({ type: 'delivery.policy.review_resolved', tenantId: tenant.id, conversationId: conversation.id,
+      detail: outcome, metadata: { requestId, actorId: approverId, resolution } });
+    if (outcome === 'approved') {
+      const latest = [...conversation.messages].reverse().find(m => m.role === 'user');
+      await this.handleDeliveryOrder({ tenantId: tenant.id, conversationId: conversation.id,
+        normalized: { waId: conversation.waId, messageId: latest?.providerMessageId ?? latest?.id, text: latest?.text ?? '', receivedAt: latest?.createdAt },
+        customerProfile: await this.getCustomerProfile(tenant.id, conversation.waId),
+        plan: { intent: 'order_clarification', semanticFrame: { items: [], customerDelta: {}, collectionComplete: true,
+          delivery: draft.delivery, cartMutation: { mode: 'delta' } }, order: { items: [], delivery: draft.delivery }, missingFields: [] } });
+    } else {
+      const latest = [...conversation.messages].reverse().find(m => m.role === 'user');
+      const text = await this.composeCustomerReply({ tenantId: tenant.id, conversationId: conversation.id,
+        facts: { kind: 'delivery_review_denied', nextAction: 'human_review', canConfirm: false,
+          humanDecision: { outcome: 'denied', note: String(note).trim() }, pricing: current,
+          orderItems: draft.items, subtotal: current.subtotal },
+        fallbackText: 'La tienda no autorizó la excepción al domicilio. Tu pedido sigue sin confirmar; podemos revisar los productos o consultar otras opciones con la tienda.' });
+      await this.sendCustomerMessage({ tenantId: tenant.id, conversationId: conversation.id,
+        normalized: { waId: conversation.waId, messageId: latest?.providerMessageId ?? latest?.id, receivedAt: latest?.createdAt },
+        payload: { action: 'send_session_message', wa_id: conversation.waId, text } });
+    }
+    return this.store.getState().pendingRequests.find(r => r.id === requestId);
+  }
+
+  async resolveHumanRequest(requestId, { outcome, note, approverId = 'local-admin', responseMode = 'none', deliveryResolution }) {
+    if (this.store.getState().pendingRequests.find(r => r.id === requestId)?.action === 'delivery_policy_review') {
+      return this.resolveDeliveryReview(requestId, { outcome, note, approverId, deliveryResolution });
+    }
     const normalizedNote = String(note ?? '').trim();
     const normalizedMode = ['platform', 'whatsapp'].includes(responseMode) ? responseMode : 'none';
     const shouldReplyToCustomer = Boolean(normalizedNote && normalizedMode !== 'none');
@@ -1249,7 +1704,9 @@ export class AgentRuntime {
         .conversations
         .filter((item) => item.tenantId === tenantId && item.waId === normalized.waId)
         .sort((left, right) => Date.parse(right.updatedAt ?? right.createdAt ?? 0) - Date.parse(left.updatedAt ?? left.createdAt ?? 0))[0];
-    if (previous && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
+    // A completed purchase is immutable as a conversation lifecycle boundary.
+    // A later receipt can reference it through the LLM without reopening it.
+    if (previous && !previous.orderId && isExplicitCaseContinuation(normalized.text, previous, this.config)) {
       const now = new Date().toISOString();
       this.store.mutate((state) => {
         const conversation = state.conversations.find((item) => item.id === previous.id);
@@ -1421,7 +1878,7 @@ export class AgentRuntime {
       options,
       expiresAt,
     });
-    const interactiveBody = String(body ?? '¿Cómo prefieres pagar?').trim().slice(0, 1_024) || '¿Cómo prefieres pagar?';
+    const interactiveBody = String(body ?? '¿Cómo prefieres pagar?').trim() || '¿Cómo prefieres pagar?';
     return {
       offer,
       interactive: options.length <= 3
@@ -1438,6 +1895,10 @@ export class AgentRuntime {
 
   async createConfirmationOffer({ tenantId, conversationId, body, draftVersion = 0 }) {
     if (!this.store.createInteractionOffer) return null;
+    const draft = (await this.getConversation(conversationId))?.orderDraft;
+    if (!isCurrentDraftVersion(draft, draftVersion) || orderDraftBlockingFields(draft).length) return null;
+    const tenant = await this.getTenant(tenantId);
+    if (draft.pricing && draft.pricing.policyRevision !== deliveryPolicyRevision(tenant)) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const options = [
@@ -1458,7 +1919,7 @@ export class AgentRuntime {
       offer,
       interactive: {
         kind: 'button',
-        body: String(body ?? '¿Confirmas el pedido?').trim().slice(0, 1_024) || '¿Confirmas el pedido?',
+        body: String(body ?? '¿Confirmas el pedido?').trim() || '¿Confirmas el pedido?',
         buttons: options.map(({ id, title }) => ({ id, title })),
       },
     };
@@ -1489,7 +1950,7 @@ export class AgentRuntime {
       options,
       expiresAt,
     });
-    const interactiveBody = String(body ?? 'Elige la presentacion que prefieres.').trim().slice(0, 1_024) || 'Elige la presentacion que prefieres.';
+    const interactiveBody = String(body ?? 'Elige la presentacion que prefieres.').trim() || 'Elige la presentacion que prefieres.';
     return {
       offer,
       interactive: options.length <= 3
@@ -1569,18 +2030,20 @@ export class AgentRuntime {
     const conversation = await this.getConversation(conversationId);
     const draft = structuredClone(conversation?.orderDraft ?? {});
     draft.paymentMethod = result.option.value;
-    draft.missingFields = (draft.missingFields ?? []).filter((field) => field !== 'payment_method');
+    draft.missingFields = orderDraftBlockingFields({ ...draft, missingFields: (draft.missingFields ?? []).filter((field) => field !== 'payment_method') });
     const paymentLabel = paymentMethodLabel(result.option.value, draft.paymentMethods);
     const fallbackText = `Listo, queda ${paymentLabel} como forma de pago. ${draft.missingFields.length ? 'Aún necesito completar los datos pendientes para continuar.' : `El subtotal es ${formatCurrency(draft.subtotal ?? 0)}. ¿Confirmas el pedido?`}`;
     const nextDraft = advanceOrderDraft(draft, {
       paymentMethod: draft.paymentMethod,
       missingFields: draft.missingFields,
     });
+    this.refreshDraftDeliveryPricing(nextDraft, await this.getTenant(tenantId), conversation?.deliveryResolution);
     await this.patchConversation(conversationId, {
       orderDraft: nextDraft,
-      stage: draft.missingFields.length ? 'clarification' : 'quote',
-      zone: draft.missingFields.length ? 'agent' : 'quote',
-      nextStep: draft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
+      stage: nextDraft.missingFields.length ? 'clarification' : 'quote',
+      zone: nextDraft.missingFields.length ? 'agent' : 'quote',
+      pendingQuestion: { kind: nextDraft.missingFields.length ? 'customer_details' : 'confirmation' },
+      nextStep: nextDraft.missingFields.length ? 'Solicitar datos faltantes antes de cotizar.' : 'Esperar confirmación del pedido.',
     });
     this.recordOrderDraftTransition({
       tenantId,
@@ -1589,11 +2052,16 @@ export class AgentRuntime {
       draft: nextDraft,
       reason: 'payment_selection',
     });
+    if (this.config.llmGroundingEnabled) {
+      return this.continueGroundedSelection({ tenantId, conversationId, normalized, interaction: result.option });
+    }
     const text = await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText,
-      facts: { kind: 'payment_selection', subtotal: draft.subtotal, requiredTerms: [paymentLabel] },
+      facts: { kind: 'payment_selection', subtotal: nextDraft.subtotal, pricing: nextDraft.pricing,
+        canConfirm: !nextDraft.missingFields.length, missingFields: nextDraft.missingFields,
+        orderItems: nextDraft.items, paymentMethod: nextDraft.paymentMethod, requiredTerms: [paymentLabel] },
     });
     const confirmationOffer = nextDraft.missingFields.length
       ? null
@@ -1639,9 +2107,16 @@ export class AgentRuntime {
         available: true,
       }
       : item);
-    const missingFields = (draft.missingFields ?? []).filter((field) => field !== `presentation:${rawItemId}`);
+    const missingFields = orderDraftBlockingFields({ ...draft, items,
+      missingFields: (draft.missingFields ?? []).filter((field) => field !== `presentation:${rawItemId}`) });
     const nextDraft = advanceOrderDraft(draft, { items, missingFields });
+    if (this.config.llmGroundingEnabled) {
+      await this.patchConversation(conversationId, { orderDraft: nextDraft });
+      this.recordOrderDraftTransition({ tenantId, conversationId, traceId: normalized.traceId, draft: nextDraft, reason: 'product_variant_selection' });
+      return this.continueGroundedSelection({ tenantId, conversationId, normalized, interaction: result.option });
+    }
     const tenant = await this.getTenant(tenantId);
+    this.refreshDraftDeliveryPricing(nextDraft, tenant, conversation?.deliveryResolution);
     const paymentMethods = nextDraft.paymentMethods ?? paymentMethodsForTenant(tenant);
     nextDraft.paymentMethods = paymentMethods;
     const canQuote = nextDraft.missingFields.length === 0;
@@ -1659,6 +2134,7 @@ export class AgentRuntime {
       fallbackText,
       facts: {
         kind: 'product_variant_selection',
+        pricing: nextDraft.pricing, canConfirm: canQuote, orderItems: nextDraft.items,
         products: nextDraft.items.map((item) => item.product).filter(Boolean),
         subtotal: nextDraft.subtotal,
         missingFields: replyMissingFields,
@@ -1668,6 +2144,7 @@ export class AgentRuntime {
     await this.patchConversation(conversationId, {
       orderDraft: nextDraft,
       stage: canQuote ? 'quote' : 'clarification',
+      pendingQuestion: { kind: canQuote ? 'confirmation' : 'customer_details' },
       zone: canQuote ? 'quote' : 'agent',
       status: 'live',
       value: canQuote ? formatCurrency(nextDraft.subtotal) : 'Pendiente',
@@ -1682,7 +2159,10 @@ export class AgentRuntime {
       draft: nextDraft,
       reason: 'product_variant_selection',
     });
-    const paymentOffer = !canQuote && replyMissingFields.includes('payment_method')
+    const selectionItem = nextDraft.items.find((item) => item.resolution?.status === 'needs_selection');
+    const productOffer = selectionItem
+      ? await this.createProductSelectionOffer({ tenantId, conversationId, item: selectionItem, draftVersion: nextDraft.version, body: text }) : null;
+    const paymentOffer = !productOffer && !canQuote && replyMissingFields.includes('payment_method')
       ? await this.createPaymentOffer({ tenantId, conversationId, paymentMethods, body: text, draftVersion: nextDraft.version })
       : null;
     const confirmationOffer = canQuote
@@ -1692,9 +2172,34 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text,
-      ...((confirmationOffer ?? paymentOffer) ? { interactive: (confirmationOffer ?? paymentOffer).interactive } : {}),
+      ...((productOffer ?? confirmationOffer ?? paymentOffer) ? { interactive: (productOffer ?? confirmationOffer ?? paymentOffer).interactive } : {}),
     } });
     return { summary: 'Interactive product variant selected', interaction: result.option };
+  }
+
+  async continueGroundedSelection({ tenantId, conversationId, normalized, interaction }) {
+    const conversation = await this.getConversation(conversationId);
+    const customerProfile = await this.getCustomerProfile(tenantId, normalized.waId);
+    // The offer ID, tenant and version have already validated this exact choice.
+    // A truncated public title is not a new linguistic request. Keep the basket
+    // delta empty and let the grounded LLM decide the next conversational action.
+    // Pass this fact separately: a provider-generated plan cannot forge it.
+    const validatedSelection = { action: interaction.action, value: interaction.value, rawItemId: interaction.rawItemId ?? null,
+      ...(interaction.product ? { product: { sku: interaction.product.sku, name: interaction.product.name,
+        presentation: interaction.product.presentation ?? interaction.product.normalizedPresentation ?? null } } : {}) };
+    this.store.mutate(state => {
+      const current = state.conversations.find(c => c.id === conversationId && c.tenantId === tenantId);
+      const message = current?.messages.find(m => m.role === 'user' && m.providerMessageId === normalized.messageId);
+      if (message) message.validatedSelection = structuredClone(validatedSelection);
+    });
+    await this.store.persistConversation?.(conversationId);
+    const plan = { intent: 'order_clarification', executionMode: 'validated_interaction',
+      semanticFrame: { items: [], customerDelta: {}, cartMutation: { mode: 'delta' },
+        collectionComplete: conversation?.reasoningPlan?.semanticFrame?.collectionComplete ?? null },
+      order: { delivery: conversation?.orderDraft?.delivery ?? false, items: [] }, missingFields: [] };
+    await this.patchConversation(conversationId, { reasoningPlan: plan, lastTool: 'llm_grounding' });
+    return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile,
+      plan, validatedSelection });
   }
 
   async replyToInvalidInteraction({ tenantId, conversationId, normalized, reason }) {
@@ -1708,6 +2213,12 @@ export class AgentRuntime {
 
   async composeCustomerReply({ tenantId, conversationId, fallbackText, facts }) {
     if (!this.planner?.composeReply) return fallbackText;
+    const conversation = await this.getConversation(conversationId);
+    const tenant = await this.getTenant(tenantId);
+    facts = { customerMessage: [...(conversation?.messages ?? [])].reverse().find(m => m.role === 'user')?.text ?? '',
+      conversationContext: { pendingQuestion: conversation?.pendingQuestion,
+        recentMessages: conversation?.messages?.slice(-8).map(({ role, text }) => ({ role, text: String(text).slice(0, 600) })) },
+      deliveryPolicy: deliveryPolicyForTenant(tenant), paymentMethods: paymentMethodsForTenant(tenant), ...facts };
     this.events.emit({
       type: 'reply.facts.prepared',
       tenantId,
@@ -1719,7 +2230,7 @@ export class AgentRuntime {
     return composed.text ?? fallbackText;
   }
 
-  async sendCustomerMessage({ tenantId, conversationId, normalized, payload }) {
+  async responseFreshness({ tenantId, conversationId, normalized }) {
     const messageIds = new Set([
       ...(Array.isArray(normalized?.batchMessageIds) ? normalized.batchMessageIds : []),
       normalized?.messageId,
@@ -1743,7 +2254,38 @@ export class AgentRuntime {
       })
       : [];
     const staleByInbound = newerInbound.some((inbound) => inbound.messageId && !messageIds.has(inbound.messageId));
-    if (payload?.action === 'send_session_message' && (staleByConversation || staleByInbound)) {
+    const manual = conversation?.manualMode === 'whatsapp_external' || conversation?.status === 'manual_active';
+    return { stale: Boolean(staleByConversation || staleByInbound || manual), messageIds, latestProviderMessageId, newerInbound,
+      reason: manual ? 'manual_takeover' : staleByInbound ? 'newer_inbound_message' : 'conversation_cursor_advanced' };
+  }
+
+  async sendCustomerMessage({ tenantId, conversationId, normalized, payload }) {
+    if (payload?.interactive?.body?.length > 1024) {
+      const sent = await this.sendCustomerMessage({ tenantId, conversationId, normalized,
+        payload: { ...payload, interactive: undefined, text: payload.interactive.body } });
+      if (sent?.suppressed) return sent;
+      payload = { ...payload, text: undefined, interactive: { ...payload.interactive,
+        body: 'Puedes responder con estas opciones o escribirme cómo deseas continuar.' } };
+    }
+    if (!payload?.interactive && payload?.text?.length > 4096) {
+      const remaining = String(payload.text);
+      let cursor = 0, result;
+      while (cursor < remaining.length) {
+        let end = Math.min(cursor + 4096, remaining.length);
+        if (end < remaining.length) {
+          const boundary = remaining.lastIndexOf(' ', end);
+          if (boundary > cursor) end = boundary + 1;
+          if (end - cursor > 4096) end--;
+        }
+        result = await this.sendCustomerMessage({ tenantId, conversationId, normalized,
+          payload: { ...payload, text: remaining.slice(cursor, end) } });
+        if (result?.suppressed) return result;
+        cursor = end;
+      }
+      return result;
+    }
+    const { stale, messageIds, latestProviderMessageId, newerInbound, reason } = await this.responseFreshness({ tenantId, conversationId, normalized });
+    if (payload?.action === 'send_session_message' && stale) {
       this.events.emit({
         type: 'llm.response.suppressed',
         tenantId,
@@ -1753,10 +2295,10 @@ export class AgentRuntime {
           messageIds: [...messageIds],
           latestProviderMessageId,
           newerInboundIds: newerInbound.map((inbound) => inbound.messageId).filter(Boolean),
-          reason: staleByInbound ? 'newer_inbound_message' : 'conversation_cursor_advanced',
+          reason,
         },
       });
-      return { suppressed: true, reason: staleByInbound ? 'newer_inbound_message' : 'conversation_cursor_advanced' };
+      return { suppressed: true, reason };
     }
     return this.tools.call('whatsapp_business_messaging', tenantId, conversationId, payload);
   }
@@ -2160,6 +2702,9 @@ function dedupeOrderMissingFields(missingFields = []) {
       if (existingKind !== kind) return false;
       const existingSubject = existingRest.join(':');
       if (!subject || !existingSubject) return value === existing;
+      // Variant subjects are opaque line IDs. Similar prefixes do not mean
+      // the same product (two pending items share the inbound message ID).
+      if (kind === 'presentation') return value === existing;
       return orderMissingSubjectsMatch(subject, existingSubject);
     });
     if (!duplicate) result.push(value);
@@ -2270,23 +2815,6 @@ function removeResolvedProductMissingFields(missingFields, item) {
     const looksLikeProductGap = field.startsWith('product:') || containsAny(normalizedField, ['producto', 'referencia', 'presentacion']);
     if (!looksLikeProductGap) continue;
     const missing = normalizeText(field.replace('product:', ''));
-    if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
-      missingFields.splice(index, 1);
-    }
-  }
-}
-
-function removeResolvedBudgetMissingFields(missingFields, item) {
-  const candidates = [
-    item.rawName,
-    item.catalogQuery,
-    item.product?.name,
-    ...(item.product?.aliases ?? []),
-  ].map(normalizeText).filter(Boolean);
-  for (let index = missingFields.length - 1; index >= 0; index -= 1) {
-    const field = missingFields[index];
-    if (!field.startsWith('quantity:') && !field.startsWith('presentation:')) continue;
-    const missing = normalizeText(field.replace(/^quantity:|^presentation:/, ''));
     if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
       missingFields.splice(index, 1);
     }
@@ -2731,6 +3259,7 @@ function buildHumanResolutionReply({ orderItems, missingFields, customerProfile 
 }
 
 function describeUnderstoodItem(item) {
+  if (item.saleMode === 'amount') return `${formatCurrency(item.requestedAmount)} de ${item.product?.name ?? item.catalogQuery} (por valor)`;
   if (item.budgetAmount && item.product) return `${formatCurrency(item.budgetAmount)} de ${item.product.name}`;
   if (item.budgetAmount && (item.catalogQuery || item.rawName)) return `${formatCurrency(item.budgetAmount)} de algo tipo ${item.catalogQuery ?? item.rawName}`;
   if (item.requestedPresentation && (item.rawName || item.catalogQuery)) return `${item.quantity ?? 1} ${cleanRequestedName(item.rawName ?? item.catalogQuery)}`;
@@ -2838,6 +3367,9 @@ function confirmsPresentation(text, productName) {
 function sanitizeReplyFacts(facts = {}) {
   return {
     kind: facts.kind ?? null,
+    pricing: facts.pricing ?? null,
+    nextAction: facts.nextAction ?? null,
+    canConfirm: facts.canConfirm ?? false,
     products: (facts.products ?? facts.items ?? []).slice(0, 10).map((item) => ({
       sku: item?.sku ?? item?.product?.sku ?? null,
       name: item?.name ?? item?.product?.name ?? null,
@@ -2859,60 +3391,19 @@ function formatCurrency(value) {
 function interactiveProductTitle(product) {
   const name = String(product?.name ?? 'Producto').trim();
   const presentation = String(product?.presentation ?? product?.normalizedPresentation ?? '').trim();
-  const price = Number(product?.price ?? 0);
-  const detail = [presentation, price > 0 ? formatCurrency(price) : null].filter(Boolean).join(' - ');
-  return detail ? `${name} ${detail}`.slice(0, 72) : name.slice(0, 72);
+  // Meta limits button/list labels to 20/24 characters. Keep full monetary
+  // amounts in the message body instead of producing a truncated price label.
+  return [name, presentation].filter(Boolean).join(' ').slice(0, 72);
 }
 
-export function paymentMethodsForTenant(tenant) {
-  const configured = tenant?.config?.paymentMethods
-    ?? tenant?.config?.orderPolicy?.paymentMethods
-    ?? [];
-  const methods = Array.isArray(configured) ? configured : [];
-  const normalized = methods
-    .filter((method) => method && method.enabled !== false)
-    .map((method) => typeof method === 'string'
-      ? { id: normalizePaymentMethodId(method), label: paymentMethodLabel(method) }
-      : { id: normalizePaymentMethodId(method.id ?? method.key ?? method.label), label: method.label ?? paymentMethodLabel(method.id ?? method.key) })
-    .filter((method) => method.id && method.label);
-  const unique = new Map();
-  for (const method of normalized) {
-    if (!unique.has(method.id)) unique.set(method.id, method);
-  }
-  const configuredMethods = [...unique.values()];
-  return configuredMethods.length ? configuredMethods : [
-    { id: 'cash', label: 'Efectivo' },
-    { id: 'card_terminal', label: 'Tarjeta' },
-    { id: 'bre_b', label: 'Bre-B' },
-  ];
-}
-
-function normalizePaymentMethodId(value) {
-  const normalized = normalizeText(value).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-  if (['efectivo', 'cash'].includes(normalized)) return 'cash';
-  if (['tarjeta', 'datafono', 'card', 'card_terminal'].includes(normalized)) return 'card_terminal';
-  if (['bre_b', 'breb'].includes(normalized)) return 'bre_b';
-  return normalized;
-}
-
-function paymentMethodLabel(value, configured = []) {
-  const configuredMatch = (configured ?? []).find((method) => method.id === value || method.value === value);
-  if (configuredMatch?.label) return configuredMatch.label;
-  if (value === 'cash') return 'Efectivo';
-  if (value === 'card_terminal') return 'Tarjeta';
-  if (value === 'bre_b') return 'Bre-B';
-  if (value === 'nequi') return 'Nequi';
-  if (value === 'daviplata') return 'Daviplata';
-  return String(value ?? 'la forma de pago');
-}
 
 function formatOrderItems(items = []) {
   const lines = (items ?? [])
     .filter((item) => item?.name)
-    .map((item) => `${item.quantity ?? 1} x ${item.name}`);
+    .map((item) => item.saleMode === 'amount' ? `${formatCurrency(item.requestedAmount)} de ${describeCatalogProduct(item)} (por valor)`
+      : `${item.quantity ?? 1} x ${describeCatalogProduct(item)}`);
   if (!lines.length) return 'pedido registrado';
-  if (lines.length <= 3) return lines.join(', ');
-  return `${lines.slice(0, 3).join(', ')} y ${lines.length - 3} producto(s) mas`;
+  return lines.join(', ');
 }
 
 function initials(value) {

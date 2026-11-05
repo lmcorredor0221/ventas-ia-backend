@@ -1,0 +1,915 @@
+{
+  "warning": "Separate campaigns; never replace A statuses with a later best result. Automatic statuses are not manual verdicts.",
+  "campaigns": [
+    {
+      "campaign": "B",
+      "root": "test-results/pareto-focused-b",
+      "sourceSha256": "848fbcb1e5dd222d65d9911e1c368398578cd20bcacd4604937b339d634e1818",
+      "sourcesUnchanged": true,
+      "sourceDatabaseUnchanged": true,
+      "realDeepSeek": true,
+      "noUnauthorizedNetwork": true,
+      "p0Contracts": true,
+      "counts": {
+        "passed": 8,
+        "integration_fallback": 1,
+        "needs_review": 4
+      },
+      "turns": 30,
+      "usage": {
+        "requests": 73,
+        "inputTokens": 317612,
+        "outputTokens": 14405,
+        "totalTokens": 332017
+      },
+      "timing": {
+        "ackP50": 12,
+        "ackP95": 31,
+        "ackMax": 37,
+        "ackOverOneSecond": 0,
+        "responseP50": 5520,
+        "responseP95": 10427,
+        "responseMax": 11333
+      },
+      "cases": [
+        {
+          "caseId": "05-disponibilidad_producto_premium",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-5-5\\20261104225254_b15b5951\\cases\\05-disponibilidad_producto_premium\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "14-indeciso_antojo_dulce",
+          "status": "integration_fallback",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\14-indeciso_antojo_dulce\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 1,
+              "severity": "P1",
+              "reason": "El cliente pide una recomendación de algo dulce y el agente no ofrece ninguna opción del catálogo (arequipe, chocolatinas, ponques, galletas, etc.); solo escala a un asesor sin resolver la consulta ni dar alternativas.",
+              "evidence": "Te conecto con un asesor. Dejamos tu solicitud registrada para continuar sin perder el contexto."
+            },
+            {
+              "turn": 2,
+              "severity": "P1",
+              "reason": "Tras la insistencia del cliente por una recomendación dulce, el agente sigue sin ofrecer productos concretos ni alternativas; solo repite que quedó registrada la solicitud y devuelve la pregunta al cliente.",
+              "evidence": "Con gusto, ya tu solicitud de recomendación de algo dulce quedó registrada para que la tienda te ayude a elegir."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [
+            {
+              "turn": 1,
+              "type": "llm.plan.fallback",
+              "detail": "deepseek unavailable: fetch failed"
+            }
+          ],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "15-indeciso_desayuno_rapido",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\15-indeciso_desayuno_rapido\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            },
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 2,
+              "severity": "P2",
+              "reason": "El agente afirma que hay dos sabores (camarón y pollo) de la sopa Maruchan; el catálogo respalda ambos SKUs (COL-200 camarón y BOG-DES-080 pollo), por lo que no es invención, pero el precio de pollo se confirma solo en el turno 3.",
+              "evidence": "De la sopa instantánea Maruchan de 64 g tengo dos sabores: camarón y pollo"
+            },
+            {
+              "turn": 2,
+              "severity": "P2",
+              "reason": "No confirma el dato de IVA y lo deja como consulta; es aceptable no inventar, pero no se resuelve la necesidad informativa.",
+              "evidence": "Sobre el IVA no tengo ese dato confirmado; si quieres, lo dejo como consulta para que la tienda te lo verifique."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "16-indeciso_algo_frio_para_tomar",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\16-indeciso_algo_frio_para_tomar\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            }
+          ],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "17-indeciso_presupuesto_bajo",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\17-indeciso_presupuesto_bajo\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "18-producto_impreciso_gaseosa",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\18-producto_impreciso_gaseosa\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            },
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 3,
+              "severity": "P1",
+              "reason": "Recomendación contradictoria: dice que la Pepsi 'sale un poquito más económica' cuando la Kola Roman es más barata ($2.800 vs $2.900), y luego sugiere la Kola Roman como opción más suave sin base en atributos del catálogo.",
+              "evidence": "la Pepsi le rinde bien y le sale un poquito más económica: Precio unitario de Pepsi original 400 ml: $ 2.900, frente a la Kola Roman que está en Precio unitario de Gaseosa Kola Roman 400 ml: $ 2.800"
+            },
+            {
+              "turn": 3,
+              "severity": "P2",
+              "reason": "Ofrece separar el producto ('¿Se la separo?') sin que el cliente haya elegido producto ni cantidad; una consulta no autoriza compra.",
+              "evidence": "¿Se la separo?"
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "19-producto_impreciso_leche_bolsa",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-14-19\\20261104225254_bb505459\\cases\\19-producto_impreciso_leche_bolsa\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "26-consulta_precio_chocoramo",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-26-26\\20261104225547_c9e6f282\\cases\\26-consulta_precio_chocoramo\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "38-pago_requiere_aprobacion",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-38-38\\20261104225547_3abe5685\\cases\\38-pago_requiere_aprobacion\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "41-real_supermarket_saludo_solo_domicilio",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-b\\batch-41-41\\20261104225626_2ee0cb73\\cases\\41-real_supermarket_saludo_solo_domicilio\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 2,
+              "severity": "P2",
+              "reason": "El agente afirma que la búsqueda de surtido general arrojó solo una referencia parcial (Avena Alpina original 250 ml) y que no es inventario completo; es una oferta de producto concreta sin que el cliente la haya pedido, pero se presenta como referencia parcial y se ofrece revisar por categoría, lo cual es pertinente. No inventa stock ni precio.",
+              "evidence": "la búsqueda de surtido general solo me arrojó una referencia parcial: Avena Alpina original, presentación 250 ml"
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "46-real_supermarket_foto_producto_handoff",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-46-48\\20261104225626_6bfb57d4\\cases\\46-real_supermarket_foto_producto_handoff\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "47-real_supermarket_reclamo_faltante_handoff",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-46-48\\20261104225626_6bfb57d4\\cases\\47-real_supermarket_reclamo_faltante_handoff\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "48-real_supermarket_comprobante_pago_aprobacion",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-b\\batch-46-48\\20261104225626_6bfb57d4\\cases\\48-real_supermarket_comprobante_pago_aprobacion\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        }
+      ]
+    },
+    {
+      "campaign": "C",
+      "root": "test-results/pareto-focused-c",
+      "sourceSha256": "2e28e10902ebab5fed9ab167116c0f0336d58e6ffea4cc479c961e36d26738cf",
+      "sourcesUnchanged": true,
+      "sourceDatabaseUnchanged": true,
+      "realDeepSeek": true,
+      "noUnauthorizedNetwork": true,
+      "p0Contracts": true,
+      "counts": {
+        "passed": 8,
+        "needs_review": 4,
+        "failed_functional": 1
+      },
+      "turns": 45,
+      "usage": {
+        "requests": 126,
+        "inputTokens": 555088,
+        "outputTokens": 28803,
+        "totalTokens": 583891
+      },
+      "timing": {
+        "ackP50": 13,
+        "ackP95": 29,
+        "ackMax": 38,
+        "ackOverOneSecond": 0,
+        "responseP50": 5465,
+        "responseP95": 12308,
+        "responseMax": 14413
+      },
+      "cases": [
+        {
+          "caseId": "04-cliente_nuevo_completa_datos",
+          "status": "passed",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-c\\batch-4-5\\20261104225952_e678dc12\\cases\\04-cliente_nuevo_completa_datos\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-8139a5f9-f"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "05-disponibilidad_producto_premium",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-c\\batch-4-5\\20261104225952_e678dc12\\cases\\05-disponibilidad_producto_premium\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "14-indeciso_antojo_dulce",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-c\\batch-14-17\\20261104225952_a03bcdce\\cases\\14-indeciso_antojo_dulce\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "15-indeciso_desayuno_rapido",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-c\\batch-14-17\\20261104225952_a03bcdce\\cases\\15-indeciso_desayuno_rapido\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "16-indeciso_algo_frio_para_tomar",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-c\\batch-14-17\\20261104225952_a03bcdce\\cases\\16-indeciso_algo_frio_para_tomar\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            }
+          ],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "17-indeciso_presupuesto_bajo",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-c\\batch-14-17\\20261104225952_a03bcdce\\cases\\17-indeciso_presupuesto_bajo\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "22-mercado_basico_con_lista_parcial",
+          "status": "failed_functional",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-c\\batch-22-22\\20261104230212_39bfd83b\\cases\\22-mercado_basico_con_lista_parcial\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 8,
+              "severity": "P1",
+              "reason": "El agente registra el pedido como 'Retiro en tienda' sin que el cliente haya elegido método de entrega; el cliente solo confirmó el total y el pago en efectivo. Se inventa una modalidad de entrega no solicitada.",
+              "evidence": "Retiro en tienda."
+            },
+            {
+              "turn": 6,
+              "severity": "P2",
+              "reason": "El cliente ya había confirmado el pedido en el turno 5 y el agente vuelve a pedir confirmación de pago; sin embargo, la pregunta de forma de pago aún no estaba resuelta, por lo que es aceptable. No se repite una pregunta resuelta.",
+              "evidence": "¿cómo prefieres pagar, efectivo, tarjeta o Bre-B?"
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-964c37c1-a"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "24-pedido_claro_sin_domicilio",
+          "status": "passed",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-c\\batch-24-24\\20261104230212_d1487183\\cases\\24-pedido_claro_sin_domicilio\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-aa862c0c-6"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "27-indeciso_lonchera_nino",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-c\\batch-27-27\\20261104230402_575f738b\\cases\\27-indeciso_lonchera_nino\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            }
+          ],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "33-pedido_con_typos_colombianos",
+          "status": "needs_review",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-c\\batch-33-33\\20261104230402_cc379a31\\cases\\33-pedido_con_typos_colombianos\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "public_price_evidence_1_BOG-BEB-051",
+              "severity": "EVALUATOR"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 1,
+              "severity": "P2",
+              "reason": "El agente ofreció dos presentaciones de Chocoramo con precios, pero no aclaró que el cliente pidió 2 unidades; el subtotal parcial de $1.800 corresponde solo a 1 Cifrut, lo cual es correcto como parcial, pero no se indicó que faltaba definir cantidad de chocorramos.",
+              "evidence": "Te anoto 1 Cifrut granadilla (250 ml). Para los chocorramos tengo dos presentaciones: Precio unitario de Ponque Chocoramo 65 g: $ 2.800 y Precio unitario de Chocoramo mini 35 g: $ 1.600. ¿Cuál prefieres? Van Subtotal de productos: $ 1.800 por ahora."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-185a1f9c-b"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "41-real_supermarket_saludo_solo_domicilio",
+          "status": "needs_review",
+          "termination": "turn_budget_exhausted",
+          "evidence": "test-results\\pareto-focused-c\\batch-41-41\\20261104230519_4dd84944\\cases\\41-real_supermarket_saludo_solo_domicilio\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "conversation_reached_terminal",
+              "severity": "REVIEW"
+            }
+          ],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "46-real_supermarket_foto_producto_handoff",
+          "status": "passed",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-c\\batch-46-46\\20261104230519_296e0898\\cases\\46-real_supermarket_foto_producto_handoff\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "50-real_supermarket_confirmacion_solo_eso",
+          "status": "passed",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-c\\batch-50-50\\20261104230553_6f7daeed\\cases\\50-real_supermarket_confirmacion_solo_eso\\case-report.json",
+          "failedAssertions": [],
+          "issues": [
+            {
+              "turn": 5,
+              "severity": "P2",
+              "reason": "El cliente respondió 'Sí veci, solo eso' a la pregunta de confirmación, lo cual es ambiguo pero razonablemente interpretable como confirmación; no es un fallo grave, pero la confirmación no fue explícita ('Confirmar pedido').",
+              "evidence": "Pedido confirmado y registrado: 1 x Yogurt Alpina fresa vaso (150 g)."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-1f7fbe44-8"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        }
+      ]
+    },
+    {
+      "campaign": "D",
+      "root": "test-results/pareto-focused-d",
+      "sourceSha256": "6d40c241b585fb37dea6b6f9155842428707a83fe2f40ab8616fb9a423782ea4",
+      "sourcesUnchanged": true,
+      "sourceDatabaseUnchanged": true,
+      "realDeepSeek": true,
+      "noUnauthorizedNetwork": true,
+      "p0Contracts": true,
+      "counts": {
+        "integration_fallback": 1,
+        "failed_functional": 1
+      },
+      "turns": 10,
+      "usage": {
+        "requests": 29,
+        "inputTokens": 143112,
+        "outputTokens": 6339,
+        "totalTokens": 149451
+      },
+      "timing": {
+        "ackP50": 13,
+        "ackP95": 34,
+        "ackMax": 34,
+        "ackOverOneSecond": 0,
+        "responseP50": 5512,
+        "responseP95": 10815,
+        "responseMax": 10815
+      },
+      "cases": [
+        {
+          "caseId": "22-mercado_basico_con_lista_parcial",
+          "status": "integration_fallback",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-d\\batch-22-22\\20261104231027_21998203\\cases\\22-mercado_basico_con_lista_parcial\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [
+            {
+              "turn": 1,
+              "type": "llm.plan.fallback",
+              "detail": "deepseek unavailable: fetch failed"
+            }
+          ],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-e7d95143-3"
+            },
+            {
+              "type": "human_handoff",
+              "action": "resolve_handoff",
+              "status": "pending",
+              "orderId": null
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "24-pedido_claro_sin_domicilio",
+          "status": "failed_functional",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-d\\batch-24-24\\20261104231027_649cc79a\\cases\\24-pedido_claro_sin_domicilio\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 4,
+              "severity": "P1",
+              "reason": "El agente trató la confirmación del cliente como 'cotización aceptada' y ofreció botones de 'Confirmar pedido', pero el cliente ya había confirmado el pedido en ese mismo turno; además no se cerró el pedido en ese turno pese a la confirmación explícita, generando ambigüedad sobre si el pedido quedó registrado.",
+              "evidence": "Quedó la cotización aceptada: 1 Yogurt Alpina fresa vaso 150 g y 1 Galletas Festival chocolate 12 und."
+            },
+            {
+              "turn": 5,
+              "severity": "P2",
+              "reason": "El agente registra el pedido como confirmado sin haber verificado ni acreditado el pago en efectivo; sin embargo, no afirma haber recibido dinero, por lo que no es P0.",
+              "evidence": "Pago: Efectivo."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-de7c2c9f-0"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        }
+      ]
+    },
+    {
+      "campaign": "E",
+      "root": "test-results/pareto-focused-e",
+      "sourceSha256": "aa26139d2af83471c06199da907ffd00e32ab7213429ee354ded4e69529b0db5",
+      "sourcesUnchanged": true,
+      "sourceDatabaseUnchanged": true,
+      "realDeepSeek": true,
+      "noUnauthorizedNetwork": true,
+      "p0Contracts": true,
+      "counts": {
+        "passed": 1,
+        "evaluator_error": 1,
+        "failed_functional": 1
+      },
+      "turns": 16,
+      "usage": {
+        "requests": 44,
+        "inputTokens": 223054,
+        "outputTokens": 10390,
+        "totalTokens": 233444
+      },
+      "timing": {
+        "ackP50": 12,
+        "ackP95": 36,
+        "ackMax": 36,
+        "ackOverOneSecond": 0,
+        "responseP50": 5937,
+        "responseP95": 8471,
+        "responseMax": 8471
+      },
+      "cases": [
+        {
+          "caseId": "22-mercado_basico_con_lista_parcial",
+          "status": "passed",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-e\\batch-22-22\\20261104231438_b20005c0\\cases\\22-mercado_basico_con_lista_parcial\\case-report.json",
+          "failedAssertions": [],
+          "issues": [],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-1b2b53bb-e"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        },
+        {
+          "caseId": "24-pedido_claro_sin_domicilio",
+          "status": "evaluator_error",
+          "termination": "customer_finished",
+          "evidence": "test-results\\pareto-focused-e\\batch-24-24\\20261104231438_20f22f4a\\cases\\24-pedido_claro_sin_domicilio\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "expected_business_outcome",
+              "severity": "P1"
+            }
+          ],
+          "issues": [],
+          "errors": [
+            {
+              "message": "Evaluator actor: purchase stopped before confirmation without handoff"
+            }
+          ],
+          "fallbacks": [],
+          "taskIdentities": [],
+          "orderCreated": false,
+          "shopkeeperPassed": null
+        },
+        {
+          "caseId": "29-cliente_nuevo_coca_domicilio",
+          "status": "failed_functional",
+          "termination": "order_created",
+          "evidence": "test-results\\pareto-focused-e\\batch-29-29\\20261104231616_5a3b2b59\\cases\\29-cliente_nuevo_coca_domicilio\\case-report.json",
+          "failedAssertions": [
+            {
+              "name": "semantic_conversation",
+              "severity": "P1"
+            }
+          ],
+          "issues": [
+            {
+              "turn": 1,
+              "severity": "P2",
+              "reason": "Ofrece cuatro opciones de Coca-Cola, dos de las cuales son prácticamente la misma presentación (1.5 L) con precios distintos sin aclarar la diferencia; además incluye una referencia duplicada de catálogo (AND-COC-1500) que puede confundir la elección de variante.",
+              "evidence": "Precio unitario de Coca-Cola original 1.5 L: $ 7.200, Precio unitario de Coca-Cola original familiar 3 L: $ 13.500 y Precio unitario de Coca-Cola 1.5L 1.5 L: $ 6.800"
+            },
+            {
+              "turn": 3,
+              "severity": "P1",
+              "reason": "El cliente confirma el pedido y el agente responde pidiendo nombre y dirección, pero no aclara la forma de pago antes de cerrar; la preferencia de pago se introduce después por el cliente. No se pierde información, pero el cierre se hace sin haber aclarado pago.",
+              "evidence": "Para dejarlo listo me falta tu nombre y la dirección del domicilio. ¿Me los regalas, por favor?"
+            },
+            {
+              "turn": 5,
+              "severity": "P1",
+              "reason": "El agente afirma 'Pedido confirmado y registrado' y 'Pago: Efectivo' sin que se haya acreditado pago alguno; declarar efectivo no equivale a pago recibido. Además, el turno 4 ya había pedido confirmación y el cliente confirma en turno 5, pero el agente no verificó ni aclaró el medio de pago antes de registrar.",
+              "evidence": "Pedido confirmado y registrado: 1 x Coca-Cola original (1.5 L). Productos: $ 7.200. Domicilio: $ 0. Total: $ 7.200. Pago: Efectivo."
+            }
+          ],
+          "errors": [],
+          "fallbacks": [],
+          "taskIdentities": [
+            {
+              "type": "human_handoff",
+              "action": "prepare_delivery_order",
+              "status": "pending",
+              "orderId": "ord-2975c3dd-5"
+            }
+          ],
+          "orderCreated": true,
+          "shopkeeperPassed": true
+        }
+      ]
+    }
+  ],
+  "consentReplay": {
+    "evidence": "test-results/pareto-consent-replay/2026-11-04T23-18-11-176Z/report.json",
+    "status": "passed",
+    "sourcesUnchanged": true,
+    "sourceHashes": {
+      "server/services/agentRuntime.js": "8f81f2dc3511918d53ee8282ef66e1fd3456f3360e7a0ba863285cbcf33b5bbb",
+      "server/services/llmPlanner.js": "e468aaafea07415b2afca991c4e4c2298cab2c92227098c60984afd15b81b17e",
+      "server/services/llmReplyComposer.js": "6c2d9f14b61653aad3408fc3b0938f952fcdb3f3d0ece10db7a5206e8e9b1073",
+      "server/services/conversationGroundingCoordinator.js": "2abf85082b55730191ab973c763ff0fff096075a445ff58b95d82b62f307934e",
+      "server/services/groundedDecisionAgent.js": "955e8ba1438b62ac883e3942013c0468c2cfe1aea6885f1b0089033bec0c069d",
+      "server/services/toolRegistry.js": "9471e07ea012ed55b5dff5e50f13055e3424640beb8c52021151c8d1b9b05226"
+    },
+    "calls": 10,
+    "turns": [
+      {
+        "input": "Me regala 1 yogurt alpina fresa y 1 galletas festival chocolate",
+        "reply": "Claro, con gusto. De las Galletas Festival chocolate (12 und) te dejo 1, con Importe de línea de Galletas Festival chocolate 12 und (1 unidades): $ 6.800. Del yogurt Alpina fresa tengo dos presentaciones: vaso 150 g a Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900 o familiar 1 L a Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000. ¿Cuál prefieres?",
+        "pendingKind": "clarification",
+        "quoteCommunicated": false,
+        "orderCreated": false
+      },
+      {
+        "input": "El yogurt Alpina en vaso de 150 g y las galletas Festival chocolate de 12 unidades, uno de cada uno.",
+        "reply": "Listo, quedamos así: 1 x Yogurt Alpina fresa vaso (150 g) y 1 x Galletas Festival chocolate (12 und). Importe de línea de Yogurt Alpina fresa vaso 150 g (1 unidades): $ 2.900. Importe de línea de Galletas Festival chocolate 12 und (1 unidades): $ 6.800. Subtotal de productos: $ 9.700. ¿Me regalas tu nombre para dejar la cotización a tu nombre?",
+        "pendingKind": "clarification",
+        "quoteCommunicated": false,
+        "orderCreated": false
+      },
+      {
+        "input": "Eso es todo. Soy Laura Prueba. Es para domicilio en Calle E2E 100 # 10-20, Bogotá, y pago en efectivo. ¿Me confirmas el subtotal de productos, la tarifa de domicilio y el total final a pagar?",
+        "reply": "Listo, Laura, gracias. Te resumo: 1 x Yogurt Alpina fresa vaso 150 g y 1 x Galletas Festival chocolate 12 und. Subtotal de productos: $ 9.700. Domicilio: $ 0. Total: $ 9.700. Pago en efectivo para la dirección en Bogotá. ¿Te dejo la cotización así?",
+        "pendingKind": "customer_question",
+        "quoteCommunicated": true,
+        "orderCreated": false
+      },
+      {
+        "input": "Sí, confirmo ese pedido con ese total.",
+        "reply": "Pedido confirmado y registrado: 1 x Yogurt Alpina fresa vaso (150 g), 1 x Galletas Festival chocolate (12 und). Productos: $ 9.700. Domicilio: $ 0. Total: $ 9.700. Pago: Efectivo. Dirección: Calle E2E 100 # 10-20, Bogotá. La tienda lo alista y coordina la entrega. Referencia: ord-9988084c-6.",
+        "pendingKind": "customer_question",
+        "quoteCommunicated": true,
+        "orderCreated": true
+      }
+    ],
+    "totals": {
+      "subtotal": 9700,
+      "deliveryFee": 0,
+      "total": 9700
+    },
+    "failures": []
+  }
+}

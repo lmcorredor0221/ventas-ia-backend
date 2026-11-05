@@ -1,5 +1,9 @@
 # Plan ejecutable de pruebas E2E locales: Meta simulada y DeepSeek real
 
+> Revisión de aceptación — 2026-11-04: se implementó una [matriz contextual revisada de los 40 casos y los 10 casos reales](Revision-expectativas-E2E-contextuales-2026-11-04.md), ejecutable con `npm run test:e2e:contextual`. El cuerpo de este plan conserva el diseño y los umbrales históricos. La campaña nueva separa compradores, evaluación semántica y comprobaciones de negocio; no recalifica retroactivamente el 40/40 anterior. Sus ejecuciones y límites se documentan en la revisión vinculada.
+
+> Resultado: [50 casos/182 turnos, comparación acotada y auditoría](Evidencia-aceptacion-contextual-v2-2026-11-04.md). Se detectaron errores reales y del evaluador; la fase no está aprobada para liberación. La versión 2.1 del instrumento distingue ambas fuentes. Reevaluar los diálogos no sustituye repetir los casos que el actor cortó antes de tiempo.
+
 ## 1. Propósito
 
 Comprobar, sin enviar ni recibir mensajes reales de WhatsApp, que Ventas IA puede atender de extremo a extremo los 40 escenarios colombianos base: desde un webhook con el contrato de Meta hasta la respuesta que recibiría el cliente, la persistencia en PostgreSQL, la cola de integraciones y la acción posterior del tendero.

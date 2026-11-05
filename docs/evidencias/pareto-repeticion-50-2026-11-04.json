@@ -1,0 +1,1008 @@
+{
+  "campaign": "pareto-final50",
+  "sourcesUnchanged": true,
+  "sourceSha256": "7c577c60bed8246d4402904696d7ceb2a47599bec8c1110afa8d172f17af7532",
+  "sourceDatabaseUnchanged": true,
+  "deepSeekReal": true,
+  "noExternalNetwork": true,
+  "p0Contracts": true,
+  "counts": {
+    "passed": 24,
+    "needs_review": 13,
+    "failed_functional": 7,
+    "integration_fallback": 3,
+    "evaluator_error": 3
+  },
+  "orders": 14,
+  "receiptsWithPresentation": 14,
+  "duplicateHumanCases": [],
+  "slowAcks": [
+    {
+      "caseId": "02-pedido_claro_con_cantidad_faltante",
+      "turn": 4,
+      "ms": 3700
+    },
+    {
+      "caseId": "04-cliente_nuevo_completa_datos",
+      "turn": 6,
+      "ms": 2840
+    },
+    {
+      "caseId": "11-categoria_aseo",
+      "turn": 2,
+      "ms": 2418
+    },
+    {
+      "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+      "turn": 2,
+      "ms": 1050
+    },
+    {
+      "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+      "turn": 3,
+      "ms": 1284
+    },
+    {
+      "caseId": "16-indeciso_algo_frio_para_tomar",
+      "turn": 2,
+      "ms": 5231
+    },
+    {
+      "caseId": "17-indeciso_presupuesto_bajo",
+      "turn": 2,
+      "ms": 3790
+    },
+    {
+      "caseId": "22-mercado_basico_con_lista_parcial",
+      "turn": 2,
+      "ms": 3404
+    },
+    {
+      "caseId": "33-pedido_con_typos_colombianos",
+      "turn": 4,
+      "ms": 2222
+    },
+    {
+      "caseId": "50-real_supermarket_confirmacion_solo_eso",
+      "turn": 3,
+      "ms": 3282
+    },
+    {
+      "caseId": "50-real_supermarket_confirmacion_solo_eso",
+      "turn": 5,
+      "ms": 2271
+    }
+  ],
+  "latency": {
+    "p50": 6450,
+    "p95": 10943,
+    "max": 19406
+  },
+  "cases": [
+    {
+      "id": "01-pedido_claro_con_cliente_conocido",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\01-pedido_claro_con_cliente_conocido\\case-report.json"
+    },
+    {
+      "id": "02-pedido_claro_con_cantidad_faltante",
+      "status": "needs_review",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "turn_4_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "public_evidence_3_BOG-PAN-019",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_evidence_3_BOG-BEB-051",
+          "severity": "EVALUATOR"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\02-pedido_claro_con_cantidad_faltante\\case-report.json"
+    },
+    {
+      "id": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\03-cliente_nuevo_domicilio_pide_nombre_direccion\\case-report.json"
+    },
+    {
+      "id": "04-cliente_nuevo_completa_datos",
+      "status": "failed_functional",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "turn_6_ack",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\04-cliente_nuevo_completa_datos\\case-report.json"
+    },
+    {
+      "id": "05-disponibilidad_producto_premium",
+      "status": "integration_fallback",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\05-disponibilidad_producto_premium\\case-report.json"
+    },
+    {
+      "id": "06-consulta_cafe_generica_infiere_similares",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\06-consulta_cafe_generica_infiere_similares\\case-report.json"
+    },
+    {
+      "id": "07-categoria_jugos",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\07-categoria_jugos\\case-report.json"
+    },
+    {
+      "id": "08-categoria_algo_para_la_sed",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\08-categoria_algo_para_la_sed\\case-report.json"
+    },
+    {
+      "id": "09-categoria_mecato_onces",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\09-categoria_mecato_onces\\case-report.json"
+    },
+    {
+      "id": "10-categoria_mercado",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\10-categoria_mercado\\case-report.json"
+    },
+    {
+      "id": "11-categoria_aseo",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "turn_2_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P2",
+          "reason": "Ofrece muchos productos de aseo sin preguntar preferencia de marca/presentación, pero sí pregunta cuál le sirve y en qué presentación; no inventa datos.",
+          "evidence": "¿Cuál te sirve y en qué presentación?"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\11-categoria_aseo\\case-report.json"
+    },
+    {
+      "id": "12-categoria_onces_panaderia",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 2,
+          "severity": "P2",
+          "reason": "El agente clasifica las galletas como dulces/saladas sin respaldo explícito en el catálogo (los tags no indican dulce/salado), aunque lo presenta como búsqueda parcial; riesgo menor de cualidad inventada.",
+          "evidence": "las Saltin Noel (3 tacos y familiar 6 tacos) son de línea salada; las demás de la lista (Chokis, Festival, Oreo, Ducales) son galletas dulces"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\12-categoria_onces_panaderia\\case-report.json"
+    },
+    {
+      "id": "13-consulta_combo_jamon_queso_pan_parcial",
+      "status": "failed_functional",
+      "termination": "customer_finished",
+      "failedChecks": [
+        {
+          "name": "turn_2_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "turn_3_ack",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-1-13\\20261104223933_ed19b5ad\\cases\\13-consulta_combo_jamon_queso_pan_parcial\\case-report.json"
+    },
+    {
+      "id": "14-indeciso_antojo_dulce",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\14-indeciso_antojo_dulce\\case-report.json"
+    },
+    {
+      "id": "15-indeciso_desayuno_rapido",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\15-indeciso_desayuno_rapido\\case-report.json"
+    },
+    {
+      "id": "16-indeciso_algo_frio_para_tomar",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "turn_2_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\16-indeciso_algo_frio_para_tomar\\case-report.json"
+    },
+    {
+      "id": "17-indeciso_presupuesto_bajo",
+      "status": "integration_fallback",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "turn_2_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 2,
+          "severity": "P1",
+          "reason": "No responde la pregunta del cliente sobre combos/promociones ni sobre sabores de Choclitos BBQ y Papas Super Ricas pollo; solo informa domicilio y mínimo, datos que no fueron solicitados.",
+          "evidence": "Domicilio: $ 0. Mínimo de productos para domicilio: $ 0."
+        },
+        {
+          "turn": 3,
+          "severity": "P1",
+          "reason": "Repite precios ya dados en turno 1 y vuelve a informar domicilio/mínimo, pero sigue sin responder combos/promociones ni sabores disponibles; no atiende la necesidad expresada.",
+          "evidence": "Precio unitario de Choclitos BBQ 80 g: $ 3.800. Precio unitario de Papas Super Ricas pollo 90 g: $ 4.300. Domicilio: $ 0. Mínimo de productos para domicilio: $ 0."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\17-indeciso_presupuesto_bajo\\case-report.json"
+    },
+    {
+      "id": "18-producto_impreciso_gaseosa",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [
+        {
+          "turn": 3,
+          "severity": "P2",
+          "reason": "El agente añade información de domicilio y mínimo no solicitada en una consulta de comparación de precios; es irrelevante pero no inventa ni perjudica la compra.",
+          "evidence": "Y de paso, Domicilio: $ 0 y Mínimo de productos para domicilio: $ 0."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\18-producto_impreciso_gaseosa\\case-report.json"
+    },
+    {
+      "id": "19-producto_impreciso_leche_bolsa",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\19-producto_impreciso_leche_bolsa\\case-report.json"
+    },
+    {
+      "id": "20-producto_impreciso_papel_bano",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\20-producto_impreciso_papel_bano\\case-report.json"
+    },
+    {
+      "id": "21-producto_impreciso_jabon_ropa",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\21-producto_impreciso_jabon_ropa\\case-report.json"
+    },
+    {
+      "id": "22-mercado_basico_con_lista_parcial",
+      "status": "failed_functional",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "turn_2_ack",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\22-mercado_basico_con_lista_parcial\\case-report.json"
+    },
+    {
+      "id": "23-pedido_claro_aseo_domicilio",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\23-pedido_claro_aseo_domicilio\\case-report.json"
+    },
+    {
+      "id": "24-pedido_claro_sin_domicilio",
+      "status": "failed_functional",
+      "termination": "customer_finished",
+      "failedChecks": [
+        {
+          "name": "expected_business_outcome",
+          "severity": "P1"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P1",
+          "reason": "El agente inventa/expone importes con etiquetas internas de sistema ('Importe de línea de...', 'Precio unitario de...') en lugar de un precio claro; además afirma precio de galletas y yogurt sin problema, pero el formato es defectuoso y confuso para el cliente.",
+          "evidence": "Te anoto las Galletas Festival chocolate (12 und) a Importe de línea de Galletas Festival chocolate 12 und (1 unidades): $ 6.800."
+        },
+        {
+          "turn": 3,
+          "severity": "P1",
+          "reason": "El cliente pide explícitamente tarifa de domicilio y total final separados; el agente responde 'Domicilio: $ 0' sin explicar la tarifa real, y además avanza a preguntar forma de pago antes de aclarar el domicilio solicitado.",
+          "evidence": "Domicilio: $ 0. Total: $ 9.700. Para cerrar, ¿cómo prefieres pagar: efectivo, tarjeta o Bre-B?"
+        },
+        {
+          "turn": 4,
+          "severity": "P1",
+          "reason": "El cliente insiste en la tarifa real de domicilio; el agente repite 'Domicilio: $ 0' y 'Mínimo de productos para domicilio: $ 0' sin explicar ni validar la tarifa real, y vuelve a preguntar forma de pago sin resolver la necesidad.",
+          "evidence": "La tarifa de domicilio que tengo registrada para tu pedido es Domicilio: $ 0, y el mínimo de productos para domicilio es Mínimo de productos para domicilio: $ 0, así que no hay faltante."
+        },
+        {
+          "turn": 5,
+          "severity": "P2",
+          "reason": "El agente reconoce que no tiene confirmada la tarifa real de domicilio, lo cual es correcto, pero vuelve a preguntar la forma de pago cuando el cliente ya indicó que revisará y confirmará después; no debe presionar el cierre.",
+          "evidence": "¿Cómo prefiere pagar: efectivo, tarjeta o Bre-B?"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\24-pedido_claro_sin_domicilio\\case-report.json"
+    },
+    {
+      "id": "25-producto_impreciso_savital_sobre",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\25-producto_impreciso_savital_sobre\\case-report.json"
+    },
+    {
+      "id": "26-consulta_precio_chocoramo",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-14-26\\20261104223933_9f327e5b\\cases\\26-consulta_precio_chocoramo\\case-report.json"
+    },
+    {
+      "id": "27-indeciso_lonchera_nino",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "judge_issue_3_evidence",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 2,
+          "severity": "P1",
+          "reason": "El cliente pidió opciones empacadas dulces o lácteas con sabor y precio; para dulces el agente solo ofreció una referencia parcial (maní confitado) que dijo requerir validación, sin dar alternativas dulces confirmadas, dejando la necesidad de dulces sin atender en ese turno.",
+          "evidence": "Para dulces empacados encontré una referencia parcial: Maní confitado La Especial 50 g, pero ese tipo de búsqueda requiere que la tienda lo valide."
+        },
+        {
+          "turn": 3,
+          "severity": "P2",
+          "reason": "Ofrece Bon Bon Bum surtido en dos presentaciones (12 und y 1 und) sin aclarar que son formatos distintos ni distinguir la presentación de 1 und como alternativa de formato; puede confundir la cantidad/presentación.",
+          "evidence": "Bon Bon Bum surtido 12 und, Precio unitario de Bon Bon Bum surtido 12 und: $ 4.800; ... También hay Bon Bon Bum surtido 1 und, Precio unitario de Bon Bon Bum surtido 1 und: $ 800."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\27-indeciso_lonchera_nino\\case-report.json"
+    },
+    {
+      "id": "28-producto_no_catalogado_salmon",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\28-producto_no_catalogado_salmon\\case-report.json"
+    },
+    {
+      "id": "29-cliente_nuevo_coca_domicilio",
+      "status": "integration_fallback",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P2",
+          "reason": "La cotización inicial muestra Subtotal, Domicilio y Mínimo en $0 sin productos ni datos reales, lo que puede confundir; además no se aclara la variante antes de cotizar (aunque sí se pregunta la presentación).",
+          "evidence": "Así te armo la cotización con Subtotal de productos: $ 0, Domicilio: $ 0 y Mínimo de productos para domicilio: $ 0."
+        },
+        {
+          "turn": 3,
+          "severity": "P1",
+          "reason": "El cliente confirma condiciones y pago en efectivo contra entrega; el agente responde confirmando la cotización pero no distingue que 'efectivo contra entrega' es preferencia de pago, no pago recibido. No acredita dinero, pero tampoco hay problema grave; sin embargo, en turnos posteriores se registra el pedido como confirmado sin que el cliente haya dado una confirmación explícita del pedido final (solo confirma el total).",
+          "evidence": "Pago en efectivo contra entrega en Calle E2E 100 # 10-20, Bogotá. Solo me falta un dato para dejar lista la cotización: ¿me regalas tu nombre?"
+        },
+        {
+          "turn": 4,
+          "severity": "P1",
+          "reason": "El cliente dice 'confirmo ese pedido con ese total', pero el agente sigue pidiendo el nombre y no avanza; repite la misma solicitud en turnos 5 y 6, ignorando que el cliente ya confirmó el pedido. Esto constituye repetición de pregunta resuelta y no reconoce la confirmación.",
+          "evidence": "Antes de dejar la cotización lista solo me falta tu nombre, ¿me lo regalas?"
+        },
+        {
+          "turn": 5,
+          "severity": "P1",
+          "reason": "Repite exactamente la misma solicitud de nombre tras la confirmación del cliente, sin reconocer que ya confirmó el pedido.",
+          "evidence": "Solo me falta tu nombre para dejar lista la cotización, ¿me lo regalas?"
+        },
+        {
+          "turn": 6,
+          "severity": "P1",
+          "reason": "Vuelve a repetir la solicitud de nombre, ignorando la confirmación previa del cliente.",
+          "evidence": "Antes de dejar lista la cotización solo me falta tu nombre, ¿me lo regalas?"
+        },
+        {
+          "turn": 7,
+          "severity": "P1",
+          "reason": "El agente presenta un resumen y pregunta '¿Confirmas el pedido con estas condiciones?' cuando el cliente ya había confirmado el pedido en turnos 4-6; además incluye 'Mínimo de productos para domicilio: $ 0' que no fue solicitado y puede confundir.",
+          "evidence": "¿Confirmas el pedido con estas condiciones?"
+        },
+        {
+          "turn": 8,
+          "severity": "P0",
+          "reason": "El agente declara 'Pedido confirmado y registrado' y asigna referencia, pero el cliente solo dijo 'Sí, confirmo ese pedido con ese total' en respuesta a la pregunta de confirmación del turno 7; sin embargo, el agente no verificó pago (efectivo contra entrega no es pago recibido) y, más grave, el pedido se registra sin que se haya aclarado que el pago es contra entrega y no se ha recibido dinero. Además, el agente no debió cerrar el pedido sin antes confirmar la dirección y el nombre, que ya se tenían, pero el problema principal es que se registra un pedido como confirmado cuando el cliente solo confirmó el total, no necesariamente el pedido completo con todos los datos.",
+          "evidence": "Pedido confirmado y registrado: 1 x Coca-Cola original (1.5 L). Productos: $ 7.200. Domicilio: $ 0. Total: $ 7.200. Pago: Efectivo. Dirección: Calle E2E 100 # 10-20, Bogotá. La tienda lo alista y coordina la entrega. Referencia: ord-491b3031-d."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\29-cliente_nuevo_coca_domicilio\\case-report.json"
+    },
+    {
+      "id": "30-pedido_confirmado_dale_hagale",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\30-pedido_confirmado_dale_hagale\\case-report.json"
+    },
+    {
+      "id": "31-consulta_tintico_cafe",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 3,
+          "severity": "P2",
+          "reason": "El agente no respondió sobre el envío a Bogotá de forma clara: dio tarifa de domicilio $0 y mínimo $0, lo cual responde indirectamente, pero no confirma explícitamente que hay envío a Bogotá. Sin embargo, la información de domicilio $0 y mínimo $0 es pertinente y proviene del fixture. No es un fallo grave.",
+          "evidence": "Y sí, para Bogotá: Domicilio: $ 0 y Mínimo de productos para domicilio: $ 0."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\31-consulta_tintico_cafe\\case-report.json"
+    },
+    {
+      "id": "32-pedido_claro_despensa_domicilio",
+      "status": "needs_review",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "public_price_evidence_1_BOG-HUE-011",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_1_BOG-BAS-032",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "public_price_evidence_2_BOG-GRA-021",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_2_BOG-BAS-032",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "public_price_evidence_3_BOG-GRA-021",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_3_BOG-BAS-031",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_3_BOG-HUE-011",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_4_BOG-GRA-021",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_4_BOG-BAS-031",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_4_BOG-HUE-011",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_5_BOG-GRA-021",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_5_BOG-BAS-031",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_5_BOG-HUE-011",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_6_BOG-GRA-021",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_6_BOG-BAS-031",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "public_price_evidence_6_BOG-HUE-011",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "judge_issue_6_evidence",
+          "severity": "EVALUATOR"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P1",
+          "reason": "El agente afirma un domicilio de $0 sin que el cliente lo haya pedido ni exista evidencia de la tarifa en el turno; además presenta el subtotal parcial como si incluyera solo los huevos, cuando el cliente pidió tres productos y aún no eligió variantes. No es un error grave de invención de precio si la política de la tienda es domicilio $0, pero el agente no lo aclara como política.",
+          "evidence": "Por ahora el subtotal parcial es Subtotal de productos: $ 11.800 y el domicilio Domicilio: $ 0."
+        },
+        {
+          "turn": 3,
+          "severity": "P1",
+          "reason": "El agente calcula y afirma un subtotal de $23.500 y total de $23.500 sin que el cliente haya confirmado cantidades ni precios; además el subtotal no coincide con la suma de los precios unitarios ofrecidos (3.200 + 8.500 + 11.800 = 23.500), lo cual es correcto aritméticamente, pero el agente no debió presentarlo como total definitivo antes de confirmar el pedido. No es un error de precio inventado, pero sí de cierre prematuro.",
+          "evidence": "Subtotal de productos: $ 23.500. Domicilio: $ 0. Total: $ 23.500. ¿Te lo dejo así?"
+        },
+        {
+          "turn": 4,
+          "severity": "P1",
+          "reason": "El agente pide forma de pago antes de que el cliente haya confirmado el pedido; el cliente dijo 'Sí, confirmo ese pedido con ese total', pero el agente responde 'Antes de dejarlo listo me falta un dato: ¿cómo prefieres pagar?'. Esto invierte el orden: primero debe confirmarse el pedido y luego el pago, o al menos no presentar el pago como requisito previo a dejar listo el pedido.",
+          "evidence": "Antes de dejarlo listo me falta un dato: ¿cómo prefieres pagar?"
+        },
+        {
+          "turn": 5,
+          "severity": "P1",
+          "reason": "El agente vuelve a pedir confirmación del pedido después de que el cliente ya había confirmado en el turno 4; repite una pregunta ya resuelta y no avanza al cierre.",
+          "evidence": "¿Confirmas el pedido con estas condiciones?"
+        },
+        {
+          "turn": 6,
+          "severity": "P0",
+          "reason": "El agente confirma y registra el pedido como 'Pedido confirmado y registrado' sin que el cliente haya dado una confirmación explícita en este turno; el cliente repite 'Sí, confirmo ese pedido con ese total', pero el agente ya había pedido confirmación en el turno 5 y el cliente responde afirmativamente, lo cual es válido. Sin embargo, el agente afirma 'Pago: Efectivo' y 'Pedido confirmado y registrado' sin haber verificado el pago (efectivo no acredita pago) y sin haber aclarado que el pago se realiza contra entrega. Además, el agente no debió registrar el pedido como confirmado si el cliente no había aceptado explícitamente las condiciones finales tras el resumen del turno 5; el cliente sí aceptó, pero el agente no debió afirmar 'Pago: Efectivo' como si el pago estuviera hecho.",
+          "evidence": "Pedido confirmado y registrado: ... Pago: Efectivo."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\32-pedido_claro_despensa_domicilio\\case-report.json"
+    },
+    {
+      "id": "33-pedido_con_typos_colombianos",
+      "status": "failed_functional",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "turn_4_ack",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P2",
+          "reason": "El agente interpretó correctamente los typos (chocramos→Chocoramo, cifru granadila→Cifrut granadilla) y aclaró la variante de presentación antes de cotizar; sin embargo, ofreció solo dos presentaciones de Chocoramo sin mencionar que existían otras, lo cual es aceptable como alternativas explícitas.",
+          "evidence": "Para los chocorramos, ¿cuál presentación prefieres: Ponque Chocoramo 65 g a Precio unitario de Ponque Chocoramo 65 g: $ 2.800 o Chocoramo mini 35 g a Precio unitario de Chocoramo mini 35 g: $ 1.600?"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\33-pedido_con_typos_colombianos\\case-report.json"
+    },
+    {
+      "id": "34-pedido_sin_cantidades_debe_preguntar",
+      "status": "evaluator_error",
+      "failedChecks": [],
+      "errors": [
+        {
+          "message": "Evaluator actor: wrong option for confirmation",
+          "stack": "Error: Evaluator actor: wrong option for confirmation\n    at nextCustomerTurn (file:///C:/Users/Messi/OneDrive/Documentos/ChatGPT/MicroApp/server/tests/helpers/contextualCustomerActor.js:62:44)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async runContextualScenario (file:///C:/Users/Messi/OneDrive/Documentos/ChatGPT/MicroApp/server/tests/helpers/contextualScenarioRunner.js:58:24)"
+        }
+      ],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\34-pedido_sin_cantidades_debe_preguntar\\case-report.json"
+    },
+    {
+      "id": "35-pedido_despensa_sin_cantidades",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [
+        {
+          "turn": 4,
+          "severity": "P2",
+          "reason": "El agente ofreció el resumen y total antes de conocer la preferencia de pago, pero no cerró ni pidió pago; solo preguntó el método de pago, lo cual es correcto. No es un fallo.",
+          "evidence": "Para dejarlo listo, ¿cómo prefieres pagar: efectivo, tarjeta o Bre-B?"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\35-pedido_despensa_sin_cantidades\\case-report.json"
+    },
+    {
+      "id": "36-consulta_lacteos",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\36-consulta_lacteos\\case-report.json"
+    },
+    {
+      "id": "37-descuento_escala_aprobacion",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\37-descuento_escala_aprobacion\\case-report.json"
+    },
+    {
+      "id": "38-pago_requiere_aprobacion",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-27-38\\20261104223933_975eb7fc\\cases\\38-pago_requiere_aprobacion\\case-report.json"
+    },
+    {
+      "id": "39-pide_humano",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\39-pide_humano\\case-report.json"
+    },
+    {
+      "id": "40-pedido_confirmado_handoff_operaciones",
+      "status": "evaluator_error",
+      "termination": "customer_finished",
+      "failedChecks": [
+        {
+          "name": "expected_business_outcome",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [
+        {
+          "message": "Evaluator actor: purchase stopped before confirmation without handoff"
+        }
+      ],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\40-pedido_confirmado_handoff_operaciones\\case-report.json"
+    },
+    {
+      "id": "41-real_supermarket_saludo_solo_domicilio",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "REVIEW"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 2,
+          "severity": "P2",
+          "reason": "El cliente pide confirmar sabores y presentaciones disponibles; el agente dice no tener el listado y no ofrece alternativas ni aclara qué categorías puede consultar, dejando la necesidad sin atender.",
+          "evidence": "Aún no tengo el listado completo de sabores y presentaciones a la mano, así que prefiero no darte datos a medias."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\41-real_supermarket_saludo_solo_domicilio\\case-report.json"
+    },
+    {
+      "id": "42-real_supermarket_pago_tarjeta_es_preferencia",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\42-real_supermarket_pago_tarjeta_es_preferencia\\case-report.json"
+    },
+    {
+      "id": "43-real_supermarket_correccion_sin_producto",
+      "status": "evaluator_error",
+      "termination": "customer_finished",
+      "failedChecks": [
+        {
+          "name": "expected_business_outcome",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [
+        {
+          "message": "Evaluator actor: purchase stopped before confirmation without handoff"
+        }
+      ],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\43-real_supermarket_correccion_sin_producto\\case-report.json"
+    },
+    {
+      "id": "44-real_supermarket_agrega_producto_a_canasta",
+      "status": "passed",
+      "termination": "order_created",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\44-real_supermarket_agrega_producto_a_canasta\\case-report.json"
+    },
+    {
+      "id": "45-real_supermarket_valor_calchichon_coca",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "human_task_with_context",
+          "severity": "P1"
+        },
+        {
+          "name": "human_snapshot_not_empty",
+          "severity": "P1"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P1",
+          "reason": "El cliente pidió '5000 de calchichón' (monto/peso), pero el agente ofreció la opción porcionada como precio unitario $5.000 sin aclarar que se trata de una porción al peso de $5.000; presenta el monto pedido como si fuera una unidad de precio fijo, lo que puede alterar la cantidad/medida solicitada.",
+          "evidence": "Salchichon Zenú porcionado porcion al peso, Precio unitario de Salchichon Zenú porcionado porcion al peso: $ 5.000"
+        },
+        {
+          "turn": 2,
+          "severity": "P1",
+          "reason": "El agente cierra el pedido con subtotal/total sin aclarar la variante de cantidad del salchichón (porción al peso de $5.000 vs unidad) ni confirmar la dirección de entrega, y ofrece pasar a pago sin confirmación explícita del pedido.",
+          "evidence": "Subtotal de productos: $ 8.200 y Domicilio: $ 0, para un Total: $ 8.200. ¿Te ayudo con algo más o quieres que te cuente cómo pagar?"
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\45-real_supermarket_valor_calchichon_coca\\case-report.json"
+    },
+    {
+      "id": "46-real_supermarket_foto_producto_handoff",
+      "status": "failed_functional",
+      "termination": "customer_finished",
+      "failedChecks": [
+        {
+          "name": "handoff_attachment_preserved",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\46-real_supermarket_foto_producto_handoff\\case-report.json"
+    },
+    {
+      "id": "47-real_supermarket_reclamo_faltante_handoff",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\47-real_supermarket_reclamo_faltante_handoff\\case-report.json"
+    },
+    {
+      "id": "48-real_supermarket_comprobante_pago_aprobacion",
+      "status": "passed",
+      "termination": "customer_finished",
+      "failedChecks": [],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\48-real_supermarket_comprobante_pago_aprobacion\\case-report.json"
+    },
+    {
+      "id": "49-real_supermarket_no_hay_ponque_escalamiento",
+      "status": "needs_review",
+      "termination": "turn_budget_exhausted",
+      "failedChecks": [
+        {
+          "name": "conversation_reached_terminal",
+          "severity": "REVIEW"
+        },
+        {
+          "name": "semantic_conversation",
+          "severity": "P1"
+        }
+      ],
+      "issues": [
+        {
+          "turn": 1,
+          "severity": "P1",
+          "reason": "El agente inventa un costo de domicilio y un mínimo de productos de $0 que no están respaldados por el contexto de la tienda (deliveryPolicy no se lee como tarifa real; además el escenario no aporta esos datos). Presenta cifras de domicilio/mínimo sin evidencia válida.",
+          "evidence": "El domicilio tiene un costo de Domicilio: $ 0 y el mínimo de productos para domicilio es Mínimo de productos para domicilio: $ 0."
+        },
+        {
+          "turn": 1,
+          "severity": "P2",
+          "reason": "El agente ofrece dos presentaciones de Chocoramo y pregunta cuál y cuántas, cuando el cliente ya dijo '3 chocorramos'. Preguntar la presentación es correcto, pero preguntar la cantidad repite un dato ya expresado (3).",
+          "evidence": "¿Cuál de las dos quieres y cuántas?"
+        },
+        {
+          "turn": 2,
+          "severity": "P1",
+          "reason": "El agente afirma un importe de línea y subtotal ($8.400) para 3 Chocoramo de 65 g sin que el cliente haya confirmado precio ni sin que se haya cotizado antes; el precio unitario ($2.800) no fue comunicado en el turno. Se presenta un subtotal no sustentado en el diálogo.",
+          "evidence": "Importe de línea de Ponque Chocoramo 65 g (3 unidades): $ 8.400, que es el Subtotal de productos: $ 8.400."
+        },
+        {
+          "turn": 2,
+          "severity": "P2",
+          "reason": "El agente vuelve a afirmar domicilio $0 y mínimo $0 sin respaldo, repitiendo datos no verificados.",
+          "evidence": "El Domicilio: $ 0 y el Mínimo de productos para domicilio: $ 0."
+        }
+      ],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\49-real_supermarket_no_hay_ponque_escalamiento\\case-report.json"
+    },
+    {
+      "id": "50-real_supermarket_confirmacion_solo_eso",
+      "status": "failed_functional",
+      "termination": "order_created",
+      "failedChecks": [
+        {
+          "name": "turn_3_ack",
+          "severity": "P1"
+        },
+        {
+          "name": "turn_5_ack",
+          "severity": "P1"
+        }
+      ],
+      "issues": [],
+      "errors": [],
+      "evidence": "batch-39-50\\20261104223933_1e8ea460\\cases\\50-real_supermarket_confirmacion_solo_eso\\case-report.json"
+    }
+  ]
+}

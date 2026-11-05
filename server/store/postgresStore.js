@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { createSeedState } from '../data/seed.js';
@@ -10,6 +11,7 @@ import { ensureUsageState } from '../services/usageService.js';
 import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
+import { assertDeliveryPricing, deliveryPolicyRevision } from '../domain/deliveryPolicy.js';
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +28,7 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
+    this.inboundWrites = new Set();
     this.snapshotSaveTimer = null;
     this.snapshotSaveDeferred = null;
     this.snapshotSaving = false;
@@ -284,7 +287,8 @@ export class PostgresStore {
           const currentPayload = current.rows[0]?.payload ?? {};
           const sameWrite = Number(current.rows[0]?.version ?? -1) === Number(order.version ?? 0)
             && currentPayload.status === order.status
-            && currentPayload.updatedAt === order.updatedAt;
+            && currentPayload.updatedAt === order.updatedAt
+            && sameOrderCommercialSnapshot(currentPayload, order);
           if (!sameWrite) {
             const error = new Error('El pedido fue actualizado por otro operador. Recarga la cola e inténtalo de nuevo.');
             error.code = 'order_version_conflict';
@@ -301,21 +305,61 @@ export class PostgresStore {
   // PostgreSQL is the operational source of truth. The order state and its
   // external projection must commit together so a Sheets outage can be retried
   // without ever losing a confirmed order.
-  persistOrderWithOutbox(tenantId, orderId, entries = []) {
+  persistNewOrderWithOutbox(order, entries = []) {
+    return this.persistOrderWithOutbox(order.tenantId, order.id, entries, { newOrder: structuredClone(order) });
+  }
+
+  persistOrderWithOutbox(tenantId, orderId, entries = [], { newOrder = null } = {}) {
     return this.queueWrite(async () => {
-      const order = (this.getState().ordersByTenant?.[tenantId] ?? []).find((item) => item.id === orderId);
+      const order = newOrder ?? (this.getState().ordersByTenant?.[tenantId] ?? []).find((item) => item.id === orderId);
       if (!order) return;
       const client = await this.pool.connect();
+      let isNewOrder = Boolean(newOrder);
       try {
         await client.query('BEGIN');
+        if (order.pricing !== undefined) {
+          // Configuration writes update this same tenant row. Keep its lock
+          // through the order + outbox commit, closing the read/write race.
+          const tenantResult = await client.query('SELECT payload FROM tenants WHERE id = $1 FOR UPDATE', [tenantId]);
+          const existing = await client.query('SELECT id FROM orders WHERE id = $1 AND tenant_id = $2', [orderId, tenantId]);
+          isNewOrder = existing.rows.length === 0;
+          // Historical status/projection updates retain their original quote
+          // even when the tenant has since changed delivery conditions.
+          if (isNewOrder) {
+            const tenant = tenantResult.rows[0]?.payload;
+            if (!tenant || order.pricing?.tenantId !== tenantId
+              || order.pricing.policyRevision !== deliveryPolicyRevision(tenant)) {
+              if (tenant) {
+                const index = this.getState().tenants.findIndex((item) => item.id === tenantId);
+                if (index >= 0) this.getState().tenants[index] = tenant;
+              }
+              throw Object.assign(new Error('La política de domicilio cambió. Se requiere una nueva cotización.'),
+                { code: 'delivery_policy_revision_conflict', statusCode: 409 });
+            }
+            assertDeliveryPricing(order.pricing);
+          }
+        }
         await persistOrderOnClient(client, tenantId, orderId, order);
         for (const entry of entries) await insertOutboxEntry(client, entry);
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK');
+        if (isNewOrder && !newOrder) {
+          // Also clean up callers using the older in-memory insertion path,
+          // before a queued snapshot can resurrect the rejected order.
+          const state = this.getState();
+          state.ordersByTenant[tenantId] = (state.ordersByTenant?.[tenantId] ?? []).filter((item) => item.id !== orderId);
+        }
         throw error;
       } finally {
         client.release();
+      }
+      if (newOrder) {
+        this.mutate((state) => {
+          state.ordersByTenant ??= {};
+          state.ordersByTenant[tenantId] ??= [];
+          if (!state.ordersByTenant[tenantId].some((item) => item.id === orderId)) state.ordersByTenant[tenantId].unshift(order);
+        });
       }
     }, 'order and outbox write');
   }
@@ -420,7 +464,9 @@ export class PostgresStore {
     if (!normalized?.messageId || !normalized?.tenantId) {
       throw new Error('Inbound messages require messageId and tenantId');
     }
-    return this.queueWrite(async () => {
+    // Inbound/outbox are authoritative tables, not mirrors of app_state. Their
+    // atomic insert must not wait for the unrelated full-state snapshot queue.
+    return this.runInboundWrite(async () => {
       const client = await this.pool.connect();
       const now = new Date().toISOString();
       const entry = createInboundOutboxEntry(normalized, now);
@@ -457,7 +503,7 @@ export class PostgresStore {
       } finally {
         client.release();
       }
-    }, 'inbound message enqueue');
+    });
   }
 
   async getInboundMessage(messageId) {
@@ -753,7 +799,15 @@ export class PostgresStore {
     return this.saveQueue;
   }
 
+  runInboundWrite(operation) {
+    const write = Promise.resolve().then(operation);
+    this.inboundWrites.add(write);
+    write.then(() => this.inboundWrites.delete(write), () => this.inboundWrites.delete(write));
+    return write;
+  }
+
   async flush() {
+    await Promise.all([...this.inboundWrites]);
     if (this.snapshotSaveTimer) {
       clearTimeout(this.snapshotSaveTimer);
       this.snapshotSaveTimer = null;
@@ -830,12 +884,18 @@ async function persistOrderOnClient(client, tenantId, orderId, order) {
   const currentPayload = current.rows[0]?.payload ?? {};
   const sameWrite = Number(current.rows[0]?.version ?? -1) === Number(order.version ?? 0)
     && currentPayload.status === order.status
-    && currentPayload.updatedAt === order.updatedAt;
+    && currentPayload.updatedAt === order.updatedAt
+    && sameOrderCommercialSnapshot(currentPayload, order);
   if (sameWrite) return;
   const error = new Error('El pedido fue actualizado por otro operador. Recarga la cola e inténtalo de nuevo.');
   error.code = 'order_version_conflict';
   error.statusCode = 409;
   throw error;
+}
+
+function sameOrderCommercialSnapshot(current, next) {
+  return current.pricing === undefined || ['pricing', 'paymentMethod', 'delivery', 'items', 'subtotal']
+    .every((field) => isDeepStrictEqual(current[field], next[field]));
 }
 
 function insertOutboxEntry(executor, entry) {
@@ -1611,7 +1671,14 @@ async function upsertOrder(client, tenantId, order, { strictVersion = false, thr
           version = EXCLUDED.version,
           payload = EXCLUDED.payload,
           updated_at = EXCLUDED.updated_at
-      ${strictVersion ? 'WHERE orders.version < EXCLUDED.version' : ''}
+      WHERE ${strictVersion ? 'orders.version < EXCLUDED.version AND' : ''}
+        (NOT (orders.payload ? 'pricing') OR (
+          orders.payload->'pricing' IS NOT DISTINCT FROM EXCLUDED.payload->'pricing'
+          AND orders.payload->'paymentMethod' IS NOT DISTINCT FROM EXCLUDED.payload->'paymentMethod'
+          AND orders.payload->'delivery' IS NOT DISTINCT FROM EXCLUDED.payload->'delivery'
+          AND orders.payload->'items' IS NOT DISTINCT FROM EXCLUDED.payload->'items'
+          AND orders.payload->'subtotal' IS NOT DISTINCT FROM EXCLUDED.payload->'subtotal'
+        ))
       RETURNING id
     `,
     [

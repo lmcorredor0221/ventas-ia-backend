@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { evaluateDeliveryPolicy, normalizeDeliveryAmount, assertDeliveryPricing } from '../domain/deliveryPolicy.js';
+import { sanitizeOwnerConfigPatch, sanitizeAdminConfigPatch, mergeTenantConfig } from '../services/tenantConfigPolicy.js';
+const tenant = { id: 'a', config: { orderPolicy: { deliveryFee: 3000, deliveryMinimumSubtotal: 15000, paymentMethods: [{ id: 'cash', label: 'Efectivo' }] } } };
+const line = (price, quantity = 1) => ({ rawItemId: 'line', quantity, product: { sku: 'p', price, stock: 10 }, resolution: { status: 'resolved' } });
+const evaluate = (items, options = {}) => evaluateDeliveryPolicy({ tenant, items, delivery: true, ...options });
+const below = evaluate([line(10000)]);
+assert.equal(below.subtotal, 10000); assert.equal(below.total, 13000); assert.equal(below.shortfall, 5000);
+assert.equal(below.status, 'below_minimum'); assert.throws(() => assertDeliveryPricing(below));
+assert.equal(evaluate([line(12000)], { tenant: { id: 'a', config: { orderPolicy: { deliveryFee: 5000, deliveryMinimumSubtotal: 15000 } } } }).canConfirm, false, 'Fee cannot satisfy minimum');
+const exact = evaluate([line(15000)]); assert.equal(exact.total, 18000); assertDeliveryPricing(exact);
+assert.equal(evaluate([line(15000, 2)]).total, 33000, 'Charge once per order');
+const unknown = evaluate([line(10000)], { tenant: { id: 'b' } });
+assert.equal(unknown.deliveryFee, null); assert.equal(unknown.total, null); assert.equal(unknown.status, 'configuration_incomplete');
+const free = evaluate([line(10000)], { tenant: { id: 'b', config: { orderPolicy: { deliveryFee: 0, deliveryMinimumSubtotal: 0 } } } });
+assert.equal(free.total, 10000); assert.equal(free.canConfirm, true);
+assert.equal(evaluate([line(10000)], { delivery: false }).total, 10000);
+assert.equal(evaluate([line(10000), { rawItemId: 'pending', quantity: 1 }]).status, 'basket_incomplete');
+const budgetOnly = { ...line(10000), quantity: null, budgetAmount: 5000 };
+assert.equal(evaluate([budgetOnly]).canConfirm, false, 'A spending request does not establish a sale unit or quantity');
+assert.equal(evaluate([budgetOnly]).total, null, 'Do not present a budget as a payable total');
+assert.equal(evaluate([budgetOnly]).subtotal, 0);
+assert.equal(evaluate([{ ...budgetOnly, quantity: 0.5 }]).canConfirm, false, 'No fractional sale contract exists for a catalog package');
+assert.equal(evaluate([{ ...budgetOnly, quantity: 1 }]).subtotal, 10000, 'An explicitly selected catalog unit uses its actual price');
+const resolution = { authorized: true, requestId: 'request', actorId: 'owner', tenantId: 'a', policyRevision: below.policyRevision,
+  basketRevision: below.basketRevision, minimumException: true };
+assert.equal(evaluate([line(10000)], { resolution }).status, 'exception_approved');
+assert.equal(evaluate([line(9000)], { resolution }).canConfirm, false, 'Changed basket invalidates exception');
+assert.equal(evaluate([line(10000)], { resolution: { ...resolution, tenantId: 'b' } }).canConfirm, false);
+assert.equal(evaluate([line(10000)], { resolution: { ...resolution, actorId: null } }).canConfirm, false);
+for (const value of [-1, 1.5, true, '', '3000', Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => normalizeDeliveryAmount(value));
+assert.equal(normalizeDeliveryAmount(0), 0); assert.equal(normalizeDeliveryAmount(null), null);
+for (const sanitize of [sanitizeOwnerConfigPatch, sanitizeAdminConfigPatch]) {
+  assert.deepEqual(sanitize({ orderPolicy: { deliveryFee: 0, deliveryMinimumSubtotal: null } }), { orderPolicy: { deliveryFee: 0, deliveryMinimumSubtotal: null } });
+  assert.throws(() => sanitize({ orderPolicy: { deliveryFee: -1 } }));
+}
+const updated = mergeTenantConfig(tenant.config, sanitizeOwnerConfigPatch({ orderPolicy: { deliveryFee: 4000 } }));
+assert.equal(updated.orderPolicy.deliveryMinimumSubtotal, 15000); assert.deepEqual(updated.orderPolicy.paymentMethods, tenant.config.orderPolicy.paymentMethods);
+assert.equal(tenant.config.orderPolicy.deliveryFee, 3000);
+console.log('PASS delivery arithmetic, boundaries, tenant isolation, exceptions and configuration contracts');

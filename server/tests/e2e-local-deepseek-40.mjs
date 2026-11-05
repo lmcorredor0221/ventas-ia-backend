@@ -1,3 +1,4 @@
+import { mergeCatalogProducts, resetScenarioCatalog } from './helpers/scenarioCatalog.js';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -7,10 +8,15 @@ import pg from 'pg';
 import { fileURLToPath } from 'node:url';
 import { colombiaAgentScenarioSet } from './fixtures/colombiaAgentScenarios.js';
 import { colombiaCatalogTestSeed300 } from '../data/colombiaCatalogExpansion.js';
+import { contextualAcceptanceScenarios, contextualAcceptanceVersion } from './fixtures/contextualAcceptanceScenarios.js';
+import { runContextualScenario } from './helpers/contextualScenarioRunner.js';
 
 const { Pool } = pg;
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const officialScenarios = colombiaAgentScenarioSet.slice(0, 40);
+const contextual = process.env.E2E_CAMPAIGN === 'contextual50';
+const allScenarios = contextual ? contextualAcceptanceScenarios : colombiaAgentScenarioSet.slice(0, 40);
+const selectedCases = (process.env.E2E_CASE_IDS ?? '').split(',').filter(Boolean);
+const officialScenarios = allScenarios.filter((s, i) => !selectedCases.length || selectedCases.includes(s.id) || selectedCases.includes(String(i + 1)));
 const runId = createRunId();
 const resultRoot = path.resolve(rootDir, process.env.E2E_RESULT_DIR ?? 'test-results/e2e-local', runId);
 const maxCaseDurationMs = positiveInt(process.env.E2E_MAX_CASE_DURATION_MS, 90_000);
@@ -28,6 +34,8 @@ let cloneInfo = null;
 let graphOutbound = [];
 let blockedNetwork = [];
 let deepSeekCalls = 0;
+const providerRequests = [];
+let currentCase = 'meta-contracts';
 
 try {
   validateEnvironment();
@@ -35,6 +43,7 @@ try {
   sourceFingerprintBefore = await fingerprintDatabase(sourceDatabaseUrl);
   cloneInfo = await cloneDatabase();
   const cloneDatabaseUrl = databaseUrlForClone(sourceDatabaseUrl, cloneInfo.targetDatabase);
+  await freezeCopiedJobs(cloneDatabaseUrl);
 
   configureRuntimeEnvironment(cloneDatabaseUrl);
   installNetworkCapture();
@@ -67,13 +76,22 @@ try {
       await writeCaseReport(blocked);
       continue;
     }
-    const report = await runScenario({ index, scenario, meta, runtime, shadow });
+    currentCase = scenario.id;
+    const report = contextual
+      ? await runContextualScenario({ scenario, meta, runtime, shadow, runId, graphOutbound, resetCatalog: resetScenarioCatalog,
+        seedCustomer: seedKnownCustomer, drain: drainUntilInbound, shopkeeper: runShopkeeperWorkflow, summarizeLlm: summarizeLlmEvents })
+      : await runScenario({ index: allScenarios.indexOf(scenario), scenario, meta, runtime, shadow });
     caseReports.push(report);
     await writeCaseReport(report);
+    console.log(`${scenario.number ?? index + 1}: ${scenario.id}: ${report.status} (${report.steps.length} turnos)`);
   }
 
   const confirmedCase = caseReports.find((item) => item.orderId && item.status !== 'infra_error');
-  const shopkeeperReport = confirmedCase
+  const shopkeeperReport = contextual ? {
+    status: caseReports.filter((r) => r.shopkeeper).length && caseReports.filter((r) => r.shopkeeper).every((r) => r.shopkeeper.status === 'passed') ? 'passed' : 'blocked',
+    perCase: caseReports.filter((r) => r.shopkeeper).map((r) => r.shopkeeper),
+    assertions: caseReports.flatMap((r) => r.shopkeeper?.assertions ?? []),
+  } : confirmedCase
     ? await runShopkeeperWorkflow({ baseUrl, meta, runtime, shadow, orderId: confirmedCase.orderId, caseId: confirmedCase.caseId })
     : { status: 'blocked', assertions: [{ name: 'pedido_confirmado', passed: false, detail: 'Ningun escenario genero pedido confirmado.' }] };
 
@@ -87,7 +105,7 @@ try {
   if (!sameFingerprint(sourceFingerprintBefore, sourceFingerprintAfter)) {
     throw new Error('La huella de ventas_ia_dev cambio durante la corrida. Revise la evidencia antes de reutilizar la fuente.');
   }
-  if (!summary.acceptance.readyForPilot) process.exitCode = 1;
+  if (contextual ? caseReports.some((r) => r.status !== 'passed') : !summary.acceptance.readyForPilot) process.exitCode = 1;
 } catch (error) {
   await fs.mkdir(resultRoot, { recursive: true }).catch(() => {});
   await writeJson(path.join(resultRoot, 'fatal-error.json'), sanitize({
@@ -116,7 +134,9 @@ function validateEnvironment() {
   if (process.env.WHATSAPP_PROVIDER_MODE && process.env.WHATSAPP_PROVIDER_MODE !== 'live') {
     throw new Error('WHATSAPP_PROVIDER_MODE debe ser live para validar el contrato Graph capturado.');
   }
-  if (officialScenarios.length !== 40) throw new Error(`La matriz oficial debe contener 40 casos y contiene ${officialScenarios.length}.`);
+  if (!['legacy40', 'contextual50'].includes(process.env.E2E_CAMPAIGN ?? 'legacy40')) throw new Error('Unknown E2E_CAMPAIGN');
+  if (!officialScenarios.length || selectedCases.some((id) => !allScenarios.some((s, i) => s.id === id || String(i + 1) === id))) throw new Error('Unknown E2E_CASE_IDS');
+  if (contextual && catalogReferenceFixture !== 'colombia300') throw new Error('Acceptance v2 requires E2E_CATALOG_REFERENCE_FIXTURE=colombia300');
   if (!['none', 'colombia300'].includes(catalogReferenceFixture)) {
     throw new Error('E2E_CATALOG_REFERENCE_FIXTURE solo permite none o colombia300.');
   }
@@ -161,6 +181,17 @@ function databaseUrlForClone(sourceUrl, targetDatabase) {
   return target.toString();
 }
 
+async function freezeCopiedJobs(databaseUrl) {
+  const target = new URL(databaseUrl);
+  if (!isLoopback(target.hostname) || target.pathname !== `/${cloneInfo.targetDatabase}` || !target.pathname.startsWith('/ventas_ia_e2e_')) throw new Error('Invalid disposable clone');
+  const pool = new Pool({ connectionString: databaseUrl, ssl: false });
+  try {
+    const active = await pool.query("SELECT id,kind,status FROM integration_outbox WHERE status IN ('pending','retrying','processing')");
+    await writeJson(path.join(resultRoot, 'excluded-copied-jobs.json'), { reason: 'Historical jobs copied from development; not part of this campaign', entries: active.rows });
+    await pool.query("UPDATE integration_outbox SET status='failed', locked_at=NULL, last_error='Excluded copied job in disposable E2E clone' WHERE status IN ('pending','retrying','processing')");
+  } finally { await pool.end(); }
+}
+
 function installNetworkCapture() {
   const deepSeekOrigin = new URL(process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com').origin;
   global.fetch = async (input, options = {}) => {
@@ -172,6 +203,8 @@ function installNetworkCapture() {
         at: new Date().toISOString(),
         url: `${parsed.origin}${parsed.pathname}`,
         to: maskPhone(body.to),
+        recipientKey: String(body.to ?? '').replace(/\D/g, ''),
+        caseKey: currentCase,
         type: body.type ?? 'text',
         text: body.text?.body ?? body.interactive?.body?.text ?? '',
         interactive: body.interactive ? sanitize(body.interactive) : null,
@@ -180,9 +213,25 @@ function installNetworkCapture() {
       return jsonResponse({ messaging_product: 'whatsapp', messages: [{ id: `wamid.e2e.${graphOutbound.length}` }] });
     }
     if (parsed.origin === deepSeekOrigin) {
+      if (deepSeekCalls >= maxDeepSeekCalls) throw new Error(`Se alcanzo E2E_MAX_DEEPSEEK_CALLS=${maxDeepSeekCalls}.`);
       deepSeekCalls += 1;
-      if (deepSeekCalls > maxDeepSeekCalls) throw new Error(`Se alcanzo E2E_MAX_DEEPSEEK_CALLS=${maxDeepSeekCalls}.`);
-      return originalFetch(input, options);
+      const headers = new Headers(options.headers);
+      const role = headers.get('x-e2e-role') ?? 'application';
+      headers.delete('x-e2e-role');
+      const trace = { sequence: deepSeekCalls, caseId: currentCase, role, startedAt: new Date().toISOString(), usage: null };
+      providerRequests.push(trace);
+      const started = Date.now();
+      try {
+        const response = await originalFetch(input, { ...options, headers });
+        trace.status = response.status;
+        const data = await response.clone().json().catch(() => ({}));
+        trace.usage = data.usage ?? null;
+        trace.providerRequestId = data.id ?? null;
+        trace.model = data.model ?? null;
+        trace.finishReason = data.choices?.[0]?.finish_reason ?? null;
+        return response;
+      } catch (error) { trace.error = error.name; throw error; }
+      finally { trace.durationMs = Date.now() - started; }
     }
     if (isLoopback(parsed.hostname)) return originalFetch(input, options);
     blockedNetwork.push({ url: `${parsed.origin}${parsed.pathname}`, method: options.method ?? 'GET' });
@@ -219,6 +268,9 @@ async function createShadowTenant(store, { baselineTenantId, runId: testRunId, c
     catalogRange: 'Catalogo!A1:P1000',
   };
   shadow.config.agentPolicy = { ...(shadow.config.agentPolicy ?? {}), tone: 'tendero_colombiano', responseLanguage: 'es-CO' };
+  // Historical scenarios explicitly model free delivery without a minimum;
+  // unknown conditions are tested separately, never inferred as zero.
+  shadow.config.orderPolicy = { ...(shadow.config.orderPolicy ?? {}), deliveryFee: 0, deliveryMinimumSubtotal: 0 };
   shadow.config.saas = {
     ...(shadow.config.saas ?? {}),
     enforceEntitlement: false,
@@ -274,32 +326,6 @@ async function createShadowTenant(store, { baselineTenantId, runId: testRunId, c
     baseCatalog,
     tenantName: shadow.name,
   };
-}
-
-function mergeCatalogProducts(products = []) {
-  const bySku = new Map();
-  for (const product of products) {
-    if (!product?.sku) continue;
-    bySku.set(product.sku, structuredClone(product));
-  }
-  return [...bySku.values()];
-}
-
-async function resetScenarioCatalog(store, shadow, extraProducts = []) {
-  const catalog = mergeCatalogProducts([...shadow.baseCatalog, ...extraProducts]);
-  // The tenant and the database already belong to this run's disposable clone.
-  // Replacing its catalog before each scenario prevents products introduced for
-  // one case from changing another case's candidate set.
-  store.mutate((state) => {
-    state.productsByTenant ??= {};
-    state.productsByTenant[shadow.tenantId] = structuredClone(catalog);
-  });
-  await store.pool.query('DELETE FROM products WHERE tenant_id = $1', [shadow.tenantId]);
-  await store.flush();
-  const persisted = await store.listProducts(shadow.tenantId);
-  if (persisted.length !== catalog.length) {
-    throw new Error(`El catalogo aislado E2E no se pudo restaurar: esperado=${catalog.length}, persistido=${persisted.length}.`);
-  }
 }
 
 async function runMetaContracts({ meta, runtime, shadow }) {
@@ -536,7 +562,7 @@ function buildSemanticEvidence({ plan, conversation, events, responseMessages })
     }))),
     resolutionSets: sanitize(catalogEvents.map((event) => ({
       rawItemId: event.metadata?.rawItemId ?? null,
-      status: event.metadata?.decision ?? null,
+      status: event.metadata?.resolutionStatus ?? event.metadata?.decision ?? null,
       reason: event.metadata?.reason ?? null,
       selectedSku: event.metadata?.selectedSku ?? null,
     }))),
@@ -672,9 +698,10 @@ async function runShopkeeperWorkflow({ baseUrl, meta, runtime: activeRuntime, sh
     const dispatchOutbounds = graphOutbound.slice(report.outboundBefore);
     report.assertions.push(assertion('cliente_recibe_aviso_en_camino', dispatchOutbounds.some((item) => /en camino/i.test(item.text)), JSON.stringify(dispatchOutbounds)));
     report.assertions.push(assertion('conversacion_cerrada_al_despachar', ['completed', 'resolved'].includes(conversation?.caseStatus ?? conversation?.status), `${conversation?.caseStatus}/${conversation?.status}`));
-    const next = await meta.sendText({ messageId: `wamid.${runId}.post-dispatch`, waId: conversation.waId, profileName: 'Cliente E2E nuevo pedido', text: 'Buenas, me regalas un chocorramo?' });
+    const nextId = `wamid.${runId}.${caseId}.post-dispatch`;
+    const next = await meta.sendText({ messageId: nextId, waId: conversation.waId, profileName: 'Cliente E2E nuevo pedido', text: 'Buenas, me regalas un chocorramo?' });
     report.assertions.push(assertion('nuevo_mensaje_aceptado', next.body.queued === true, JSON.stringify(next.body)));
-    const inbound = await drainUntilInbound(activeRuntime, `wamid.${runId}.post-dispatch`, maxCaseDurationMs);
+    const inbound = await drainUntilInbound(activeRuntime, nextId, maxCaseDurationMs);
     const newerConversationId = inbound.result?.conversationId;
     report.assertions.push(assertion('nuevo_pedido_nueva_conversacion', newerConversationId !== conversation.id, `${conversation.id} -> ${newerConversationId}`));
   } catch (error) {
@@ -737,7 +764,8 @@ function textPayload({ messageId, waId, profileName, phoneNumberId, text, messag
 }
 
 function interactivePayload({ messageId, waId, profileName, phoneNumberId, option }) {
-  return { object: 'whatsapp_business_account', entry: [{ id: 'waba-e2e', changes: [{ field: 'messages', value: { metadata: { display_phone_number: '+1 555 202 4079', phone_number_id: phoneNumberId }, contacts: [{ profile: { name: profileName || 'Cliente E2E' }, wa_id: waId }], messages: [{ id: messageId, from: waId, timestamp: String(Math.floor(Date.now() / 1000)), type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: option.id, title: option.title } } }] } }] }] };
+  const kind = option.kind === 'list_reply' ? 'list_reply' : 'button_reply';
+  return { object: 'whatsapp_business_account', entry: [{ id: 'waba-e2e', changes: [{ field: 'messages', value: { metadata: { display_phone_number: '+1 555 202 4079', phone_number_id: phoneNumberId }, contacts: [{ profile: { name: profileName || 'Cliente E2E' }, wa_id: waId }], messages: [{ id: messageId, from: waId, timestamp: String(Math.floor(Date.now() / 1000)), type: 'interactive', interactive: { type: kind, [kind]: { id: option.id, title: option.title } } }] } }] }] };
 }
 
 function signatureFor(body) {
@@ -830,14 +858,25 @@ async function writeCaseReport(report) {
     '## Aserciones',
     ...report.assertions.map((item) => `- ${item.passed ? 'PASS' : 'FAIL'} ${item.name}: ${item.detail}`),
     ...(report.errors.length ? ['', '## Errores', ...report.errors.map((error) => `- ${error.message}`)] : []),
+    ...(report.dialogue ? ['', '## Conversación pública', ...report.dialogue.flatMap((turn) => [`\n**Cliente (${turn.turn}):** ${turn.customer}`, ...turn.outbound.map((m) => `\n**VIA:** ${m.text}`)])] : []),
   ].join('\n');
   await fs.writeFile(path.join(caseDir, 'case-report.md'), `${markdown}\n`, 'utf8');
 }
 
 async function writeEvidence({ shadow, metaContracts, caseReports, shopkeeperReport, summary }) {
+  const sourceFiles = (await fs.readdir(path.join(rootDir, 'server'), { recursive: true })).filter((file) => /\.(js|mjs|md)$/.test(file));
+  const sourceHash = crypto.createHash('sha256');
+  for (const file of sourceFiles.sort()) sourceHash.update(file).update(await fs.readFile(path.join(rootDir, 'server', file)));
+  await writeJson(path.join(resultRoot, 'provider-requests.json'), providerRequests);
   await writeJson(path.join(resultRoot, 'baseline-source.json'), { before: sourceFingerprintBefore, after: sourceFingerprintAfter, unchanged: sameFingerprint(sourceFingerprintBefore, sourceFingerprintAfter) });
   await writeJson(path.join(resultRoot, 'baseline-clone.json'), sanitize(cloneInfo));
-  await writeJson(path.join(resultRoot, 'run-manifest.json'), sanitize({ runId, generatedAt: new Date().toISOString(), baselineTenantId, shadow, deepSeekCalls, maxDeepSeekCalls, blockedNetwork, git: process.env.GITHUB_SHA ?? null }));
+  await writeJson(path.join(resultRoot, 'run-manifest.json'), sanitize({ runId, generatedAt: new Date().toISOString(), campaign: contextual ? 'contextual50-v2' : 'legacy40',
+    acceptanceVersion: contextual ? contextualAcceptanceVersion : 'legacy',
+    groundingEnabled: process.env.LLM_GROUNDING_ENABLED === 'true', selectedCases, sourceSha256: sourceHash.digest('hex'),
+    orderAuditEnabled: runtime.runtime.config.llmOrderAuditEnabled,
+    orderAuditTimeoutMs: runtime.runtime.config.llmOrderAuditTimeoutMs,
+    responseTargetMs: Number(process.env.E2E_RESPONSE_TARGET_MS ?? 8000),
+    catalogSha256: crypto.createHash('sha256').update(JSON.stringify(shadow.baseCatalog)).digest('hex'), baselineTenantId, shadow, deepSeekCalls, maxDeepSeekCalls, blockedNetwork, git: process.env.GITHUB_SHA ?? null }));
   await writeJson(path.join(resultRoot, 'meta-contracts.json'), metaContracts);
   await writeJson(path.join(resultRoot, 'shopkeeper-workflow.json'), sanitize(shopkeeperReport));
   await writeJson(path.join(resultRoot, 'summary.json'), sanitize(summary));
@@ -862,16 +901,27 @@ function buildSummary({ shadow, metaContracts, caseReports, shopkeeperReport }) 
   const functionalPassed = caseReports.filter((item) => ['passed', 'failed_functional'].includes(item.status)).length;
   const noExternalNetwork = blockedNetwork.length === 0;
   const timings = summarizeRunTimings(caseReports);
+  const responseTargetMs = Number(process.env.E2E_RESPONSE_TARGET_MS ?? 8000);
   const acceptance = {
     sourceUnchanged: sameFingerprint(sourceFingerprintBefore, sourceFingerprintAfter),
     deepSeekReal: caseReports.every((item) => item.steps.filter((step) => step.kind !== 'interactive_button_reply').every((step) => step.plan?.executionMode === 'provider_api')),
     noExternalNetwork,
-    contractP0Pass: contractFailures.length === 0,
-    functionalThreshold: passed >= 38 && functionalPassed === 40,
+    contractP0Pass: contractFailures.filter(a => (a.severity ?? 'P0') === 'P0').length === 0,
+    fullCampaign: caseReports.length === (contextual ? 50 : 40),
+    functionalThreshold: contextual ? passed === caseReports.length && caseReports.length > 0 : passed >= 38 && functionalPassed === 40,
     webhookAckP95UnderOneSecond: timings.webhookAckP95Ms !== null && timings.webhookAckP95Ms < 1_000,
-    processingP95WithinTarget: timings.workerProcessingP95Ms !== null && timings.workerProcessingP95Ms <= 10_000,
+    responseTargetMs,
+    processingP95WithinTarget: timings.receptionToLastOutboundP95Ms !== null && timings.receptionToLastOutboundP95Ms <= responseTargetMs,
+    allResponsesWithinTarget: timings.receptionToLastOutboundMaxMs !== null && timings.receptionToLastOutboundMaxMs <= responseTargetMs
+      && timings.turnsWithoutOutbound === 0,
   };
-  acceptance.readyForPilot = Boolean(acceptance.sourceUnchanged && acceptance.deepSeekReal && acceptance.noExternalNetwork && acceptance.contractP0Pass && acceptance.functionalThreshold && acceptance.webhookAckP95UnderOneSecond && acceptance.processingP95WithinTarget);
+  acceptance.readyForPilot = Boolean(acceptance.sourceUnchanged && acceptance.deepSeekReal && acceptance.noExternalNetwork && acceptance.contractP0Pass && acceptance.functionalThreshold && acceptance.webhookAckP95UnderOneSecond && acceptance.processingP95WithinTarget && acceptance.allResponsesWithinTarget);
+  if (contextual) {
+    acceptance.criticalRepetitionsComplete = false;
+    acceptance.extendedConcurrencyVariantsComplete = false;
+    acceptance.readyForPilot = false; // One campaign never proves the required three repeats and concurrency variants.
+    acceptance.deepSeekReal = providerRequests.some((r) => r.role === 'application' && r.status === 200);
+  }
   return {
     generatedAt: new Date().toISOString(),
     runId,
@@ -879,6 +929,14 @@ function buildSummary({ shadow, metaContracts, caseReports, shopkeeperReport }) 
     counts: { total: caseReports.length, passed, failed: caseReports.length - passed, byStatus: statusCounts, deepSeekCalls, blockedNetwork: blockedNetwork.length },
     timings,
     tokenUsage: summarizeTokenUsage(caseReports),
+    providerUsage: Object.fromEntries(['application', 'customer_actor', 'semantic_judge'].map((role) => {
+      const rows = providerRequests.filter((r) => r.role === role);
+      return [role, { requests: rows.length, withUsage: rows.filter((r) => r.usage).length,
+        unreported: rows.filter((r) => !r.usage).length,
+        inputTokens: rows.reduce((sum, r) => sum + (r.usage?.prompt_tokens ?? 0), 0),
+        outputTokens: rows.reduce((sum, r) => sum + (r.usage?.completion_tokens ?? 0), 0),
+        totalTokens: rows.reduce((sum, r) => sum + (r.usage?.total_tokens ?? 0), 0) }];
+    })),
     cases: caseReports.map((item) => ({ caseId: item.caseId, scenarioId: item.scenarioId, status: item.status, durationMs: item.durationMs })),
     metaContracts,
     shopkeeperWorkflow: shopkeeperReport,
@@ -895,7 +953,9 @@ function renderSummaryMarkdown(summary) {
     `Run: ${summary.runId}`,
     `Casos aprobados: ${summary.counts.passed}/${summary.counts.total}`,
     `Llamadas DeepSeek: ${summary.counts.deepSeekCalls}`,
-    `Tokens DeepSeek: ${summary.tokenUsage.totalTokens ?? 'N/D'} (${summary.tokenUsage.averageTokensPerCase ?? 'N/D'} por caso en promedio)`,
+    `Tokens de VIA (respuestas reales del proveedor): ${summary.providerUsage.application.totalTokens}; solicitudes sin usage: ${summary.providerUsage.application.unreported}.`,
+    `Tokens del comprador simulado: ${summary.providerUsage.customer_actor.totalTokens}; juez: ${summary.providerUsage.semantic_judge.totalTokens}. No son costo operativo de VIA.`,
+    `Tokens observados en eventos de la aplicación: ${summary.tokenUsage.totalTokens ?? 'N/D'} (separados del total de red).`,
     `p95 acuse webhook: ${summary.timings.webhookAckP95Ms ?? 'N/D'} ms`,
     `p95 procesamiento worker: ${summary.timings.workerProcessingP95Ms ?? 'N/D'} ms`,
     `Listo para piloto: ${acceptance.readyForPilot ? 'SI' : 'NO'}`,
@@ -906,7 +966,8 @@ function renderSummaryMarkdown(summary) {
     `- Sin red externa prohibida: ${acceptance.noExternalNetwork ? 'PASS' : 'FAIL'}`,
     `- Contratos P0: ${acceptance.contractP0Pass ? 'PASS' : 'FAIL'}`,
     `- p95 acuse < 1 s: ${acceptance.webhookAckP95UnderOneSecond ? 'PASS' : 'FAIL'}`,
-    `- p95 worker <= 10 s: ${acceptance.processingP95WithinTarget ? 'PASS' : 'FAIL'}`,
+    `- p95 recepción a última respuesta <= ${acceptance.responseTargetMs} ms: ${acceptance.processingP95WithinTarget ? 'PASS' : 'FAIL'}`,
+    `- Todas las respuestas <= ${acceptance.responseTargetMs} ms: ${acceptance.allResponsesWithinTarget ? 'PASS' : 'FAIL'}`,
     `- Umbral funcional: ${acceptance.functionalThreshold ? 'PASS' : 'FAIL'}`,
     '',
     '## Fallos',
@@ -930,9 +991,9 @@ function blockedCaseReport({ index, scenario, reason }) {
 
 function summarizeLlmEvents(events = []) {
   return events
-    .filter((event) => ['llm.plan.created', 'llm.reply.composed', 'llm.plan.fallback', 'llm.reply.fallback'].includes(event.type))
+    .filter((event) => ['llm.plan.created', 'llm.grounded_decision.created', 'llm.reply.composed', 'llm.reply.evidence_reviewed', 'llm.plan.fallback', 'llm.reply.fallback'].includes(event.type))
     .map((event) => ({
-      stage: event.type.includes('.plan.') ? 'planner' : 'composer',
+      stage: event.type === 'llm.reply.evidence_reviewed' ? 'composer_evidence_review' : event.type === 'llm.grounded_decision.created' ? 'grounding' : event.type.includes('.plan.') ? 'planner' : 'composer',
       event: event.type,
       durationMs: Number(event.metadata?.durationMs ?? 0) || null,
       provider: event.metadata?.providerMetadata?.provider ?? event.metadata?.provider ?? null,
@@ -943,11 +1004,22 @@ function summarizeLlmEvents(events = []) {
 
 function summarizeRunTimings(caseReports = []) {
   const steps = caseReports.flatMap((report) => report.steps ?? []);
+  const totals = steps.map(step => {
+    const first = step.outbound?.[0], last = step.outbound?.at(-1);
+    return first && last && Number.isFinite(step.timing?.receptionToOutboundMs)
+      ? step.timing.receptionToOutboundMs + Date.parse(last.at) - Date.parse(first.at) : null;
+  }).filter(Number.isFinite);
   return {
+    receptionToLastOutboundP95Ms: percentile(totals),
+    receptionToLastOutboundMaxMs: totals.length ? Math.max(...totals) : null,
+    responsesOverTarget: totals.filter(ms => ms > Number(process.env.E2E_RESPONSE_TARGET_MS ?? 8000)).length,
+    turnsWithoutOutbound: steps.length - totals.length,
     webhookAckP95Ms: percentile(steps.map((step) => step.timing?.webhookAckMs)),
     workerProcessingP95Ms: percentile(steps.map((step) => step.timing?.workerProcessingMs)),
     plannerP95Ms: percentile(steps.flatMap((step) => (step.timing?.llm ?? []).filter((item) => item.stage === 'planner').map((item) => item.durationMs))),
     composerP95Ms: percentile(steps.flatMap((step) => (step.timing?.llm ?? []).filter((item) => item.stage === 'composer').map((item) => item.durationMs))),
+    catalogReviewP95Ms: percentile(steps.flatMap((step) => (step.timing?.llm ?? []).filter((item) => item.stage === 'composer_evidence_review').map((item) => item.durationMs))),
+    groundingP95Ms: percentile(steps.flatMap((step) => (step.timing?.llm ?? []).filter((item) => item.stage === 'grounding').map((item) => item.durationMs))),
   };
 }
 
@@ -958,7 +1030,7 @@ function summarizeTokenUsage(caseReports = []) {
     .map((item) => ({ stage: item.stage, total: Number(item.usage?.total_tokens ?? item.usage?.totalTokens) }))
     .filter((item) => Number.isFinite(item.total) && item.total >= 0);
   const totalTokens = calls.reduce((sum, item) => sum + item.total, 0);
-  const perStage = Object.fromEntries(['planner', 'composer'].map((stage) => {
+  const perStage = Object.fromEntries(['planner', 'grounding', 'composer', 'composer_evidence_review'].map((stage) => {
     const selected = calls.filter((item) => item.stage === stage);
     const total = selected.reduce((sum, item) => sum + item.total, 0);
     return [stage, { calls: selected.length, totalTokens: total, averageTokensPerCall: selected.length ? Math.round(total / selected.length) : null }];

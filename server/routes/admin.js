@@ -247,7 +247,7 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
     }
   });
 
-  router.patch('/tenants/:tenantId/config', (req, res, next) => {
+  router.patch('/tenants/:tenantId/config', async (req, res, next) => {
     try {
       const tenantId = req.params.tenantId;
       const configPatch = sanitizeAdminConfigPatch(req.body ?? {});
@@ -257,6 +257,7 @@ export function createAdminRouter({ store, usage, auth, controlPlane }) {
         if (tenant) tenant.config = mergeTenantConfig(tenant.config, configPatch);
       });
       if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+      await store.persistTenantCritical?.(tenantId);
       auth.recordTenantAction(req, {
         tenantId,
         action: 'tenant.config.admin_update',

@@ -109,12 +109,12 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     try {
       const request = store.getState().pendingRequests.find((item) => item.id === req.params.id);
       if (request) auth.authorizeTenant(req, request.tenantId, { roles: ['owner', 'operator'] });
-      const resolved = await runtime.resolveHumanRequest(req.params.id, req.body ?? {});
+      const resolved = await runtime.resolveHumanRequest(req.params.id, { ...(req.body ?? {}), approverId: req.auth?.user?.id ?? 'local-owner' });
       auth.recordTenantAction(req, {
         tenantId: resolved.tenantId,
         action: 'pending_request.resolve',
         resource: req.params.id,
-        metadata: { outcome: req.body?.outcome, approverId: req.body?.approverId, responseMode: req.body?.responseMode },
+        metadata: { outcome: req.body?.outcome, approverId: req.auth?.user?.id ?? 'local-owner', responseMode: req.body?.responseMode },
       });
       res.json(resolved);
     } catch (error) {
@@ -171,6 +171,8 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
           ...tenantOrders.filter((order) => ['delivered', 'cancelled'].includes(order.status)).slice(0, 200),
         ],
         pendingRequests,
+        paymentNotices: allConversations.flatMap(c => c.paymentNotices ?? [])
+          .filter(n => n.tenantId === tenantId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
         events: filteredEvents,
         usage: usageSummary,
         tools: deriveTenantToolStatuses(state, tenantId),
@@ -188,7 +190,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
     }
   });
 
-  router.patch('/tenants/:tenantId/config', (req, res, next) => {
+  router.patch('/tenants/:tenantId/config', async (req, res, next) => {
     try {
     auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
     const configPatch = sanitizeOwnerConfigPatch(req.body ?? {});
@@ -199,6 +201,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, control
       tenant.config = mergeTenantConfig(tenant.config, configPatch);
     });
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    await store.persistTenantCritical?.(tenant.id);
     events.emit({ type: 'tool.binding.changed', tenantId: tenant.id, detail: 'Tenant configuration updated' });
     auth.recordTenantAction(req, {
       tenantId: tenant.id,
@@ -362,6 +365,7 @@ function filterTenantScoped(records, scope) {
 
 function enrichPendingRequests(requests, state) {
   return requests.map((request) => {
+    if (request.action === 'delivery_policy_review' || request.contextSnapshot?.action === 'delivery_policy_review') return request;
     if (request.contextSnapshot?.items?.length || request.context_snapshot?.items?.length) return request;
     const title = String(request.title ?? '').toLowerCase();
     const looksLikeDelivery = request.assignedTeam === 'operaciones' || title.includes('pedido') || title.includes('domicilio');
@@ -378,6 +382,7 @@ function enrichPendingRequests(requests, state) {
         action: 'prepare_delivery_order',
         orderId: order.id,
         subtotal: order.subtotal,
+        pricing: order.pricing ?? null,
         customerName: order.customerName,
         customerWaId: order.waId,
         deliveryAddress: order.deliveryAddress ?? 'Dirección pendiente por confirmar',

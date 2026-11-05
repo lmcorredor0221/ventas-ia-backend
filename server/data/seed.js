@@ -21,8 +21,8 @@ export function createSeedState() {
         },
         googleSheets: {
           spreadsheetIdRef: `${tenant.id.toUpperCase()}_CATALOG_SPREADSHEET_ID_REF`,
-          range: 'Catalogo!A1:P1000',
-          catalogRange: 'Catalogo!A1:P1000',
+          range: 'Catalogo!A1:Q1000',
+          catalogRange: 'Catalogo!A1:Q1000',
           customerProfilesRange: 'Clientes!A1:F500',
           ordersRange: 'Pedidos!A1:K500',
           primaryKey: 'sku',
@@ -46,6 +46,10 @@ export function createSeedState() {
           allowedTasks: ['intent_classification', 'order_parser', 'tool_router', 'response_composer'],
         },
         orderPolicy: {
+          // Only this historical test fixture explicitly offers free delivery without a minimum.
+          // New tenants and other fixtures remain unknown; this is not a global commercial default.
+          deliveryFee: tenant.id === 'andina' ? 0 : null,
+          deliveryMinimumSubtotal: tenant.id === 'andina' ? 0 : null,
           customerIdentifier: 'whatsapp_wa_id',
           customerRequiredFields: ['name', 'defaultAddress'],
           missingQuantity: 'ask',

@@ -19,6 +19,7 @@ export function normalizeOpsOverview(payload) {
     conversationHistory: Array.isArray(value.conversationHistory) ? value.conversationHistory : [],
     orders: Array.isArray(value.orders) ? value.orders.map(normalizeOrder).filter(Boolean) : [],
     pendingRequests: Array.isArray(value.pendingRequests) ? value.pendingRequests : [],
+    paymentNotices: Array.isArray(value.paymentNotices) ? value.paymentNotices : [],
     events: Array.isArray(value.events) ? value.events : [],
   };
 }

@@ -1,0 +1,4228 @@
+{
+  "generatedAt": "2026-11-05T04:07:47.699Z",
+  "runId": "20261105032251_b3b38c96",
+  "sourceSha256": "87b42702a39fb407ce17bcc0b48862dde1d86facbfb43c2cbca9113c0e4af906",
+  "catalogSha256": "b4b1f0d237e7a60cc3b003debe21c724d4f2ebc524396af40f83d52cc1305462",
+  "configuration": {
+    "groundingEnabled": true,
+    "orderAuditEnabled": true,
+    "auditTimeoutMs": 5000,
+    "requestedModel": "deepseek-chat",
+    "returnedModels": [
+      "deepseek-flash"
+    ]
+  },
+  "execution": {
+    "startedAt": "2026-11-05T03:22:51.166Z",
+    "finishedAt": "2026-11-05T04:02:08.552Z",
+    "exitCode": 1,
+    "sourcesUnchanged": true
+  },
+  "sourceDatabase": {
+    "before": {
+      "database": "ventas_ia_dev",
+      "app_state": "99dd88d8a758db9412e85824b8504573",
+      "tenants": 55,
+      "products": 130,
+      "conversations": 77,
+      "orders": 46,
+      "inbound_messages": 6,
+      "outbox": 13,
+      "fingerprint": "a95776b0c7ae2a05c2cc3888748c19b5978d70703eab6bde37deec904f875d94"
+    },
+    "after": {
+      "database": "ventas_ia_dev",
+      "app_state": "99dd88d8a758db9412e85824b8504573",
+      "tenants": 55,
+      "products": 130,
+      "conversations": 77,
+      "orders": 46,
+      "inbound_messages": 6,
+      "outbox": 13,
+      "fingerprint": "a95776b0c7ae2a05c2cc3888748c19b5978d70703eab6bde37deec904f875d94"
+    },
+    "unchanged": true
+  },
+  "rawCounts": {
+    "passed": 42,
+    "integration_fallback": 3,
+    "evaluator_error": 4,
+    "failed_functional": 1
+  },
+  "turns": 178,
+  "orders": 17,
+  "shopkeeperPassed": 17,
+  "acceptance": {
+    "sourceUnchanged": true,
+    "deepSeekReal": true,
+    "noExternalNetwork": true,
+    "contractP0Pass": true,
+    "fullCampaign": true,
+    "functionalThreshold": false,
+    "webhookAckP95UnderOneSecond": true,
+    "processingP95WithinTarget": false,
+    "readyForPilot": false,
+    "criticalRepetitionsComplete": false,
+    "extendedConcurrencyVariantsComplete": false
+  },
+  "audit": {
+    "calls": 31,
+    "byVerdict": {
+      "order.data.audit.approve": 29,
+      "order.data.audit.clarify": 2
+    },
+    "cases": 19,
+    "ordersWithAuditStamp": 17,
+    "repeatedRevisions": 0,
+    "missingFieldsAfterAudit": 12,
+    "beforeCollectionComplete": 0,
+    "events": [
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 2,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 3 chocorramos y 2 cifrut de granadilla a domicilio y confirmó explícitamente el pedido con el total de $12.000. El borrador coincide: BOG-PAN-019 x3 y BOG-BEB-051 x2 en unidades, ambos en catálogo, con delivery=true. No hay correcciones de líneas ni campos obligatorios pendientes en el borrador.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.1.2:wamid.20261105032251_b3b38c96.1.2",
+        "revision": "f7646a486bbf12046f4661bf956a5d3952c07ca23032ac2fa632d084f6acd743",
+        "durationMs": 1709,
+        "corrections": [],
+        "baseDraftVersion": 1,
+        "sourceMessageIds": [
+          "0480cb29-94e2-487b-a673-a006985851df",
+          "wamid.e2e.1",
+          "76a69c7a-3342-4b1d-bf4d-3ee45084721e"
+        ]
+      },
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 3 chocorramos y 2 cifrut de granadilla a domicilio, confirmó el pedido con el total y eligió pago en efectivo; el borrador coincide con SKUs del catálogo, cantidades, modo units, domicilio y método de pago cash.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.1.3:wamid.20261105032251_b3b38c96.1.3",
+        "revision": "fb200761150bf9e5e6f08aaefb52b89b26ed3133f44d3cc8f62dad9c63c2d8b5",
+        "durationMs": 1210,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "0480cb29-94e2-487b-a673-a006985851df",
+          "wamid.e2e.1",
+          "76a69c7a-3342-4b1d-bf4d-3ee45084721e",
+          "wamid.e2e.2",
+          "72f94ea8-ad39-4962-9b7b-54658cab85f9"
+        ]
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 4,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 3 chocorramos y cifrut de granadilla a domicilio, aclaró 2 unidades de Cifrut 250 ml, confirmó Chocoramo 65 g y aceptó el total de $12.000; el borrador coincide con SKU, cantidades y domicilio.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.2.4:wamid.20261105032251_b3b38c96.2.4",
+        "revision": "6afe01b54964ceee06b3bd4a6f558b1efc9f3102530bbcfeda6e882771e83b03",
+        "durationMs": 1487,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "77c40737-f1af-47e6-bb1e-b8707819a832",
+          "wamid.e2e.7",
+          "70d0cd6c-b84d-4f0e-bdb1-6923c998dbfc",
+          "wamid.e2e.8",
+          "fa4c4f97-fa8e-4303-9826-7aca3863a9fe",
+          "wamid.e2e.9",
+          "1d51bf41-5dc7-4dd6-9fc9-e3bedfd4880a"
+        ]
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 3 chocorramos y Cifrut de granadilla a domicilio, confirmó 2 unidades de Cifrut 250 ml, confirmó el Chocoramo de 65 g, aceptó el total y eligió pago en efectivo; el borrador coincide con SKUs, cantidades, domicilio y método de pago del catálogo.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.2.5:wamid.20261105032251_b3b38c96.2.5",
+        "revision": "942cf757d588e3fd79add9541f19c52d612c5345b9ee8479b600f751cf50e796",
+        "durationMs": 1575,
+        "corrections": [],
+        "baseDraftVersion": 5,
+        "sourceMessageIds": [
+          "77c40737-f1af-47e6-bb1e-b8707819a832",
+          "wamid.e2e.7",
+          "70d0cd6c-b84d-4f0e-bdb1-6923c998dbfc",
+          "wamid.e2e.8",
+          "fa4c4f97-fa8e-4303-9826-7aca3863a9fe",
+          "wamid.e2e.9",
+          "1d51bf41-5dc7-4dd6-9fc9-e3bedfd4880a",
+          "wamid.e2e.10",
+          "4036c188-b10c-4aa3-aa5a-32409a0fd67a"
+        ]
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 paquetes de Arepa boyacense 5 und (SKU BOG-PAN-017), confirmó que eso es todo y aportó dirección y pago en efectivo; el borrador coincide con la selección, cantidad, domicilio y método de pago válido.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.3.3:wamid.20261105032251_b3b38c96.3.3",
+        "revision": "b22c37893c934bb3d53a5aeab912c0b6e4e0a5869e653003a865c8d5530e4ef5",
+        "durationMs": 1956,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "5133d128-b680-42df-9378-1702c187d6c1",
+          "wamid.e2e.15",
+          "c7b89cf8-99c0-4d5e-b838-44e0f686298e",
+          "wamid.e2e.16",
+          "0ceb9d55-1585-430d-93ce-1ea92810b42f"
+        ]
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 paquetes de Arepa boyacense 5 und (SKU BOG-PAN-017), confirmó que eso es todo y aportó nombre, dirección y pago en efectivo; el borrador coincide con cantidades, variante, entrega y método de pago válido.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.3.5:wamid.20261105032251_b3b38c96.3.5",
+        "revision": "ba3235bcb5f579a767a969435c9d1b07c0088094df676a5c6a8075e4beb472a1",
+        "durationMs": 1150,
+        "corrections": [],
+        "baseDraftVersion": 4,
+        "sourceMessageIds": [
+          "5133d128-b680-42df-9378-1702c187d6c1",
+          "wamid.e2e.15",
+          "c7b89cf8-99c0-4d5e-b838-44e0f686298e",
+          "wamid.e2e.16",
+          "0ceb9d55-1585-430d-93ce-1ea92810b42f",
+          "wamid.e2e.17",
+          "ecc237cb-bfa4-4241-80b5-434f9bda9e98",
+          "wamid.e2e.18",
+          "8a1a989e-561c-468e-ba03-1f479f73cf6b"
+        ]
+      },
+      {
+        "caseId": "04-cliente_nuevo_completa_datos",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 paquetes de 5 und de arepa boyacense, confirmó dejar el pedido así y aportó nombre, dirección y pago en efectivo; el borrador coincide con el catálogo (BOG-PAN-017, 2 unidades, domicilio, cash).",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.4.3:wamid.20261105032251_b3b38c96.4.3",
+        "revision": "641ef4fab60d288ff201faf68a0776c563ae99620075e09ac18047b082280432",
+        "durationMs": 1182,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "b00ad57c-6cae-4a65-ad72-1319c0c7fa2e",
+          "wamid.e2e.20",
+          "b4785f54-b7dd-4948-98e8-8a0ea9a768fc",
+          "wamid.e2e.21",
+          "e14d74d6-4810-40e5-b551-27d317b19351"
+        ]
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente 1 unidad de cada uno de los tres productos (queso Alpina 200 g, pan tajado Bimbo blanco 500 g, jamón Pietran tajado 230 g), confirmó pago en efectivo y el borrador coincide en SKU, cantidades, modo units y método de pago cash.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.13.5:wamid.20261105032251_b3b38c96.13.5",
+        "revision": "00f9bff32548795ada4cbf82b432961ab4856e83cc33e2c4974e92969e9531d9",
+        "durationMs": 1557,
+        "corrections": [],
+        "baseDraftVersion": 2,
+        "sourceMessageIds": [
+          "b0e12d08-0520-48a5-a8ea-272b29baae51",
+          "wamid.e2e.52",
+          "78d30ef6-f7f8-4a5c-9cc3-261bd5f763f3",
+          "wamid.e2e.53",
+          "007aa426-9823-4e0e-8774-5dfede02845d",
+          "wamid.e2e.54",
+          "a918b786-ed69-4e91-9719-c21fa1fd6b51",
+          "wamid.e2e.55",
+          "6c41f4a7-1863-4ccc-8847-da03bf1ee1e4"
+        ]
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió armar el mercadito, eligió explícitamente Arroz Diana 500 g, Aceite Premier girasol 500 ml y Leche entera Colanta bolsa 1 L, y confirmó 1 unidad de cada uno. El borrador coincide con SKU del catálogo, cantidades y modo units; no hay correcciones necesarias.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.22.5:wamid.20261105032251_b3b38c96.22.5",
+        "revision": "5bf657fb8fe7d0340e064939070bdf6cfb5b49cdfbe732bfec04cee51bb20ff4",
+        "durationMs": 1358,
+        "corrections": [],
+        "baseDraftVersion": 7,
+        "sourceMessageIds": [
+          "9271b4ad-4d6e-4d54-b033-5b292298afbf",
+          "wamid.e2e.81",
+          "6548cac3-b8db-4d11-b9ee-e68fe824cc03",
+          "wamid.e2e.82",
+          "76738b7a-d191-4175-81a1-19502ce47f61",
+          "wamid.e2e.83",
+          "ec9d551c-30b3-49b6-8ad1-518d83cf4def",
+          "wamid.e2e.84",
+          "dabd88c6-85b6-47f7-ada5-73f5e561f158"
+        ]
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 6,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió armar el mercadito, eligió explícitamente Arroz Diana 500 g, Aceite Premier girasol 500 ml y Leche entera Colanta 1 L, indicó 1 unidad de cada uno y eligió pago en efectivo. El borrador coincide con SKUs del catálogo, cantidades, modo units y paymentMethod cash.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.22.6:wamid.20261105032251_b3b38c96.22.6",
+        "revision": "730c2103b485a3f781f0033fe3267d2317bec128038d80c6d6ca944fda43f558",
+        "durationMs": 1690,
+        "corrections": [],
+        "baseDraftVersion": 9,
+        "sourceMessageIds": [
+          "9271b4ad-4d6e-4d54-b033-5b292298afbf",
+          "wamid.e2e.81",
+          "6548cac3-b8db-4d11-b9ee-e68fe824cc03",
+          "wamid.e2e.82",
+          "76738b7a-d191-4175-81a1-19502ce47f61",
+          "wamid.e2e.83",
+          "ec9d551c-30b3-49b6-8ad1-518d83cf4def",
+          "wamid.e2e.84",
+          "dabd88c6-85b6-47f7-ada5-73f5e561f158",
+          "wamid.e2e.85",
+          "8b522cd1-f17f-4d7d-8705-880e9a129393"
+        ]
+      },
+      {
+        "caseId": "23-pedido_claro_aseo_domicilio",
+        "turn": 1,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente 1 papel higiénico Familia x4 rollos y 2 jabón Rey barra azul 250 g para domicilio; el borrador coincide con SKU BOG-ASE-088 (4 rollos) y BOG-ASE-083 (250 g), cantidades 1 y 2, venta por unidades, entrega a domicilio. No hay correcciones sustentadas.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.23.1:wamid.20261105032251_b3b38c96.23.1",
+        "revision": "9d46365584778f433c9deca9157c2268442a1cdb732b3d4f0f421e0c4fc20746",
+        "durationMs": 2110,
+        "corrections": [],
+        "baseDraftVersion": 0,
+        "sourceMessageIds": [
+          "73155bf8-5eb6-4294-874a-f5c355244acc"
+        ]
+      },
+      {
+        "caseId": "23-pedido_claro_aseo_domicilio",
+        "turn": 2,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente 1 papel higiénico Familia x4 rollos y 2 jabón Rey barra azul 250 g para domicilio; ambos SKU existen en catálogo con cantidades y modo units correctos, y eligió pago en efectivo (cash). No hay correcciones necesarias.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.23.2:wamid.20261105032251_b3b38c96.23.2",
+        "revision": "f1ff335721706fa9f50c5682abb20ae4bd34d76864415bb495f491f73f5c01eb",
+        "durationMs": 1451,
+        "corrections": [],
+        "baseDraftVersion": 2,
+        "sourceMessageIds": [
+          "73155bf8-5eb6-4294-874a-f5c355244acc",
+          "wamid.e2e.90",
+          "d61dc2b7-ade3-4be1-8502-322e83a015fe"
+        ]
+      },
+      {
+        "caseId": "24-pedido_claro_sin_domicilio",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 yogurt Alpina fresa y 1 galletas Festival chocolate, eligió la presentación vaso 150 g del yogurt, confirmó que era todo y dio domicilio y pago en efectivo. El borrador coincide: cantidades 1, SKU BOG-LAC-004 y BOG-SNA-064, delivery true, dirección y paymentMethod cash válidos.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.24.3:wamid.20261105032251_b3b38c96.24.3",
+        "revision": "0e580e6741e976788c520cc88be5a5715d3e763f28b811a722229c91de2ce5ea",
+        "durationMs": 1387,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "6acfeb2f-2521-49d1-8dd9-17de98d7fe41",
+          "wamid.e2e.95",
+          "fcdc1a93-2c21-4514-bc90-3c405082295a",
+          "wamid.e2e.96",
+          "d5959c7f-260a-4d5a-90e5-808e4d916d81"
+        ]
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 3,
+        "event": "order.data.audit.clarify",
+        "reason": "El cliente pidió 1 Coca-Cola para domicilio y luego dijo 'Coca-Cola original 1', sin especificar presentación; el asistente asumió 1.5 L y el cliente solo confirmó el cierre sin elegir explícitamente entre 400 ml, 1.5 L o 3 L. Falta la selección de presentación para fijar el SKU correcto.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.29.3:wamid.20261105032251_b3b38c96.29.3",
+        "revision": "b656680bfd53e74d8932d41ccda2c329f852033e472c80503a6602d48f5a60f0",
+        "durationMs": 1610,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "ed3f376f-0640-46cd-91f7-26915fdd4614",
+          "wamid.e2e.111",
+          "61e5735e-a33f-4f71-bc77-2274cbc95a46",
+          "wamid.e2e.112",
+          "d9c1eb5a-5c16-48ac-aea5-6c96d16c2735"
+        ]
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 4,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 Coca-Cola para domicilio, eligió la presentación de 1.5 L (SKU BOG-BEB-044, $7.200), confirmó que era todo y aportó nombre, dirección y pago en efectivo; el borrador coincide con el catálogo y los datos de entrega/pago.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.29.4:wamid.20261105032251_b3b38c96.29.4",
+        "revision": "325bf1b8683497abb5149daaea10dcfe401fad433e4637e6a42b8362e80645a1",
+        "durationMs": 1845,
+        "corrections": [],
+        "baseDraftVersion": 4,
+        "sourceMessageIds": [
+          "ed3f376f-0640-46cd-91f7-26915fdd4614",
+          "wamid.e2e.111",
+          "61e5735e-a33f-4f71-bc77-2274cbc95a46",
+          "wamid.e2e.112",
+          "d9c1eb5a-5c16-48ac-aea5-6c96d16c2735",
+          "wamid.e2e.113",
+          "a81d5340-0d0f-4824-8b6e-995a29c2cb89"
+        ]
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 2,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 agua Cristal sin gas 600 ml a domicilio y confirmó con 'Dale, hágale'. El borrador coincide: SKU BOG-BEB-041, cantidad 1, saleMode units, delivery true. No hay correcciones necesarias.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.30.2:wamid.20261105032251_b3b38c96.30.2",
+        "revision": "102834dc81e53f09dcbd8795b0c565292f448c189bd8d7a012ddd240ec138b44",
+        "durationMs": 1117,
+        "corrections": [],
+        "baseDraftVersion": 1,
+        "sourceMessageIds": [
+          "e7ae7cec-f9a4-4998-ad02-8853f8d14d0f",
+          "wamid.e2e.118",
+          "35150070-d642-4198-9872-8be7974f7738"
+        ]
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 agua Cristal sin gas 600 ml a domicilio, confirmó con 'Dale, hágale' y eligió pago en efectivo; el borrador coincide con SKU BOG-BEB-041, cantidad 1, saleMode units, delivery true y paymentMethod cash válido.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.30.3:wamid.20261105032251_b3b38c96.30.3",
+        "revision": "d10bd5fa8f2807d9e694d0f3b763a403672cd05de9ef8ebbacebc9975eb16e1e",
+        "durationMs": 1574,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "e7ae7cec-f9a4-4998-ad02-8853f8d14d0f",
+          "wamid.e2e.118",
+          "35150070-d642-4198-9872-8be7974f7738",
+          "wamid.e2e.119",
+          "7ae9455e-ff85-42a3-92b7-28bdd3da39a7"
+        ]
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió comprar arroz Diana 500 g, aceite Premier girasol 500 ml y huevos AA x12 para domicilio; el borrador coincide con el catálogo y las selecciones explícitas del cliente.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.32.3:wamid.20261105032251_b3b38c96.32.3",
+        "revision": "713cda5c4b37477606eb23803c3f717a5e74f4aca26889364b1062eb25b0551d",
+        "durationMs": 1383,
+        "corrections": [],
+        "baseDraftVersion": 4,
+        "sourceMessageIds": [
+          "ac0fa62d-8c00-41ee-8912-672d5a928cc1",
+          "wamid.e2e.127",
+          "363df02e-c917-49af-a47d-e37e8e5e40b1",
+          "wamid.e2e.128",
+          "3a94d8c0-6382-4fd4-a01d-008dd88c071b"
+        ]
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 4,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente los tres productos para domicilio, eligió Arroz Diana 500 g y Aceite Premier girasol 500 ml, y confirmó pago en efectivo. El borrador coincide con el catálogo y las cantidades (1 de cada uno), sin pendientes de aclaración.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.32.4:wamid.20261105032251_b3b38c96.32.4",
+        "revision": "b86333445921926551c22c236377c32e384ff2d67b462f5206e5e5e38dfd47b9",
+        "durationMs": 1328,
+        "corrections": [],
+        "baseDraftVersion": 6,
+        "sourceMessageIds": [
+          "ac0fa62d-8c00-41ee-8912-672d5a928cc1",
+          "wamid.e2e.127",
+          "363df02e-c917-49af-a47d-e37e8e5e40b1",
+          "wamid.e2e.128",
+          "3a94d8c0-6382-4fd4-a01d-008dd88c071b",
+          "wamid.e2e.129",
+          "8788811a-6b6d-4d37-aa87-b03f302901fc"
+        ]
+      },
+      {
+        "caseId": "33-pedido_con_typos_colombianos",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 Chocoramos y 1 Cifrut granadilla, confirmó que eso era todo y eligió pago en efectivo; el borrador coincide en SKUs, cantidades, modo units y paymentMethod cash, con productos activos y stock suficiente.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.33.3:wamid.20261105032251_b3b38c96.33.3",
+        "revision": "da5f24dc5f06a6bbd4c93a31f8dda92491aae22c68eaf100db38a22a11518d7d",
+        "durationMs": 1128,
+        "corrections": [],
+        "baseDraftVersion": 2,
+        "sourceMessageIds": [
+          "2422b8e2-16a9-426f-8e5a-1b02ef0f0d58",
+          "wamid.e2e.134",
+          "06854d6b-47c0-493f-b4e9-234e45d732d0",
+          "wamid.e2e.135",
+          "503d3d97-c002-4792-a16a-f0cf776b07c5"
+        ]
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 4,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente comprar Chocoramo y agua Cristal sin gas para domicilio, eligió Ponque Chocoramo 65 g y Agua Cristal sin gas 600 ml, y confirmó cantidades: uno de cada uno. El borrador refleja ambos SKU (BOG-PAN-019 y BOG-BEB-041) con quantity=1, saleMode=units y delivery=true, coherente con el catálogo.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.34.4:wamid.20261105032251_b3b38c96.34.4",
+        "revision": "6d2a964d67615252fd7ab9aef085dc4264e88617c284e8aad7f59da7d5fa2a3c",
+        "durationMs": 1986,
+        "corrections": [],
+        "baseDraftVersion": 5,
+        "sourceMessageIds": [
+          "c6386cde-b3b3-4d9a-aef4-9137c4f9b48f",
+          "wamid.e2e.140",
+          "89a5f418-7b7f-4c5d-a531-e4ba209234db",
+          "wamid.e2e.141",
+          "cd2a98cc-4673-4e62-a758-d4b632b67b06",
+          "wamid.e2e.142",
+          "d3bab218-f397-4d82-97c2-d17396976829"
+        ]
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente un Ponque Chocoramo 65 g y una botella de Agua Cristal sin gas 600 ml, eligió pago en efectivo y el borrador coincide con SKUs, cantidades, modo units y método de pago del catálogo.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.34.5:wamid.20261105032251_b3b38c96.34.5",
+        "revision": "9474be521956e7da14133a77b47c6e53c4e80771a9a850bb5909431d1b3ee666",
+        "durationMs": 1338,
+        "corrections": [],
+        "baseDraftVersion": 7,
+        "sourceMessageIds": [
+          "c6386cde-b3b3-4d9a-aef4-9137c4f9b48f",
+          "wamid.e2e.140",
+          "89a5f418-7b7f-4c5d-a531-e4ba209234db",
+          "wamid.e2e.141",
+          "cd2a98cc-4673-4e62-a758-d4b632b67b06",
+          "wamid.e2e.142",
+          "d3bab218-f397-4d82-97c2-d17396976829",
+          "wamid.e2e.143",
+          "1f0c75fc-b9cf-46fa-940d-10bf75727b75"
+        ]
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente un paquete de cada producto (arroz Diana 500 g, aceite Premier girasol 500 ml y huevos AA rojos x12) y cerró con 'Con eso sería todo de mi parte'. El borrador refleja los tres SKUs correctos con quantity=1 en units, coincidiendo con el catálogo.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.35.5:wamid.20261105032251_b3b38c96.35.5",
+        "revision": "f9c78d8fe4d544760eb334cf13fb9e1a24fa4d5586611f4d721ac3acea37a80f",
+        "durationMs": 2049,
+        "corrections": [],
+        "baseDraftVersion": 7,
+        "sourceMessageIds": [
+          "90103610-2be3-47b8-8d65-2c3a63936cb7",
+          "wamid.e2e.148",
+          "b73d04c7-4c1d-4668-90c0-81726d3bf482",
+          "wamid.e2e.149",
+          "d423fdd9-ab2e-49fa-b7a0-8059e2b5058c",
+          "wamid.e2e.150",
+          "b9486abc-5679-4494-92ae-01946bac6605",
+          "wamid.e2e.151",
+          "85119cec-92f0-4eac-bc10-ffc7be549e38"
+        ]
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 6,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió explícitamente un paquete de cada producto (arroz Diana 500 g, aceite Premier girasol 500 ml y huevos AA rojos x12) y eligió pago en efectivo; el borrador refleja cantidades 1, SKUs del catálogo y paymentMethod cash correctamente.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.35.6:wamid.20261105032251_b3b38c96.35.6",
+        "revision": "3db9e42033eee3a5c712f48747184379e8e4f7dc17783e824f89eab4b04efd77",
+        "durationMs": 1734,
+        "corrections": [],
+        "baseDraftVersion": 9,
+        "sourceMessageIds": [
+          "90103610-2be3-47b8-8d65-2c3a63936cb7",
+          "wamid.e2e.148",
+          "b73d04c7-4c1d-4668-90c0-81726d3bf482",
+          "wamid.e2e.149",
+          "d423fdd9-ab2e-49fa-b7a0-8059e2b5058c",
+          "wamid.e2e.150",
+          "b9486abc-5679-4494-92ae-01946bac6605",
+          "wamid.e2e.151",
+          "85119cec-92f0-4eac-bc10-ffc7be549e38",
+          "wamid.e2e.152",
+          "14636772-e0b0-4a14-84ea-7b5a2cb03cc4"
+        ]
+      },
+      {
+        "caseId": "40-pedido_confirmado_handoff_operaciones",
+        "turn": 2,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 pan tajado Bimbo blanco para domicilio y cerró la lista indicando pago por Bre-B; el borrador coincide con el catálogo (BOG-PAN-013, 1 unidad), domicilio activo y paymentMethod bre_b válido.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.40.2:wamid.20261105032251_b3b38c96.40.2",
+        "revision": "9f9e45bb0534db9110668061c6ac8dadc12a4765468ad4727c441f3b333a23f2",
+        "durationMs": 1444,
+        "corrections": [],
+        "baseDraftVersion": 1,
+        "sourceMessageIds": [
+          "bdd42e8e-a3cd-4fa6-9bf4-b2f81dd89cbc",
+          "wamid.e2e.166",
+          "13516f1d-732e-4e90-842f-ad52ace31d7a"
+        ]
+      },
+      {
+        "caseId": "42-real_supermarket_pago_tarjeta_es_preferencia",
+        "turn": 2,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 3 chocorramos a domicilio y cerró la compra con pago con tarjeta débito; el borrador refleja 3 unidades de BOG-PAN-019, delivery true y paymentMethod card_terminal válido.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.42.2:wamid.20261105032251_b3b38c96.42.2",
+        "revision": "034dba21e867d42a70759077499fdf0d49cb5a012a734837c407fca7b3315d74",
+        "durationMs": 1204,
+        "corrections": [],
+        "baseDraftVersion": 1,
+        "sourceMessageIds": [
+          "b5aef5f2-8819-404e-9794-62e248426a20",
+          "wamid.e2e.173",
+          "432a3b7e-c2be-40f8-98c6-4950665a13f4"
+        ]
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 4,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 chocorramos para domicilio, eliminó el agua y eligió explícitamente Ponque Chocoramo 65 g; el borrador refleja 2 unidades de BOG-PAN-019, delivery true y cierre de lista. No hay cambios necesarios.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.43.4:wamid.20261105032251_b3b38c96.43.4",
+        "revision": "af3e79251ef3dcb562a41a65a9fe97b8a64ffa4aa698e8999937355ee361f821",
+        "durationMs": 1660,
+        "corrections": [],
+        "baseDraftVersion": 4,
+        "sourceMessageIds": [
+          "baf7948f-05e6-4d44-9e04-ade7ad5824c5",
+          "wamid.e2e.178",
+          "606f8a00-d5de-491d-bbe7-a653a59db547",
+          "wamid.e2e.179",
+          "bee7de8e-32d7-4dfb-aefa-5ca6e49a73e4",
+          "wamid.e2e.180",
+          "da7eb23d-4037-4f47-bf61-99295ba66348"
+        ]
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 2 chocorramos para domicilio, eliminó el agua, eligió Ponque Chocoramo 65 g, confirmó el pedido y eligió pago en efectivo. El borrador refleja 2 unidades de BOG-PAN-019, delivery true y paymentMethod cash, coherente con el catálogo y la conversación.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.43.5:wamid.20261105032251_b3b38c96.43.5",
+        "revision": "948cd8dca4229eebb7ea34ece588d4401bba8634b502528be432a3e71fdf6ab7",
+        "durationMs": 1448,
+        "corrections": [],
+        "baseDraftVersion": 6,
+        "sourceMessageIds": [
+          "baf7948f-05e6-4d44-9e04-ade7ad5824c5",
+          "wamid.e2e.178",
+          "606f8a00-d5de-491d-bbe7-a653a59db547",
+          "wamid.e2e.179",
+          "bee7de8e-32d7-4dfb-aefa-5ca6e49a73e4",
+          "wamid.e2e.180",
+          "da7eb23d-4037-4f47-bf61-99295ba66348",
+          "wamid.e2e.181",
+          "9323f941-7da4-4919-99bf-a5f91ca78a9e"
+        ]
+      },
+      {
+        "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+        "turn": 3,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 pan tajado Bimbo blanco 500 g y luego agregó 1 queso campesino Colanta 250 g, confirmando 'uno de cada uno' con domicilio en Calle E2E 100 # 10-20, Bogotá y pago en efectivo. El borrador coincide con SKUs del catálogo, cantidades, entrega y método de pago.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.44.3:wamid.20261105032251_b3b38c96.44.3",
+        "revision": "8b5132f5f8c87dfba44c91895a1aff7f70bc73d1daf1d65bdd9109fa82ad6619",
+        "durationMs": 1311,
+        "corrections": [],
+        "baseDraftVersion": 2,
+        "sourceMessageIds": [
+          "7b1b984e-fd74-42af-96da-ba6157cd8c62",
+          "wamid.e2e.186",
+          "51efc3ed-0157-458a-b4b0-177d38da16d5",
+          "wamid.e2e.187",
+          "16a321cc-d62f-45a9-af8f-0a62e84713c3"
+        ]
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 3,
+        "event": "order.data.audit.clarify",
+        "reason": "El cliente pidió comprar 1 yogurt Alpina fresa a domicilio, pero no eligió presentación entre vaso 150 g y familiar 1 L; el borrador asume el vaso sin evidencia explícita del cliente. Falta la selección de presentación antes de aprobar.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.50.3:wamid.20261105032251_b3b38c96.50.3",
+        "revision": "5c7047114328e217a3333067d20f1d8c5f4a56221c36bafbfdffe3b5423913b4",
+        "durationMs": 1225,
+        "corrections": [],
+        "baseDraftVersion": 3,
+        "sourceMessageIds": [
+          "c4668cc0-d6be-4057-b759-2ea826530c0d",
+          "wamid.e2e.205",
+          "f2b7e0a4-d322-4bd1-bd2d-353ffd6c714c",
+          "wamid.e2e.206",
+          "5fe22eaa-7d5d-4220-8d0e-b9b13faa2a7c"
+        ]
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 5,
+        "event": "order.data.audit.approve",
+        "reason": "El cliente pidió 1 yogurt Alpina fresa para domicilio, eligió explícitamente el vaso de 150 g (no el familiar de 1 L), dio dirección Calle E2E 100 # 10-20, Bogotá y pidió confirmar el pedido con pago tarjeta débito. El borrador coincide: SKU BOG-LAC-004, quantity 1, saleMode units, delivery true, dirección correcta y paymentMethod card_terminal válido en paymentMethods.",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.50.5:wamid.20261105032251_b3b38c96.50.5",
+        "revision": "3ffe9027a7748d17bcafcefc76a0d53d6e10c918b26fbe7a0807ff5658e712f5",
+        "durationMs": 1700,
+        "corrections": [],
+        "baseDraftVersion": 5,
+        "sourceMessageIds": [
+          "c4668cc0-d6be-4057-b759-2ea826530c0d",
+          "wamid.e2e.205",
+          "f2b7e0a4-d322-4bd1-bd2d-353ffd6c714c",
+          "wamid.e2e.206",
+          "5fe22eaa-7d5d-4220-8d0e-b9b13faa2a7c",
+          "wamid.e2e.207",
+          "f1df4b36-b278-42a0-bf56-4fc333ec5bf8",
+          "wamid.e2e.208",
+          "fb60c724-bce1-4837-ac1d-78168554747f"
+        ]
+      }
+    ]
+  },
+  "latency": {
+    "ack": {
+      "n": 178,
+      "mean": 12,
+      "p50": 10,
+      "p95": 24,
+      "max": 46,
+      "over5000": 0
+    },
+    "firstOutbound": {
+      "n": 178,
+      "mean": 7111,
+      "p50": 6874,
+      "p95": 12565,
+      "max": 31105,
+      "over5000": 127
+    },
+    "lastOutbound": {
+      "n": 178,
+      "mean": 7111,
+      "p50": 6874,
+      "p95": 12565,
+      "max": 31105,
+      "over5000": 127
+    },
+    "beforeAgent": {
+      "n": 178,
+      "mean": 325,
+      "p50": 28,
+      "p95": 2413,
+      "max": 3652,
+      "over5000": 0
+    },
+    "agentToOutbound": {
+      "n": 178,
+      "mean": 6786,
+      "p50": 6744,
+      "p95": 12354,
+      "max": 30263,
+      "over5000": 122
+    },
+    "withAudit": {
+      "n": 31,
+      "mean": 8057,
+      "p50": 7759,
+      "p95": 12133,
+      "max": 12231,
+      "over5000": 30
+    },
+    "withoutAudit": {
+      "n": 147,
+      "mean": 6911,
+      "p50": 6608,
+      "p95": 12651,
+      "max": 31105,
+      "over5000": 97
+    },
+    "stages": {
+      "planner": {
+        "n": 152,
+        "mean": 2671,
+        "p50": 2299,
+        "p95": 3472,
+        "max": 30017,
+        "over5000": 5,
+        "inputTokens": 631850,
+        "outputTokens": 48745
+      },
+      "grounding": {
+        "n": 129,
+        "mean": 2079,
+        "p50": 1966,
+        "p95": 2967,
+        "max": 4498,
+        "over5000": 0,
+        "inputTokens": 901387,
+        "outputTokens": 33026
+      },
+      "composer": {
+        "n": 154,
+        "mean": 1613,
+        "p50": 1572,
+        "p95": 2289,
+        "max": 2763,
+        "over5000": 0,
+        "inputTokens": 789526,
+        "outputTokens": 20676
+      },
+      "composer_evidence_review": {
+        "n": 55,
+        "mean": 1521,
+        "p50": 1466,
+        "p95": 2223,
+        "max": 2481,
+        "over5000": 0,
+        "inputTokens": 267321,
+        "outputTokens": 4853
+      },
+      "auditor": {
+        "n": 31,
+        "mean": 1513,
+        "p50": 1451,
+        "p95": 2049,
+        "max": 2110,
+        "over5000": 0
+      }
+    },
+    "slowest": [
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 31105,
+        "lastOutboundMs": 31105,
+        "beforeAgentMs": 842,
+        "agentToOutboundMs": 30263,
+        "knownLlmMs": 30017
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 19,
+        "firstOutboundMs": 20185,
+        "lastOutboundMs": 20185,
+        "beforeAgentMs": 39,
+        "agentToOutboundMs": 20146,
+        "knownLlmMs": 4930
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 17004,
+        "lastOutboundMs": 17004,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 16971,
+        "knownLlmMs": 16565
+      },
+      {
+        "caseId": "27-indeciso_lonchera_nino",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 15956,
+        "lastOutboundMs": 15956,
+        "beforeAgentMs": 1730,
+        "agentToOutboundMs": 14226,
+        "knownLlmMs": 9829
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 15127,
+        "lastOutboundMs": 15127,
+        "beforeAgentMs": 1292,
+        "agentToOutboundMs": 13835,
+        "knownLlmMs": 13416
+      },
+      {
+        "caseId": "09-categoria_mecato_onces",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 15059,
+        "lastOutboundMs": 15059,
+        "beforeAgentMs": 2444,
+        "agentToOutboundMs": 12615,
+        "knownLlmMs": 12191
+      },
+      {
+        "caseId": "14-indeciso_antojo_dulce",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 13439,
+        "lastOutboundMs": 13439,
+        "beforeAgentMs": 1094,
+        "agentToOutboundMs": 12345,
+        "knownLlmMs": 10238
+      },
+      {
+        "caseId": "31-consulta_tintico_cafe",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 12651,
+        "lastOutboundMs": 12651,
+        "beforeAgentMs": 2679,
+        "agentToOutboundMs": 9972,
+        "knownLlmMs": 9585
+      },
+      {
+        "caseId": "16-indeciso_algo_frio_para_tomar",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 12565,
+        "lastOutboundMs": 12565,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 12546,
+        "knownLlmMs": 9832
+      },
+      {
+        "caseId": "17-indeciso_presupuesto_bajo",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 12490,
+        "lastOutboundMs": 12490,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 12464,
+        "knownLlmMs": 11922
+      }
+    ],
+    "rows": [
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 46,
+        "firstOutboundMs": 7906,
+        "lastOutboundMs": 7906,
+        "beforeAgentMs": 81,
+        "agentToOutboundMs": 7825,
+        "knownLlmMs": 7327
+      },
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 2,
+        "audited": true,
+        "ackMs": 22,
+        "firstOutboundMs": 12133,
+        "lastOutboundMs": 12133,
+        "beforeAgentMs": 3503,
+        "agentToOutboundMs": 8630,
+        "knownLlmMs": 8092
+      },
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 8,
+        "firstOutboundMs": 7712,
+        "lastOutboundMs": 7712,
+        "beforeAgentMs": 2264,
+        "agentToOutboundMs": 5448,
+        "knownLlmMs": 5220
+      },
+      {
+        "caseId": "01-pedido_claro_con_cliente_conocido",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 2380,
+        "lastOutboundMs": 2380,
+        "beforeAgentMs": 45,
+        "agentToOutboundMs": 2335,
+        "knownLlmMs": 2162
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 19,
+        "firstOutboundMs": 20185,
+        "lastOutboundMs": 20185,
+        "beforeAgentMs": 39,
+        "agentToOutboundMs": 20146,
+        "knownLlmMs": 4930
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 8897,
+        "lastOutboundMs": 8897,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 8872,
+        "knownLlmMs": 7337
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 15,
+        "firstOutboundMs": 8048,
+        "lastOutboundMs": 8048,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 8021,
+        "knownLlmMs": 7587
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 4,
+        "audited": true,
+        "ackMs": 9,
+        "firstOutboundMs": 7507,
+        "lastOutboundMs": 7507,
+        "beforeAgentMs": 461,
+        "agentToOutboundMs": 7046,
+        "knownLlmMs": 6597
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 9,
+        "firstOutboundMs": 5031,
+        "lastOutboundMs": 5031,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 5006,
+        "knownLlmMs": 4793
+      },
+      {
+        "caseId": "02-pedido_claro_con_cantidad_faltante",
+        "turn": 6,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 2131,
+        "lastOutboundMs": 2131,
+        "beforeAgentMs": 17,
+        "agentToOutboundMs": 2114,
+        "knownLlmMs": 1982
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 6771,
+        "lastOutboundMs": 6771,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 6744,
+        "knownLlmMs": 6478
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 4536,
+        "lastOutboundMs": 4536,
+        "beforeAgentMs": 18,
+        "agentToOutboundMs": 4518,
+        "knownLlmMs": 3787
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 13,
+        "firstOutboundMs": 7706,
+        "lastOutboundMs": 7706,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 7682,
+        "knownLlmMs": 7383
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 31105,
+        "lastOutboundMs": 31105,
+        "beforeAgentMs": 842,
+        "agentToOutboundMs": 30263,
+        "knownLlmMs": 30017
+      },
+      {
+        "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 10,
+        "firstOutboundMs": 10538,
+        "lastOutboundMs": 10538,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 10509,
+        "knownLlmMs": 8345
+      },
+      {
+        "caseId": "04-cliente_nuevo_completa_datos",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 6948,
+        "lastOutboundMs": 6948,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 6919,
+        "knownLlmMs": 6645
+      },
+      {
+        "caseId": "04-cliente_nuevo_completa_datos",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 3447,
+        "lastOutboundMs": 3447,
+        "beforeAgentMs": 31,
+        "agentToOutboundMs": 3416,
+        "knownLlmMs": 3273
+      },
+      {
+        "caseId": "04-cliente_nuevo_completa_datos",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 10,
+        "firstOutboundMs": 10744,
+        "lastOutboundMs": 10744,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 10718,
+        "knownLlmMs": 8469
+      },
+      {
+        "caseId": "04-cliente_nuevo_completa_datos",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 1979,
+        "lastOutboundMs": 1979,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 1960,
+        "knownLlmMs": 1817
+      },
+      {
+        "caseId": "05-disponibilidad_producto_premium",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 7459,
+        "lastOutboundMs": 7459,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 7436,
+        "knownLlmMs": 7169
+      },
+      {
+        "caseId": "05-disponibilidad_producto_premium",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 7577,
+        "lastOutboundMs": 7577,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 7556,
+        "knownLlmMs": 6899
+      },
+      {
+        "caseId": "06-consulta_cafe_generica_infiere_similares",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 8305,
+        "lastOutboundMs": 8305,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 8284,
+        "knownLlmMs": 8047
+      },
+      {
+        "caseId": "06-consulta_cafe_generica_infiere_similares",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 9426,
+        "lastOutboundMs": 9426,
+        "beforeAgentMs": 1695,
+        "agentToOutboundMs": 7731,
+        "knownLlmMs": 7466
+      },
+      {
+        "caseId": "06-consulta_cafe_generica_infiere_similares",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 15,
+        "firstOutboundMs": 3739,
+        "lastOutboundMs": 3739,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 3713,
+        "knownLlmMs": 3044
+      },
+      {
+        "caseId": "07-categoria_jugos",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 8834,
+        "lastOutboundMs": 8834,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 8805,
+        "knownLlmMs": 8500
+      },
+      {
+        "caseId": "07-categoria_jugos",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 10065,
+        "lastOutboundMs": 10065,
+        "beforeAgentMs": 2338,
+        "agentToOutboundMs": 7727,
+        "knownLlmMs": 7437
+      },
+      {
+        "caseId": "07-categoria_jugos",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 8861,
+        "lastOutboundMs": 8861,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 8838,
+        "knownLlmMs": 8430
+      },
+      {
+        "caseId": "07-categoria_jugos",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 5080,
+        "lastOutboundMs": 5080,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 5056,
+        "knownLlmMs": 3279
+      },
+      {
+        "caseId": "08-categoria_algo_para_la_sed",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 8207,
+        "lastOutboundMs": 8207,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 8182,
+        "knownLlmMs": 7904
+      },
+      {
+        "caseId": "08-categoria_algo_para_la_sed",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 10294,
+        "lastOutboundMs": 10294,
+        "beforeAgentMs": 2413,
+        "agentToOutboundMs": 7881,
+        "knownLlmMs": 7489
+      },
+      {
+        "caseId": "08-categoria_algo_para_la_sed",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 4340,
+        "lastOutboundMs": 4340,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 4311,
+        "knownLlmMs": 3598
+      },
+      {
+        "caseId": "09-categoria_mecato_onces",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 7780,
+        "lastOutboundMs": 7780,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 7753,
+        "knownLlmMs": 7491
+      },
+      {
+        "caseId": "09-categoria_mecato_onces",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 11773,
+        "lastOutboundMs": 11773,
+        "beforeAgentMs": 34,
+        "agentToOutboundMs": 11739,
+        "knownLlmMs": 11388
+      },
+      {
+        "caseId": "09-categoria_mecato_onces",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 15059,
+        "lastOutboundMs": 15059,
+        "beforeAgentMs": 2444,
+        "agentToOutboundMs": 12615,
+        "knownLlmMs": 12191
+      },
+      {
+        "caseId": "09-categoria_mecato_onces",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 20,
+        "firstOutboundMs": 3189,
+        "lastOutboundMs": 3189,
+        "beforeAgentMs": 41,
+        "agentToOutboundMs": 3148,
+        "knownLlmMs": 3011
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 8252,
+        "lastOutboundMs": 8252,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 8223,
+        "knownLlmMs": 7926
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 15127,
+        "lastOutboundMs": 15127,
+        "beforeAgentMs": 1292,
+        "agentToOutboundMs": 13835,
+        "knownLlmMs": 13416
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 17004,
+        "lastOutboundMs": 17004,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 16971,
+        "knownLlmMs": 16565
+      },
+      {
+        "caseId": "10-categoria_mercado",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 3900,
+        "lastOutboundMs": 3900,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 3874,
+        "knownLlmMs": 3756
+      },
+      {
+        "caseId": "11-categoria_aseo",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 12212,
+        "lastOutboundMs": 12212,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 12190,
+        "knownLlmMs": 10181
+      },
+      {
+        "caseId": "11-categoria_aseo",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 21,
+        "firstOutboundMs": 10313,
+        "lastOutboundMs": 10313,
+        "beforeAgentMs": 40,
+        "agentToOutboundMs": 10273,
+        "knownLlmMs": 9027
+      },
+      {
+        "caseId": "11-categoria_aseo",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 12,
+        "firstOutboundMs": 8198,
+        "lastOutboundMs": 8198,
+        "beforeAgentMs": 41,
+        "agentToOutboundMs": 8157,
+        "knownLlmMs": 7754
+      },
+      {
+        "caseId": "12-categoria_onces_panaderia",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 8480,
+        "lastOutboundMs": 8480,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 8454,
+        "knownLlmMs": 8196
+      },
+      {
+        "caseId": "12-categoria_onces_panaderia",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 12096,
+        "lastOutboundMs": 12096,
+        "beforeAgentMs": 2315,
+        "agentToOutboundMs": 9781,
+        "knownLlmMs": 9281
+      },
+      {
+        "caseId": "12-categoria_onces_panaderia",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 4596,
+        "lastOutboundMs": 4596,
+        "beforeAgentMs": 475,
+        "agentToOutboundMs": 4121,
+        "knownLlmMs": 4008
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 12387,
+        "lastOutboundMs": 12387,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 12354,
+        "knownLlmMs": 9868
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 11133,
+        "lastOutboundMs": 11133,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 11109,
+        "knownLlmMs": 10545
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 11071,
+        "lastOutboundMs": 11071,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 11045,
+        "knownLlmMs": 10468
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 8829,
+        "lastOutboundMs": 8829,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 8797,
+        "knownLlmMs": 6994
+      },
+      {
+        "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 13,
+        "firstOutboundMs": 7990,
+        "lastOutboundMs": 7990,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 7964,
+        "knownLlmMs": 7399
+      },
+      {
+        "caseId": "14-indeciso_antojo_dulce",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 9073,
+        "lastOutboundMs": 9073,
+        "beforeAgentMs": 34,
+        "agentToOutboundMs": 9039,
+        "knownLlmMs": 8752
+      },
+      {
+        "caseId": "14-indeciso_antojo_dulce",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 13439,
+        "lastOutboundMs": 13439,
+        "beforeAgentMs": 1094,
+        "agentToOutboundMs": 12345,
+        "knownLlmMs": 10238
+      },
+      {
+        "caseId": "15-indeciso_desayuno_rapido",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 38,
+        "firstOutboundMs": 7698,
+        "lastOutboundMs": 7698,
+        "beforeAgentMs": 51,
+        "agentToOutboundMs": 7647,
+        "knownLlmMs": 7377
+      },
+      {
+        "caseId": "15-indeciso_desayuno_rapido",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 11711,
+        "lastOutboundMs": 11711,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 11684,
+        "knownLlmMs": 11276
+      },
+      {
+        "caseId": "15-indeciso_desayuno_rapido",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 11556,
+        "lastOutboundMs": 11556,
+        "beforeAgentMs": 2483,
+        "agentToOutboundMs": 9073,
+        "knownLlmMs": 8641
+      },
+      {
+        "caseId": "15-indeciso_desayuno_rapido",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 5853,
+        "lastOutboundMs": 5853,
+        "beforeAgentMs": 1572,
+        "agentToOutboundMs": 4281,
+        "knownLlmMs": 4161
+      },
+      {
+        "caseId": "16-indeciso_algo_frio_para_tomar",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 12565,
+        "lastOutboundMs": 12565,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 12546,
+        "knownLlmMs": 9832
+      },
+      {
+        "caseId": "16-indeciso_algo_frio_para_tomar",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 8073,
+        "lastOutboundMs": 8073,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 8054,
+        "knownLlmMs": 7724
+      },
+      {
+        "caseId": "16-indeciso_algo_frio_para_tomar",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 4211,
+        "lastOutboundMs": 4211,
+        "beforeAgentMs": 752,
+        "agentToOutboundMs": 3459,
+        "knownLlmMs": 3351
+      },
+      {
+        "caseId": "17-indeciso_presupuesto_bajo",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 7621,
+        "lastOutboundMs": 7621,
+        "beforeAgentMs": 31,
+        "agentToOutboundMs": 7590,
+        "knownLlmMs": 7294
+      },
+      {
+        "caseId": "17-indeciso_presupuesto_bajo",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 12490,
+        "lastOutboundMs": 12490,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 12464,
+        "knownLlmMs": 11922
+      },
+      {
+        "caseId": "17-indeciso_presupuesto_bajo",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 15,
+        "firstOutboundMs": 9574,
+        "lastOutboundMs": 9574,
+        "beforeAgentMs": 1453,
+        "agentToOutboundMs": 8121,
+        "knownLlmMs": 7820
+      },
+      {
+        "caseId": "17-indeciso_presupuesto_bajo",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 4150,
+        "lastOutboundMs": 4150,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 4125,
+        "knownLlmMs": 2921
+      },
+      {
+        "caseId": "18-producto_impreciso_gaseosa",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 7524,
+        "lastOutboundMs": 7524,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 7504,
+        "knownLlmMs": 7241
+      },
+      {
+        "caseId": "18-producto_impreciso_gaseosa",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 9391,
+        "lastOutboundMs": 9391,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 9367,
+        "knownLlmMs": 8242
+      },
+      {
+        "caseId": "18-producto_impreciso_gaseosa",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 4618,
+        "lastOutboundMs": 4618,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 4592,
+        "knownLlmMs": 3111
+      },
+      {
+        "caseId": "19-producto_impreciso_leche_bolsa",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 6827,
+        "lastOutboundMs": 6827,
+        "beforeAgentMs": 36,
+        "agentToOutboundMs": 6791,
+        "knownLlmMs": 6540
+      },
+      {
+        "caseId": "19-producto_impreciso_leche_bolsa",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 4842,
+        "lastOutboundMs": 4842,
+        "beforeAgentMs": 35,
+        "agentToOutboundMs": 4807,
+        "knownLlmMs": 2589
+      },
+      {
+        "caseId": "20-producto_impreciso_papel_bano",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 8148,
+        "lastOutboundMs": 8148,
+        "beforeAgentMs": 29,
+        "agentToOutboundMs": 8119,
+        "knownLlmMs": 7874
+      },
+      {
+        "caseId": "20-producto_impreciso_papel_bano",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 9808,
+        "lastOutboundMs": 9808,
+        "beforeAgentMs": 2290,
+        "agentToOutboundMs": 7518,
+        "knownLlmMs": 7233
+      },
+      {
+        "caseId": "20-producto_impreciso_papel_bano",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 12,
+        "firstOutboundMs": 5131,
+        "lastOutboundMs": 5131,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 5106,
+        "knownLlmMs": 3064
+      },
+      {
+        "caseId": "21-producto_impreciso_jabon_ropa",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 7392,
+        "lastOutboundMs": 7392,
+        "beforeAgentMs": 31,
+        "agentToOutboundMs": 7361,
+        "knownLlmMs": 7099
+      },
+      {
+        "caseId": "21-producto_impreciso_jabon_ropa",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 8465,
+        "lastOutboundMs": 8465,
+        "beforeAgentMs": 38,
+        "agentToOutboundMs": 8427,
+        "knownLlmMs": 8030
+      },
+      {
+        "caseId": "21-producto_impreciso_jabon_ropa",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 5702,
+        "lastOutboundMs": 5702,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 5676,
+        "knownLlmMs": 3241
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 9256,
+        "lastOutboundMs": 9256,
+        "beforeAgentMs": 28,
+        "agentToOutboundMs": 9228,
+        "knownLlmMs": 8827
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 6358,
+        "lastOutboundMs": 6358,
+        "beforeAgentMs": 1682,
+        "agentToOutboundMs": 4676,
+        "knownLlmMs": 4274
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 6289,
+        "lastOutboundMs": 6289,
+        "beforeAgentMs": 34,
+        "agentToOutboundMs": 6255,
+        "knownLlmMs": 3675
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 4095,
+        "lastOutboundMs": 4095,
+        "beforeAgentMs": 30,
+        "agentToOutboundMs": 4065,
+        "knownLlmMs": 3813
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 8,
+        "firstOutboundMs": 11145,
+        "lastOutboundMs": 11145,
+        "beforeAgentMs": 18,
+        "agentToOutboundMs": 11127,
+        "knownLlmMs": 8430
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 6,
+        "audited": true,
+        "ackMs": 15,
+        "firstOutboundMs": 5495,
+        "lastOutboundMs": 5495,
+        "beforeAgentMs": 35,
+        "agentToOutboundMs": 5460,
+        "knownLlmMs": 5202
+      },
+      {
+        "caseId": "22-mercado_basico_con_lista_parcial",
+        "turn": 7,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 1969,
+        "lastOutboundMs": 1969,
+        "beforeAgentMs": 16,
+        "agentToOutboundMs": 1953,
+        "knownLlmMs": 1801
+      },
+      {
+        "caseId": "23-pedido_claro_aseo_domicilio",
+        "turn": 1,
+        "audited": true,
+        "ackMs": 33,
+        "firstOutboundMs": 8225,
+        "lastOutboundMs": 8225,
+        "beforeAgentMs": 48,
+        "agentToOutboundMs": 8177,
+        "knownLlmMs": 7736
+      },
+      {
+        "caseId": "23-pedido_claro_aseo_domicilio",
+        "turn": 2,
+        "audited": true,
+        "ackMs": 10,
+        "firstOutboundMs": 5086,
+        "lastOutboundMs": 5086,
+        "beforeAgentMs": 28,
+        "agentToOutboundMs": 5058,
+        "knownLlmMs": 4848
+      },
+      {
+        "caseId": "23-pedido_claro_aseo_domicilio",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 1821,
+        "lastOutboundMs": 1821,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 1798,
+        "knownLlmMs": 1648
+      },
+      {
+        "caseId": "24-pedido_claro_sin_domicilio",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 6017,
+        "lastOutboundMs": 6017,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 5994,
+        "knownLlmMs": 5540
+      },
+      {
+        "caseId": "24-pedido_claro_sin_domicilio",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 4607,
+        "lastOutboundMs": 4607,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 4581,
+        "knownLlmMs": 3404
+      },
+      {
+        "caseId": "24-pedido_claro_sin_domicilio",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 11,
+        "firstOutboundMs": 7759,
+        "lastOutboundMs": 7759,
+        "beforeAgentMs": 30,
+        "agentToOutboundMs": 7729,
+        "knownLlmMs": 7313
+      },
+      {
+        "caseId": "24-pedido_claro_sin_domicilio",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 3641,
+        "lastOutboundMs": 3641,
+        "beforeAgentMs": 1769,
+        "agentToOutboundMs": 1872,
+        "knownLlmMs": 1710
+      },
+      {
+        "caseId": "25-producto_impreciso_savital_sobre",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 7954,
+        "lastOutboundMs": 7954,
+        "beforeAgentMs": 41,
+        "agentToOutboundMs": 7913,
+        "knownLlmMs": 7647
+      },
+      {
+        "caseId": "25-producto_impreciso_savital_sobre",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 6117,
+        "lastOutboundMs": 6117,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 6098,
+        "knownLlmMs": 5805
+      },
+      {
+        "caseId": "25-producto_impreciso_savital_sobre",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 18,
+        "firstOutboundMs": 3131,
+        "lastOutboundMs": 3131,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 3099,
+        "knownLlmMs": 2997
+      },
+      {
+        "caseId": "26-consulta_precio_chocoramo",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 7075,
+        "lastOutboundMs": 7075,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 7051,
+        "knownLlmMs": 6814
+      },
+      {
+        "caseId": "26-consulta_precio_chocoramo",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 5287,
+        "lastOutboundMs": 5287,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 5266,
+        "knownLlmMs": 2941
+      },
+      {
+        "caseId": "27-indeciso_lonchera_nino",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 9279,
+        "lastOutboundMs": 9279,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 9259,
+        "knownLlmMs": 8902
+      },
+      {
+        "caseId": "27-indeciso_lonchera_nino",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 15956,
+        "lastOutboundMs": 15956,
+        "beforeAgentMs": 1730,
+        "agentToOutboundMs": 14226,
+        "knownLlmMs": 9829
+      },
+      {
+        "caseId": "27-indeciso_lonchera_nino",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 15,
+        "firstOutboundMs": 3500,
+        "lastOutboundMs": 3500,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 3467,
+        "knownLlmMs": 3362
+      },
+      {
+        "caseId": "28-producto_no_catalogado_salmon",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 7234,
+        "lastOutboundMs": 7234,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 7212,
+        "knownLlmMs": 6985
+      },
+      {
+        "caseId": "28-producto_no_catalogado_salmon",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 4538,
+        "lastOutboundMs": 4538,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 4518,
+        "knownLlmMs": 3152
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 5500,
+        "lastOutboundMs": 5500,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 5478,
+        "knownLlmMs": 5245
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 5497,
+        "lastOutboundMs": 5497,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 5478,
+        "knownLlmMs": 3282
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 7,
+        "firstOutboundMs": 6563,
+        "lastOutboundMs": 6563,
+        "beforeAgentMs": 18,
+        "agentToOutboundMs": 6545,
+        "knownLlmMs": 6272
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 4,
+        "audited": true,
+        "ackMs": 8,
+        "firstOutboundMs": 9786,
+        "lastOutboundMs": 9786,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 9764,
+        "knownLlmMs": 8837
+      },
+      {
+        "caseId": "29-cliente_nuevo_coca_domicilio",
+        "turn": 5,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 3420,
+        "lastOutboundMs": 3420,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 3393,
+        "knownLlmMs": 1604
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 5648,
+        "lastOutboundMs": 5648,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 5629,
+        "knownLlmMs": 5313
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 2,
+        "audited": true,
+        "ackMs": 18,
+        "firstOutboundMs": 9678,
+        "lastOutboundMs": 9678,
+        "beforeAgentMs": 47,
+        "agentToOutboundMs": 9631,
+        "knownLlmMs": 6679
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 13,
+        "firstOutboundMs": 9018,
+        "lastOutboundMs": 9018,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 8991,
+        "knownLlmMs": 6004
+      },
+      {
+        "caseId": "30-pedido_confirmado_dale_hagale",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 2077,
+        "lastOutboundMs": 2077,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 2051,
+        "knownLlmMs": 1884
+      },
+      {
+        "caseId": "31-consulta_tintico_cafe",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 8378,
+        "lastOutboundMs": 8378,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 8358,
+        "knownLlmMs": 8100
+      },
+      {
+        "caseId": "31-consulta_tintico_cafe",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 12651,
+        "lastOutboundMs": 12651,
+        "beforeAgentMs": 2679,
+        "agentToOutboundMs": 9972,
+        "knownLlmMs": 9585
+      },
+      {
+        "caseId": "31-consulta_tintico_cafe",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 3377,
+        "lastOutboundMs": 3377,
+        "beforeAgentMs": 263,
+        "agentToOutboundMs": 3114,
+        "knownLlmMs": 3004
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 7493,
+        "lastOutboundMs": 7493,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 7471,
+        "knownLlmMs": 6960
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 3917,
+        "lastOutboundMs": 3917,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 3896,
+        "knownLlmMs": 3331
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 8,
+        "firstOutboundMs": 5246,
+        "lastOutboundMs": 5246,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 5226,
+        "knownLlmMs": 4977
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 4,
+        "audited": true,
+        "ackMs": 6,
+        "firstOutboundMs": 5226,
+        "lastOutboundMs": 5226,
+        "beforeAgentMs": 17,
+        "agentToOutboundMs": 5209,
+        "knownLlmMs": 4963
+      },
+      {
+        "caseId": "32-pedido_claro_despensa_domicilio",
+        "turn": 5,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 1821,
+        "lastOutboundMs": 1821,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 1796,
+        "knownLlmMs": 1643
+      },
+      {
+        "caseId": "33-pedido_con_typos_colombianos",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 6847,
+        "lastOutboundMs": 6847,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 6825,
+        "knownLlmMs": 6389
+      },
+      {
+        "caseId": "33-pedido_con_typos_colombianos",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 8542,
+        "lastOutboundMs": 8542,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 8510,
+        "knownLlmMs": 5271
+      },
+      {
+        "caseId": "33-pedido_con_typos_colombianos",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 6,
+        "firstOutboundMs": 8606,
+        "lastOutboundMs": 8606,
+        "beforeAgentMs": 18,
+        "agentToOutboundMs": 8588,
+        "knownLlmMs": 6212
+      },
+      {
+        "caseId": "33-pedido_con_typos_colombianos",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 22,
+        "firstOutboundMs": 1884,
+        "lastOutboundMs": 1884,
+        "beforeAgentMs": 42,
+        "agentToOutboundMs": 1842,
+        "knownLlmMs": 1692
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 7292,
+        "lastOutboundMs": 7292,
+        "beforeAgentMs": 28,
+        "agentToOutboundMs": 7264,
+        "knownLlmMs": 6888
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 3876,
+        "lastOutboundMs": 3876,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 3856,
+        "knownLlmMs": 2991
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 12,
+        "firstOutboundMs": 3474,
+        "lastOutboundMs": 3474,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 3453,
+        "knownLlmMs": 3227
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 4,
+        "audited": true,
+        "ackMs": 12,
+        "firstOutboundMs": 10645,
+        "lastOutboundMs": 10645,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 10623,
+        "knownLlmMs": 8717
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 12,
+        "firstOutboundMs": 5662,
+        "lastOutboundMs": 5662,
+        "beforeAgentMs": 30,
+        "agentToOutboundMs": 5632,
+        "knownLlmMs": 5022
+      },
+      {
+        "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+        "turn": 6,
+        "audited": false,
+        "ackMs": 11,
+        "firstOutboundMs": 2000,
+        "lastOutboundMs": 2000,
+        "beforeAgentMs": 36,
+        "agentToOutboundMs": 1964,
+        "knownLlmMs": 1805
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 8062,
+        "lastOutboundMs": 8062,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 8039,
+        "knownLlmMs": 7525
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 16,
+        "firstOutboundMs": 7860,
+        "lastOutboundMs": 7860,
+        "beforeAgentMs": 3652,
+        "agentToOutboundMs": 4208,
+        "knownLlmMs": 3789
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 24,
+        "firstOutboundMs": 3561,
+        "lastOutboundMs": 3561,
+        "beforeAgentMs": 58,
+        "agentToOutboundMs": 3503,
+        "knownLlmMs": 3092
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 6649,
+        "lastOutboundMs": 6649,
+        "beforeAgentMs": 2771,
+        "agentToOutboundMs": 3878,
+        "knownLlmMs": 3625
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 11,
+        "firstOutboundMs": 9671,
+        "lastOutboundMs": 9671,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 9638,
+        "knownLlmMs": 9146
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 6,
+        "audited": true,
+        "ackMs": 10,
+        "firstOutboundMs": 8216,
+        "lastOutboundMs": 8216,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 8183,
+        "knownLlmMs": 5501
+      },
+      {
+        "caseId": "35-pedido_despensa_sin_cantidades",
+        "turn": 7,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 2303,
+        "lastOutboundMs": 2303,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 2277,
+        "knownLlmMs": 2129
+      },
+      {
+        "caseId": "36-consulta_lacteos",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 7330,
+        "lastOutboundMs": 7330,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 7305,
+        "knownLlmMs": 7069
+      },
+      {
+        "caseId": "36-consulta_lacteos",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 11001,
+        "lastOutboundMs": 11001,
+        "beforeAgentMs": 30,
+        "agentToOutboundMs": 10971,
+        "knownLlmMs": 10133
+      },
+      {
+        "caseId": "36-consulta_lacteos",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 15,
+        "firstOutboundMs": 5256,
+        "lastOutboundMs": 5256,
+        "beforeAgentMs": 39,
+        "agentToOutboundMs": 5217,
+        "knownLlmMs": 3122
+      },
+      {
+        "caseId": "37-descuento_escala_aprobacion",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 17,
+        "firstOutboundMs": 2138,
+        "lastOutboundMs": 2138,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 2106,
+        "knownLlmMs": 1933
+      },
+      {
+        "caseId": "37-descuento_escala_aprobacion",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 3001,
+        "lastOutboundMs": 3001,
+        "beforeAgentMs": 28,
+        "agentToOutboundMs": 2973,
+        "knownLlmMs": 2858
+      },
+      {
+        "caseId": "38-pago_requiere_aprobacion",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 6475,
+        "lastOutboundMs": 6475,
+        "beforeAgentMs": 22,
+        "agentToOutboundMs": 6453,
+        "knownLlmMs": 3305
+      },
+      {
+        "caseId": "38-pago_requiere_aprobacion",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 3019,
+        "lastOutboundMs": 3019,
+        "beforeAgentMs": 28,
+        "agentToOutboundMs": 2991,
+        "knownLlmMs": 2883
+      },
+      {
+        "caseId": "39-pide_humano",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 1980,
+        "lastOutboundMs": 1980,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 1955,
+        "knownLlmMs": 1813
+      },
+      {
+        "caseId": "39-pide_humano",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 3343,
+        "lastOutboundMs": 3343,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 3317,
+        "knownLlmMs": 3193
+      },
+      {
+        "caseId": "40-pedido_confirmado_handoff_operaciones",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 6213,
+        "lastOutboundMs": 6213,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 6192,
+        "knownLlmMs": 5878
+      },
+      {
+        "caseId": "40-pedido_confirmado_handoff_operaciones",
+        "turn": 2,
+        "audited": true,
+        "ackMs": 11,
+        "firstOutboundMs": 6377,
+        "lastOutboundMs": 6377,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 6356,
+        "knownLlmMs": 6080
+      },
+      {
+        "caseId": "40-pedido_confirmado_handoff_operaciones",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 2031,
+        "lastOutboundMs": 2031,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 2011,
+        "knownLlmMs": 1854
+      },
+      {
+        "caseId": "41-real_supermarket_saludo_solo_domicilio",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 3640,
+        "lastOutboundMs": 3640,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 3621,
+        "knownLlmMs": 3505
+      },
+      {
+        "caseId": "41-real_supermarket_saludo_solo_domicilio",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 12,
+        "firstOutboundMs": 3159,
+        "lastOutboundMs": 3159,
+        "beforeAgentMs": 37,
+        "agentToOutboundMs": 3122,
+        "knownLlmMs": 3001
+      },
+      {
+        "caseId": "42-real_supermarket_pago_tarjeta_es_preferencia",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 6545,
+        "lastOutboundMs": 6545,
+        "beforeAgentMs": 21,
+        "agentToOutboundMs": 6524,
+        "knownLlmMs": 6245
+      },
+      {
+        "caseId": "42-real_supermarket_pago_tarjeta_es_preferencia",
+        "turn": 2,
+        "audited": true,
+        "ackMs": 8,
+        "firstOutboundMs": 10949,
+        "lastOutboundMs": 10949,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 10926,
+        "knownLlmMs": 8068
+      },
+      {
+        "caseId": "42-real_supermarket_pago_tarjeta_es_preferencia",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 5073,
+        "lastOutboundMs": 5073,
+        "beforeAgentMs": 26,
+        "agentToOutboundMs": 5047,
+        "knownLlmMs": 1683
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 30,
+        "firstOutboundMs": 6874,
+        "lastOutboundMs": 6874,
+        "beforeAgentMs": 50,
+        "agentToOutboundMs": 6824,
+        "knownLlmMs": 6413
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 5796,
+        "lastOutboundMs": 5796,
+        "beforeAgentMs": 17,
+        "agentToOutboundMs": 5779,
+        "knownLlmMs": 5188
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 7,
+        "firstOutboundMs": 3734,
+        "lastOutboundMs": 3734,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 3714,
+        "knownLlmMs": 3559
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 4,
+        "audited": true,
+        "ackMs": 6,
+        "firstOutboundMs": 6981,
+        "lastOutboundMs": 6981,
+        "beforeAgentMs": 19,
+        "agentToOutboundMs": 6962,
+        "knownLlmMs": 6673
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 11,
+        "firstOutboundMs": 6361,
+        "lastOutboundMs": 6361,
+        "beforeAgentMs": 30,
+        "agentToOutboundMs": 6331,
+        "knownLlmMs": 6154
+      },
+      {
+        "caseId": "43-real_supermarket_correccion_sin_producto",
+        "turn": 6,
+        "audited": false,
+        "ackMs": 14,
+        "firstOutboundMs": 2685,
+        "lastOutboundMs": 2685,
+        "beforeAgentMs": 886,
+        "agentToOutboundMs": 1799,
+        "knownLlmMs": 1660
+      },
+      {
+        "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 24,
+        "firstOutboundMs": 6083,
+        "lastOutboundMs": 6083,
+        "beforeAgentMs": 36,
+        "agentToOutboundMs": 6047,
+        "knownLlmMs": 5759
+      },
+      {
+        "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 31,
+        "firstOutboundMs": 7104,
+        "lastOutboundMs": 7104,
+        "beforeAgentMs": 58,
+        "agentToOutboundMs": 7046,
+        "knownLlmMs": 5525
+      },
+      {
+        "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 13,
+        "firstOutboundMs": 7385,
+        "lastOutboundMs": 7385,
+        "beforeAgentMs": 27,
+        "agentToOutboundMs": 7358,
+        "knownLlmMs": 6914
+      },
+      {
+        "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 33,
+        "firstOutboundMs": 4980,
+        "lastOutboundMs": 4980,
+        "beforeAgentMs": 3202,
+        "agentToOutboundMs": 1778,
+        "knownLlmMs": 1630
+      },
+      {
+        "caseId": "45-real_supermarket_valor_calchichon_coca",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 7747,
+        "lastOutboundMs": 7747,
+        "beforeAgentMs": 24,
+        "agentToOutboundMs": 7723,
+        "knownLlmMs": 7295
+      },
+      {
+        "caseId": "45-real_supermarket_valor_calchichon_coca",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 7715,
+        "lastOutboundMs": 7715,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 7683,
+        "knownLlmMs": 4183
+      },
+      {
+        "caseId": "45-real_supermarket_valor_calchichon_coca",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 16,
+        "firstOutboundMs": 7648,
+        "lastOutboundMs": 7648,
+        "beforeAgentMs": 39,
+        "agentToOutboundMs": 7609,
+        "knownLlmMs": 7147
+      },
+      {
+        "caseId": "45-real_supermarket_valor_calchichon_coca",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 17,
+        "firstOutboundMs": 6608,
+        "lastOutboundMs": 6608,
+        "beforeAgentMs": 60,
+        "agentToOutboundMs": 6548,
+        "knownLlmMs": 6140
+      },
+      {
+        "caseId": "46-real_supermarket_foto_producto_handoff",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 3156,
+        "lastOutboundMs": 3156,
+        "beforeAgentMs": 38,
+        "agentToOutboundMs": 3118,
+        "knownLlmMs": 2999
+      },
+      {
+        "caseId": "46-real_supermarket_foto_producto_handoff",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 2113,
+        "lastOutboundMs": 2113,
+        "beforeAgentMs": 38,
+        "agentToOutboundMs": 2075,
+        "knownLlmMs": 1981
+      },
+      {
+        "caseId": "46-real_supermarket_foto_producto_handoff",
+        "turn": 3,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 5692,
+        "lastOutboundMs": 5692,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 5672,
+        "knownLlmMs": 3133
+      },
+      {
+        "caseId": "47-real_supermarket_reclamo_faltante_handoff",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 2069,
+        "lastOutboundMs": 2069,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 2049,
+        "knownLlmMs": 1861
+      },
+      {
+        "caseId": "47-real_supermarket_reclamo_faltante_handoff",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 6,
+        "firstOutboundMs": 2423,
+        "lastOutboundMs": 2423,
+        "beforeAgentMs": 25,
+        "agentToOutboundMs": 2398,
+        "knownLlmMs": 2299
+      },
+      {
+        "caseId": "48-real_supermarket_comprobante_pago_aprobacion",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 6514,
+        "lastOutboundMs": 6514,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 6481,
+        "knownLlmMs": 3439
+      },
+      {
+        "caseId": "48-real_supermarket_comprobante_pago_aprobacion",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 4095,
+        "lastOutboundMs": 4095,
+        "beforeAgentMs": 33,
+        "agentToOutboundMs": 4062,
+        "knownLlmMs": 3959
+      },
+      {
+        "caseId": "49-real_supermarket_no_hay_ponque_escalamiento",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 7897,
+        "lastOutboundMs": 7897,
+        "beforeAgentMs": 32,
+        "agentToOutboundMs": 7865,
+        "knownLlmMs": 7442
+      },
+      {
+        "caseId": "49-real_supermarket_no_hay_ponque_escalamiento",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 13,
+        "firstOutboundMs": 6115,
+        "lastOutboundMs": 6115,
+        "beforeAgentMs": 2905,
+        "agentToOutboundMs": 3210,
+        "knownLlmMs": 3113
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 1,
+        "audited": false,
+        "ackMs": 9,
+        "firstOutboundMs": 5689,
+        "lastOutboundMs": 5689,
+        "beforeAgentMs": 20,
+        "agentToOutboundMs": 5669,
+        "knownLlmMs": 5385
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 2,
+        "audited": false,
+        "ackMs": 37,
+        "firstOutboundMs": 9358,
+        "lastOutboundMs": 9358,
+        "beforeAgentMs": 63,
+        "agentToOutboundMs": 9295,
+        "knownLlmMs": 6303
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 3,
+        "audited": true,
+        "ackMs": 9,
+        "firstOutboundMs": 4103,
+        "lastOutboundMs": 4103,
+        "beforeAgentMs": 23,
+        "agentToOutboundMs": 4080,
+        "knownLlmMs": 3923
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 4,
+        "audited": false,
+        "ackMs": 8,
+        "firstOutboundMs": 9076,
+        "lastOutboundMs": 9076,
+        "beforeAgentMs": 2351,
+        "agentToOutboundMs": 6725,
+        "knownLlmMs": 6426
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 5,
+        "audited": true,
+        "ackMs": 12,
+        "firstOutboundMs": 12231,
+        "lastOutboundMs": 12231,
+        "beforeAgentMs": 36,
+        "agentToOutboundMs": 12195,
+        "knownLlmMs": 8335
+      },
+      {
+        "caseId": "50-real_supermarket_confirmacion_solo_eso",
+        "turn": 6,
+        "audited": false,
+        "ackMs": 10,
+        "firstOutboundMs": 4577,
+        "lastOutboundMs": 4577,
+        "beforeAgentMs": 31,
+        "agentToOutboundMs": 4546,
+        "knownLlmMs": 1733
+      }
+    ]
+  },
+  "providerUsage": {
+    "application": {
+      "requests": 580,
+      "withUsage": 578,
+      "unreported": 2,
+      "inputTokens": 2983230,
+      "outputTokens": 122414,
+      "totalTokens": 3105644
+    },
+    "customer_actor": {
+      "requests": 130,
+      "withUsage": 130,
+      "unreported": 0,
+      "inputTokens": 267189,
+      "outputTokens": 23267,
+      "totalTokens": 290456
+    },
+    "semantic_judge": {
+      "requests": 56,
+      "withUsage": 56,
+      "unreported": 0,
+      "inputTokens": 3362941,
+      "outputTokens": 63806,
+      "totalTokens": 3426747
+    }
+  },
+  "providerRequestsWithoutUsage": [
+    {
+      "sequence": 21,
+      "caseId": "pedido_claro_con_cantidad_faltante",
+      "role": "application",
+      "startedAt": "2026-11-05T03:24:15.624Z",
+      "usage": null,
+      "status": 200,
+      "providerRequestId": null,
+      "model": null,
+      "finishReason": null,
+      "durationMs": 14852
+    },
+    {
+      "sequence": 59,
+      "caseId": "cliente_nuevo_domicilio_pide_nombre_direccion",
+      "role": "application",
+      "startedAt": "2026-11-05T03:26:03.642Z",
+      "usage": null,
+      "status": 200,
+      "providerRequestId": null,
+      "model": null,
+      "finishReason": null,
+      "durationMs": 30015
+    }
+  ],
+  "stageUsage": [
+    {
+      "stage": "planner",
+      "calls": 169,
+      "input": 694221,
+      "output": 54122
+    },
+    {
+      "stage": "grounding",
+      "calls": 149,
+      "input": 1007405,
+      "output": 36549
+    },
+    {
+      "stage": "composer",
+      "calls": 171,
+      "input": 850312,
+      "output": 22010
+    },
+    {
+      "stage": "composer_evidence_review",
+      "calls": 55,
+      "input": 267321,
+      "output": 4853
+    },
+    {
+      "stage": "order_data_audit",
+      "calls": 31,
+      "input": 145825,
+      "output": 3048
+    },
+    {
+      "stage": "interpreter_contract_repair",
+      "calls": 4,
+      "input": 18192,
+      "output": 2204
+    }
+  ],
+  "outboxCounts": {
+    "whatsapp.inbound_processing:processed": 195,
+    "order.sheet_create:processed": 17,
+    "order.sheet_projection:processed": 34,
+    "order.dispatch_notification:processed": 17
+  },
+  "technicalIncidents": [
+    {
+      "caseId": "02-pedido_claro_con_cantidad_faltante",
+      "turn": 1,
+      "type": "catalog.grounding.rejected",
+      "detail": "catalog.grounding.rejected",
+      "metadata": {
+        "reason": "grounding_deadline",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.2.1:wamid.20261105032251_b3b38c96.2.1",
+        "durationMs": 15022
+      }
+    },
+    {
+      "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+      "turn": 4,
+      "type": "llm.plan.fallback",
+      "detail": "deepseek unavailable: LLM API timeout after 30000ms",
+      "metadata": {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "simulator": null
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 2,
+      "type": "catalog.grounding.rejected",
+      "detail": "catalog.grounding.rejected",
+      "metadata": {
+        "reason": "invalid_grounding_contract",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.2:wamid.20261105032251_b3b38c96.10.2",
+        "durationMs": 6840
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 2,
+      "type": "catalog.grounding.contract_repair",
+      "detail": "catalog.grounding.contract_repair",
+      "metadata": {
+        "round": 2,
+        "errors": [
+          "Do not invent or reconstruct rawItemId: copy observations[].item.rawItemId exactly."
+        ],
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.2:wamid.20261105032251_b3b38c96.10.2"
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 2,
+      "type": "catalog.grounding.contract_repair",
+      "detail": "catalog.grounding.contract_repair",
+      "metadata": {
+        "round": 1,
+        "errors": [
+          "Do not invent or reconstruct rawItemId: copy observations[].item.rawItemId exactly."
+        ],
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.2:wamid.20261105032251_b3b38c96.10.2"
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 3,
+      "type": "catalog.grounding.rejected",
+      "detail": "catalog.grounding.rejected",
+      "metadata": {
+        "reason": "invalid_grounding_contract",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.3:wamid.20261105032251_b3b38c96.10.3",
+        "durationMs": 8605
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 3,
+      "type": "catalog.grounding.contract_repair",
+      "detail": "catalog.grounding.contract_repair",
+      "metadata": {
+        "round": 2,
+        "errors": [
+          "Do not invent or reconstruct rawItemId: copy observations[].item.rawItemId exactly."
+        ],
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.3:wamid.20261105032251_b3b38c96.10.3"
+      }
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "turn": 3,
+      "type": "catalog.grounding.contract_repair",
+      "detail": "catalog.grounding.contract_repair",
+      "metadata": {
+        "round": 1,
+        "errors": [
+          "Do not invent or reconstruct rawItemId: copy observations[].item.rawItemId exactly."
+        ],
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.10.3:wamid.20261105032251_b3b38c96.10.3"
+      }
+    },
+    {
+      "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+      "turn": 2,
+      "type": "catalog.grounding.rejected",
+      "detail": "catalog.grounding.rejected",
+      "metadata": {
+        "round": 1,
+        "reason": "explicit_measure_mismatch",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.13.2:wamid.20261105032251_b3b38c96.13.2",
+        "rawItemId": "turn-wamid-20261105032251-b3b38c96-13-1:item-1"
+      }
+    },
+    {
+      "caseId": "29-cliente_nuevo_coca_domicilio",
+      "turn": 3,
+      "type": "llm.reply.fallback",
+      "detail": "Reply validation failed; using safe fallback",
+      "metadata": {
+        "reason": "required_term_missing",
+        "durationMs": 1100,
+        "executionMode": "deterministic_fallback",
+        "providerMetadata": {
+          "model": "deepseek-chat",
+          "usage": {
+            "total_tokens": 4060,
+            "prompt_tokens": 3972,
+            "completion_tokens": 88,
+            "prompt_tokens_details": {
+              "cached_tokens": 1920
+            },
+            "prompt_cache_hit_tokens": 1920,
+            "prompt_cache_miss_tokens": 2052
+          },
+          "endpoint": "https://api.deepseek.com/chat/completions",
+          "provider": "deepseek",
+          "durationMs": 1098
+        }
+      }
+    },
+    {
+      "caseId": "45-real_supermarket_valor_calchichon_coca",
+      "turn": 2,
+      "type": "catalog.grounding.rejected",
+      "detail": "catalog.grounding.rejected",
+      "metadata": {
+        "round": 1,
+        "reason": "amount_sale_not_authorized",
+        "traceId": "wa:batch:wamid.20261105032251_b3b38c96.45.2:wamid.20261105032251_b3b38c96.45.2",
+        "rawItemId": "turn-wamid-20261105032251-b3b38c96-45-1:item-1"
+      }
+    },
+    {
+      "caseId": "45-real_supermarket_valor_calchichon_coca",
+      "turn": 3,
+      "type": "llm.reply.fallback",
+      "detail": "Reply validation failed; using safe fallback",
+      "metadata": {
+        "reason": "ungrounded_money",
+        "durationMs": 1999,
+        "executionMode": "deterministic_fallback",
+        "providerMetadata": {
+          "model": "deepseek-chat",
+          "usage": {
+            "total_tokens": 4748,
+            "prompt_tokens": 4518,
+            "completion_tokens": 230,
+            "prompt_tokens_details": {
+              "cached_tokens": 1920
+            },
+            "prompt_cache_hit_tokens": 1920,
+            "prompt_cache_miss_tokens": 2598
+          },
+          "endpoint": "https://api.deepseek.com/chat/completions",
+          "provider": "deepseek",
+          "durationMs": 1998
+        }
+      }
+    },
+    {
+      "caseId": "45-real_supermarket_valor_calchichon_coca",
+      "turn": 4,
+      "type": "llm.reply.fallback",
+      "detail": "Reply validation failed; using safe fallback",
+      "metadata": {
+        "reason": "ungrounded_money",
+        "durationMs": 1757,
+        "executionMode": "deterministic_fallback",
+        "providerMetadata": {
+          "model": "deepseek-chat",
+          "usage": {
+            "total_tokens": 4679,
+            "prompt_tokens": 4486,
+            "completion_tokens": 193,
+            "prompt_tokens_details": {
+              "cached_tokens": 1920
+            },
+            "prompt_cache_hit_tokens": 1920,
+            "prompt_cache_miss_tokens": 2566
+          },
+          "endpoint": "https://api.deepseek.com/chat/completions",
+          "provider": "deepseek",
+          "durationMs": 1756
+        }
+      }
+    }
+  ],
+  "manualFindings": [
+    {
+      "id": "A1",
+      "cases": [
+        29,
+        50
+      ],
+      "severity": "P1",
+      "component": "Auditor y contexto interactivo",
+      "finding": "Dos aclaraciones falsas después de selecciones válidas; en 50 la pregunta de variante se combina con botones de pago.",
+      "evidence": "order.data.audit.clarify; selection optionId; payload outbound turn 3",
+      "action": "Conservar selección verificada y evidencia de consentimiento en el contexto del auditor; vincular texto y botones a la misma acción contextual."
+    },
+    {
+      "id": "A2",
+      "cases": [
+        33
+      ],
+      "severity": "P1",
+      "component": "Intérprete, cotización y auditor",
+      "finding": "El mensaje anuncia domicilio gratuito y el comprobante final excluye domicilio; delivery permanece false. El auditor aprueba y el juez lo pasa.",
+      "evidence": "Turnos 2–4, draft.delivery y receipt",
+      "action": "Validar coherencia entre solicitud, modalidad de entrega, resumen y pedido persistido; ampliar el oráculo cuando cambie la intención durante la conversación."
+    },
+    {
+      "id": "A3",
+      "cases": [
+        45
+      ],
+      "severity": "P1",
+      "component": "Redactor y contrato monetario",
+      "finding": "Menciona 250 g tras seleccionar porción al peso y luego omite el importe solicitado en respuestas de contingencia; no se crea pedido.",
+      "evidence": "amount_sale_not_authorized; requestedAmount=5000; llm.reply.fallback ungrounded_money",
+      "action": "Distinguir importe solicitado de importe autorizado, conservarlo al escalar y redactar desde la selección y restricciones actuales."
+    },
+    {
+      "id": "A4",
+      "cases": [
+        2,
+        3
+      ],
+      "severity": "P1",
+      "component": "Proveedor, límites y recuperación",
+      "finding": "Resolutor agota 15 s en 02; intérprete agota 30 s en 03. El 02 recupera; el 03 no culmina.",
+      "evidence": "catalog.grounding.rejected grounding_deadline; llm.plan.fallback",
+      "action": "Instrumentar presupuesto por turno y recuperación contextual; no aumentar timeouts para ocultar la demora."
+    },
+    {
+      "id": "A5",
+      "cases": [
+        10,
+        13
+      ],
+      "severity": "P2",
+      "component": "Contrato de resolución",
+      "finding": "IDs de necesidad inventados/reconstruidos en 10 y selección incompatible con medida en 13; controles impiden aceptarlos.",
+      "evidence": "invalid_grounding_contract; explicit_measure_mismatch",
+      "action": "Corregir correspondencia de IDs/evidencia y evaluar reintentos; conservar barreras de integridad."
+    },
+    {
+      "id": "E1",
+      "cases": [
+        13,
+        21,
+        35,
+        43
+      ],
+      "severity": "Evaluador",
+      "component": "Comprador sintético y juez",
+      "finding": "Cambio de objetivo del comprador, identidad incorrecta de SKU, citas agrupadas/no literales y citas del turno anterior.",
+      "evidence": "evaluator_error",
+      "action": "Corregir protocolo del comprador y atribución de citas; no relajar controles para declarar aprobados estos casos."
+    }
+  ],
+  "caseTable": [
+    {
+      "caseId": "01-pedido_claro_con_cliente_conocido",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-f36bf425-6",
+      "audits": 2,
+      "latency": {
+        "n": 4,
+        "mean": 7533,
+        "p50": 7712,
+        "p95": 12133,
+        "max": 12133,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Pedido y despacho correctos: $12.000."
+    },
+    {
+      "caseId": "02-pedido_claro_con_cantidad_faltante",
+      "status": "passed",
+      "turns": 6,
+      "orderId": "ord-d436721b-f",
+      "audits": 2,
+      "latency": {
+        "n": 6,
+        "mean": 8633,
+        "p50": 7507,
+        "p95": 20185,
+        "max": 20185,
+        "over5000": 5
+      },
+      "pendingHuman": 2,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Recupera pedido; timeout del resolutor de 15 s oculto por passed."
+    },
+    {
+      "caseId": "03-cliente_nuevo_domicilio_pide_nombre_direccion",
+      "status": "integration_fallback",
+      "turns": 5,
+      "orderId": null,
+      "audits": 2,
+      "latency": {
+        "n": 5,
+        "mean": 12131,
+        "p50": 7706,
+        "p95": 31105,
+        "max": 31105,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": true,
+      "assertionsFailed": 2,
+      "manualNote": "Timeout de interpretación de 30 s; no culmina el pedido."
+    },
+    {
+      "caseId": "04-cliente_nuevo_completa_datos",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-9e04b7fd-d",
+      "audits": 1,
+      "latency": {
+        "n": 4,
+        "mean": 5780,
+        "p50": 3447,
+        "p95": 10744,
+        "max": 10744,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Dos paquetes de arepas: $13.000; etiquetas monetarias repetidas."
+    },
+    {
+      "caseId": "05-disponibilidad_producto_premium",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 7518,
+        "p50": 7459,
+        "p95": 7577,
+        "max": 7577,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta de café, sin compra."
+    },
+    {
+      "caseId": "06-consulta_cafe_generica_infiere_similares",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7157,
+        "p50": 8305,
+        "p95": 9426,
+        "max": 9426,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Opciones de café molido."
+    },
+    {
+      "caseId": "07-categoria_jugos",
+      "status": "passed",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 8210,
+        "p50": 8834,
+        "p95": 10065,
+        "max": 10065,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Opciones Cifrut; pendiente humano verificable para otras presentaciones."
+    },
+    {
+      "caseId": "08-categoria_algo_para_la_sed",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7614,
+        "p50": 8207,
+        "p95": 10294,
+        "max": 10294,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Recomendación de bebidas."
+    },
+    {
+      "caseId": "09-categoria_mecato_onces",
+      "status": "passed",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 9450,
+        "p50": 7780,
+        "p95": 15059,
+        "max": 15059,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta resuelta; primera respuesta con poca variedad."
+    },
+    {
+      "caseId": "10-categoria_mercado",
+      "status": "passed",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 11071,
+        "p50": 8252,
+        "p95": 17004,
+        "max": 17004,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta resuelta, pero dos rechazos por rawItemId inválidos."
+    },
+    {
+      "caseId": "11-categoria_aseo",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 10241,
+        "p50": 10313,
+        "p95": 12212,
+        "max": 12212,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta de aseo sin compra."
+    },
+    {
+      "caseId": "12-categoria_onces_panaderia",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 8391,
+        "p50": 8480,
+        "p95": 12096,
+        "max": 12096,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta de onces."
+    },
+    {
+      "caseId": "13-consulta_combo_jamon_queso_pan_parcial",
+      "status": "evaluator_error",
+      "turns": 5,
+      "orderId": null,
+      "audits": 1,
+      "latency": {
+        "n": 5,
+        "mean": 10282,
+        "p50": 11071,
+        "p95": 12387,
+        "max": 12387,
+        "over5000": 5
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 1,
+      "manualNote": "Comprador simulado cambia consulta a compra; además hubo rechazo de medida."
+    },
+    {
+      "caseId": "14-indeciso_antojo_dulce",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 11256,
+        "p50": 9073,
+        "p95": 13439,
+        "max": 13439,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Opciones dulces."
+    },
+    {
+      "caseId": "15-indeciso_desayuno_rapido",
+      "status": "passed",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 9205,
+        "p50": 7698,
+        "p95": 11711,
+        "max": 11711,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Opciones para desayuno; pertinencia mejorable."
+    },
+    {
+      "caseId": "16-indeciso_algo_frio_para_tomar",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 8283,
+        "p50": 8073,
+        "p95": 12565,
+        "max": 12565,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "No inventa refrigeración; consulta a la tienda."
+    },
+    {
+      "caseId": "17-indeciso_presupuesto_bajo",
+      "status": "passed",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 8459,
+        "p50": 7621,
+        "p95": 12490,
+        "max": 12490,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Presupuesto de $5.000 tratado como límite."
+    },
+    {
+      "caseId": "18-producto_impreciso_gaseosa",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7178,
+        "p50": 7524,
+        "p95": 9391,
+        "max": 9391,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Opciones de gaseosa pequeña."
+    },
+    {
+      "caseId": "19-producto_impreciso_leche_bolsa",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 5835,
+        "p50": 4842,
+        "p95": 6827,
+        "max": 6827,
+        "over5000": 1
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Leche entera en bolsa y precios."
+    },
+    {
+      "caseId": "20-producto_impreciso_papel_bano",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7696,
+        "p50": 8148,
+        "p95": 9808,
+        "max": 9808,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Presentaciones de papel."
+    },
+    {
+      "caseId": "21-producto_impreciso_jabon_ropa",
+      "status": "evaluator_error",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7186,
+        "p50": 7392,
+        "p95": 8465,
+        "max": 8465,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "VIA cotiza bien; el juez confunde Varela con Rey."
+    },
+    {
+      "caseId": "22-mercado_basico_con_lista_parcial",
+      "status": "passed",
+      "turns": 7,
+      "orderId": "ord-967d409c-4",
+      "audits": 2,
+      "latency": {
+        "n": 7,
+        "mean": 6372,
+        "p50": 6289,
+        "p95": 11145,
+        "max": 11145,
+        "over5000": 5
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Tres referencias elegidas: $16.500."
+    },
+    {
+      "caseId": "23-pedido_claro_aseo_domicilio",
+      "status": "passed",
+      "turns": 3,
+      "orderId": "ord-e220579b-9",
+      "audits": 2,
+      "latency": {
+        "n": 3,
+        "mean": 5044,
+        "p50": 5086,
+        "p95": 8225,
+        "max": 8225,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Papel y dos jabones: $17.000."
+    },
+    {
+      "caseId": "24-pedido_claro_sin_domicilio",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-6237fb16-b",
+      "audits": 1,
+      "latency": {
+        "n": 4,
+        "mean": 5506,
+        "p50": 4607,
+        "p95": 7759,
+        "max": 7759,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Yogurt y Festival: $9.700."
+    },
+    {
+      "caseId": "25-producto_impreciso_savital_sobre",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 5734,
+        "p50": 6117,
+        "p95": 7954,
+        "max": 7954,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Aclara shampoo sachet frente a acondicionador/botella."
+    },
+    {
+      "caseId": "26-consulta_precio_chocoramo",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 6181,
+        "p50": 5287,
+        "p95": 7075,
+        "max": 7075,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Consulta de Chocoramo sin crear pedido."
+    },
+    {
+      "caseId": "27-indeciso_lonchera_nino",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 9578,
+        "p50": 9279,
+        "p95": 15956,
+        "max": 15956,
+        "over5000": 2
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Respeta preferencia dulce/lácteo al aclararla."
+    },
+    {
+      "caseId": "28-producto_no_catalogado_salmon",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 5886,
+        "p50": 4538,
+        "p95": 7234,
+        "max": 7234,
+        "over5000": 1
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Salmón ausente, pendiente humano; sin sustitución."
+    },
+    {
+      "caseId": "29-cliente_nuevo_coca_domicilio",
+      "status": "integration_fallback",
+      "turns": 5,
+      "orderId": "ord-a1163892-6",
+      "audits": 2,
+      "latency": {
+        "n": 5,
+        "mean": 6153,
+        "p50": 5500,
+        "p95": 9786,
+        "max": 9786,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": true,
+      "assertionsFailed": 0,
+      "manualNote": "Auditor pide aclaración ya resuelta; fallback; finaliza correctamente por $7.200."
+    },
+    {
+      "caseId": "30-pedido_confirmado_dale_hagale",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-dc6a5f07-a",
+      "audits": 2,
+      "latency": {
+        "n": 4,
+        "mean": 6605,
+        "p50": 5648,
+        "p95": 9678,
+        "max": 9678,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Dale, hágale distingue cierre de lista y aceptación; $2.200."
+    },
+    {
+      "caseId": "31-consulta_tintico_cafe",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 8135,
+        "p50": 8378,
+        "p95": 12651,
+        "max": 12651,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Distingue café preparado de empacado."
+    },
+    {
+      "caseId": "32-pedido_claro_despensa_domicilio",
+      "status": "passed",
+      "turns": 5,
+      "orderId": "ord-82287762-3",
+      "audits": 2,
+      "latency": {
+        "n": 5,
+        "mean": 4741,
+        "p50": 5226,
+        "p95": 7493,
+        "max": 7493,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Arroz, aceite y huevos: $23.500."
+    },
+    {
+      "caseId": "33-pedido_con_typos_colombianos",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-11ea55e2-f",
+      "audits": 1,
+      "latency": {
+        "n": 4,
+        "mean": 6470,
+        "p50": 6847,
+        "p95": 8606,
+        "max": 8606,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Productos $7.400 correctos; anuncia domicilio gratis y luego lo excluye."
+    },
+    {
+      "caseId": "34-pedido_sin_cantidades_debe_preguntar",
+      "status": "passed",
+      "turns": 6,
+      "orderId": "ord-ca3d401c-a",
+      "audits": 2,
+      "latency": {
+        "n": 6,
+        "mean": 5492,
+        "p50": 3876,
+        "p95": 10645,
+        "max": 10645,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Aclara presentaciones y cantidades; $5.000."
+    },
+    {
+      "caseId": "35-pedido_despensa_sin_cantidades",
+      "status": "evaluator_error",
+      "turns": 7,
+      "orderId": "ord-fb7798a8-2",
+      "audits": 2,
+      "latency": {
+        "n": 7,
+        "mean": 6617,
+        "p50": 7860,
+        "p95": 9671,
+        "max": 9671,
+        "over5000": 5
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Pedido $23.500 correcto; juez usa citas inválidas. Redacción de empaques mejorable."
+    },
+    {
+      "caseId": "36-consulta_lacteos",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 7862,
+        "p50": 7330,
+        "p95": 11001,
+        "max": 11001,
+        "over5000": 3
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Leche o queso como alternativas; no crea compra."
+    },
+    {
+      "caseId": "37-descuento_escala_aprobacion",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 2570,
+        "p50": 2138,
+        "p95": 3001,
+        "max": 3001,
+        "over5000": 0
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Rebaja no autorizada remitida al humano."
+    },
+    {
+      "caseId": "38-pago_requiere_aprobacion",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 4747,
+        "p50": 3019,
+        "p95": 6475,
+        "max": 6475,
+        "over5000": 1
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Aviso de transferencia, sin acreditar pago."
+    },
+    {
+      "caseId": "39-pide_humano",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 2662,
+        "p50": 1980,
+        "p95": 3343,
+        "max": 3343,
+        "over5000": 0
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Solicitud de persona remitida al humano."
+    },
+    {
+      "caseId": "40-pedido_confirmado_handoff_operaciones",
+      "status": "passed",
+      "turns": 3,
+      "orderId": "ord-0edfae35-f",
+      "audits": 1,
+      "latency": {
+        "n": 3,
+        "mean": 4874,
+        "p50": 6213,
+        "p95": 6377,
+        "max": 6377,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Bre-B por texto, pan $7.600."
+    },
+    {
+      "caseId": "41-real_supermarket_saludo_solo_domicilio",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 3400,
+        "p50": 3159,
+        "p95": 3640,
+        "max": 3640,
+        "over5000": 0
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Saludo contextual de Rocío; no busca productos inexistentes."
+    },
+    {
+      "caseId": "42-real_supermarket_pago_tarjeta_es_preferencia",
+      "status": "passed",
+      "turns": 3,
+      "orderId": "ord-a83386dc-2",
+      "audits": 1,
+      "latency": {
+        "n": 3,
+        "mean": 7522,
+        "p50": 6545,
+        "p95": 10949,
+        "max": 10949,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Tarjeta débito como preferencia; $8.400."
+    },
+    {
+      "caseId": "43-real_supermarket_correccion_sin_producto",
+      "status": "evaluator_error",
+      "turns": 6,
+      "orderId": "ord-19245a1d-9",
+      "audits": 2,
+      "latency": {
+        "n": 6,
+        "mean": 5405,
+        "p50": 5796,
+        "p95": 6981,
+        "max": 6981,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Quita agua, conserva dos Chocoramos $5.600; juez cita otro turno."
+    },
+    {
+      "caseId": "44-real_supermarket_agrega_producto_a_canasta",
+      "status": "passed",
+      "turns": 4,
+      "orderId": "ord-f37f93c5-3",
+      "audits": 1,
+      "latency": {
+        "n": 4,
+        "mean": 6388,
+        "p50": 6083,
+        "p95": 7385,
+        "max": 7385,
+        "over5000": 3
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Agrega queso sin borrar pan; $17.400."
+    },
+    {
+      "caseId": "45-real_supermarket_valor_calchichon_coca",
+      "status": "integration_fallback",
+      "turns": 4,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 4,
+        "mean": 7430,
+        "p50": 7648,
+        "p95": 7747,
+        "max": 7747,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": true,
+      "assertionsFailed": 1,
+      "manualNote": "Importe $5.000 conservado; bandera impide venta. Respuesta cita variante equivocada y cae en fallback."
+    },
+    {
+      "caseId": "46-real_supermarket_foto_producto_handoff",
+      "status": "passed",
+      "turns": 3,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 3,
+        "mean": 3654,
+        "p50": 3156,
+        "p95": 5692,
+        "max": 5692,
+        "over5000": 1
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Imagen: aclara intención y remite al humano."
+    },
+    {
+      "caseId": "47-real_supermarket_reclamo_faltante_handoff",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 2246,
+        "p50": 2069,
+        "p95": 2423,
+        "max": 2423,
+        "over5000": 0
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Reclamo de entrega anterior, sin nueva compra."
+    },
+    {
+      "caseId": "48-real_supermarket_comprobante_pago_aprobacion",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 5305,
+        "p50": 4095,
+        "p95": 6514,
+        "max": 6514,
+        "over5000": 1
+      },
+      "pendingHuman": 0,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Aviso de transferencia, sin aprobación financiera."
+    },
+    {
+      "caseId": "49-real_supermarket_no_hay_ponque_escalamiento",
+      "status": "passed",
+      "turns": 2,
+      "orderId": null,
+      "audits": 0,
+      "latency": {
+        "n": 2,
+        "mean": 7006,
+        "p50": 6115,
+        "p95": 7897,
+        "max": 7897,
+        "over5000": 2
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 0,
+      "manualNote": "Conserva Chocoramos y ponqué de mora pendiente."
+    },
+    {
+      "caseId": "50-real_supermarket_confirmacion_solo_eso",
+      "status": "failed_functional",
+      "turns": 6,
+      "orderId": "ord-16af1fb3-b",
+      "audits": 2,
+      "latency": {
+        "n": 6,
+        "mean": 7506,
+        "p50": 5689,
+        "p95": 12231,
+        "max": 12231,
+        "over5000": 4
+      },
+      "pendingHuman": 1,
+      "degraded": false,
+      "assertionsFailed": 1,
+      "manualNote": "Auditor repregunta variante elegida; texto y botones no coinciden. Pedido final $2.900 correcto."
+    }
+  ],
+  "baseline": {
+    "root": "test-results/pareto-rootcauses-l50",
+    "sourceSha256": "fbe6b8e73abb80431a400056fad2f95b4fd423ffbb21295e3931ef18ef874707",
+    "complete": true,
+    "sourcesUnchanged": true,
+    "sourceDatabaseUnchanged": true,
+    "realDeepSeek": true,
+    "noUnauthorizedNetwork": true,
+    "p0Contracts": false,
+    "counts": {
+      "passed": 41,
+      "failed_integrity": 1,
+      "needs_review": 2,
+      "infra_error": 1,
+      "integration_fallback": 2,
+      "evaluator_error": 3
+    },
+    "turns": 156,
+    "usage": {
+      "requests": 484,
+      "inputTokens": 2357639,
+      "outputTokens": 108157,
+      "totalTokens": 2465796
+    },
+    "timing": {
+      "ackP50": 11,
+      "ackP95": 29,
+      "ackMax": 34,
+      "ackOverOneSecond": 0,
+      "responseP50": 7597,
+      "responseP95": 14165,
+      "responseMax": 30286
+    },
+    "catalogReview": {
+      "calls": 49,
+      "revised": 8,
+      "p50": 1767,
+      "p95": 2727,
+      "tokens": 235636
+    },
+    "orders": 15,
+    "shopkeeperPass": 15
+  }
+}

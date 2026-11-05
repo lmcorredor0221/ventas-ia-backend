@@ -1,0 +1,133 @@
+{
+  "source": "test-results/order-data-audit/2026-11-05T03-11-45-889Z/report.json",
+  "realDeepSeek": true,
+  "meta": "simulated",
+  "google": "simulated",
+  "productionTouched": false,
+  "cases": [
+    {
+      "id": "real_auditor_corrige_importe_y_duplicacion",
+      "status": "passed",
+      "durationMs": 1753,
+      "turnDurationsMs": [],
+      "auditMs": 1753,
+      "errors": []
+    },
+    {
+      "id": "real_auditor_recupera_producto_omitido",
+      "status": "passed",
+      "durationMs": 1910,
+      "turnDurationsMs": [],
+      "auditMs": 1910,
+      "errors": []
+    },
+    {
+      "id": "real_auditor_no_modifica_pedido_correcto",
+      "status": "passed",
+      "durationMs": 1730,
+      "turnDurationsMs": [],
+      "auditMs": 1730,
+      "errors": []
+    },
+    {
+      "id": "real_auditor_presupuesto_no_es_venta",
+      "status": "passed",
+      "durationMs": 1687,
+      "turnDurationsMs": [],
+      "auditMs": 1687,
+      "errors": []
+    },
+    {
+      "id": "real_auditor_no_habilita_catalogo",
+      "status": "passed",
+      "durationMs": 1481,
+      "turnDurationsMs": [],
+      "auditMs": 1481,
+      "errors": []
+    },
+    {
+      "id": "real_flujo_importe_mixto_confirmacion",
+      "status": "passed",
+      "durationMs": 10178,
+      "turnDurationsMs": [
+        8126,
+        2051
+      ],
+      "auditMs": [
+        1642
+      ],
+      "errors": []
+    },
+    {
+      "id": "real_flujo_no_habilitado",
+      "status": "passed",
+      "durationMs": 6629,
+      "turnDurationsMs": [
+        6629
+      ],
+      "auditMs": [],
+      "errors": []
+    },
+    {
+      "id": "real_flujo_modifica_importe_conserva_linea",
+      "status": "passed",
+      "durationMs": 17458,
+      "turnDurationsMs": [
+        7052,
+        7794,
+        2608
+      ],
+      "auditMs": [
+        1539
+      ],
+      "errors": []
+    }
+  ],
+  "stages": {
+    "auditor": {
+      "calls": 7,
+      "inputTokens": 10452,
+      "outputTokens": 877,
+      "totalMs": 11679
+    },
+    "interpreter": {
+      "calls": 6,
+      "inputTokens": 23658,
+      "outputTokens": 1949,
+      "totalMs": 14683
+    },
+    "resolver": {
+      "calls": 4,
+      "inputTokens": 16435,
+      "outputTokens": 676,
+      "totalMs": 7441
+    },
+    "composer": {
+      "calls": 4,
+      "inputTokens": 15078,
+      "outputTokens": 643,
+      "totalMs": 6414
+    }
+  },
+  "latency": {
+    "turns": 6,
+    "p50Ms": 6840.5,
+    "p95Ms": 8126,
+    "over5s": 4,
+    "maxMs": 8126
+  },
+  "hashes": {
+    "server/domain/orderDataAudit.js": "ceb1842fcf620486fc7f6c8ed6a0b44719bc3c9b090b295394cbf1ead862b583",
+    "server/services/orderDataAuditor.js": "eb9dc98869c42a9a753009d61b486532ac72431296da3c72d4eaa68dcde7dfdf",
+    "server/domain/deliveryPolicy.js": "e11f5072047851930471d28bc1599a2e893433835de33ea7b4facadcc50afd68",
+    "server/domain/semanticContracts.js": "7640fdf41b03334bdaad8e3ff60af4a0e43b3a0ecdc18e1da65863b864cccc27",
+    "server/domain/groundingContracts.js": "346c0a10f1781934afa145069880255d3fb079c358533edc25734380ff6f3f10",
+    "server/services/agentRuntime.js": "1a03330571eb45cc1755612f0b231e4301baabde1c320904eeb5146ed3dd7a97",
+    "server/services/llmPlanner.js": "cb91a08bb468f6e481c88b3851705fcf528e2a60bbebb105576720ea18650f71",
+    "server/services/llmReplyComposer.js": "3e680fe13e4417217675d2a33d85d822f297988deed5ccaa6d8554aa84c8a61a",
+    "server/services/groundedDecisionAgent.js": "996bb642a073f07df54d3fed1c13c01200c97e394ae2a703aa9cf641f1de6193",
+    "server/services/conversationGroundingCoordinator.js": "9a02f2355702d49d9b257f70932e4e63b4d8d2c39c7041f2378d24b43fdec12a",
+    "server/services/toolRegistry.js": "2a164ce82895114ad3484ba01dad305b10528aa5b5d7f6bf29ea27a32e5c07d3",
+    "server/services/catalogImportService.js": "c1415d7609da14520c3798b381b622175ff49491e56a9355cff06d402b1046ef"
+  }
+}

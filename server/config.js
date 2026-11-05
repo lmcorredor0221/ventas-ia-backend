@@ -18,6 +18,12 @@ export const RUNTIME_CONFIG = {
   whatsappMode: process.env.WHATSAPP_PROVIDER_MODE ?? 'mock',
   llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 15000),
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 1200),
+  llmGroundingEnabled: process.env.LLM_GROUNDING_ENABLED === 'true',
+  llmOrderAuditEnabled: process.env.LLM_ORDER_AUDIT_ENABLED === 'true',
+  llmOrderAuditTimeoutMs: Number(process.env.LLM_ORDER_AUDIT_TIMEOUT_MS ?? 5000),
+  llmGroundingMaxRounds: Number(process.env.LLM_GROUNDING_MAX_ROUNDS ?? 2),
+  llmGroundingTimeoutMs: Number(process.env.LLM_GROUNDING_TIMEOUT_MS ?? 15000),
+  llmGroundingMaxTokens: Number(process.env.LLM_GROUNDING_MAX_TOKENS ?? 1600),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The mock payment route is useful in local contracts only. Production must

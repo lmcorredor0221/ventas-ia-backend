@@ -5,6 +5,11 @@ import path from 'node:path';
 import { platformLlmConfig } from './platformService.js';
 import { semanticFrameFromPlan, semanticFrameToLegacyPlan } from '../domain/semanticContracts.js';
 import { SemanticInterpreter } from './semanticInterpreter.js';
+import { LlmProviderGateway, defaultModel, stripJson } from './llmProviderGateway.js';
+import { LlmReplyComposer, normalizeVoiceProfile } from './llmReplyComposer.js';
+import { semanticCartIdentityIssues, semanticActionIssues } from '../domain/groundingContracts.js';
+import { paymentMethodsForTenant, paymentChoiceIssues } from '../domain/paymentMethods.js';
+import { deliveryPolicyForTenant } from '../domain/deliveryPolicy.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -76,6 +81,8 @@ export class LLMPlanner {
     this.events = events;
     this.usage = usage;
     this.config = config;
+    this.gateway = new LlmProviderGateway();
+    this.composer = new LlmReplyComposer({ store, events, usage, config, getTenant: (id) => this.getTenant(id), gateway: this.gateway });
     this.interpreter = new SemanticInterpreter({
       provider: (input) => this.generateProviderPlan(input),
       fallback: (input) => this.generateFallbackPlan(input),
@@ -113,7 +120,9 @@ export class LLMPlanner {
     // proveedor no puede transportar SKU, precio, stock ni toolPlan.
     const semanticFrame = interpretation.semanticFrame;
     const compatiblePlan = semanticFrameToLegacyPlan(semanticFrame);
-    const coerced = coercePlanWithConversation(compatiblePlan, { text, conversation });
+    const coerced = this.config?.llmGroundingEnabled
+      ? compatiblePlan
+      : coercePlanWithConversation(compatiblePlan, { text, conversation });
     if (coerced.intent !== compatiblePlan.intent) {
       this.events.emit({
         type: 'llm.context.override',
@@ -128,7 +137,7 @@ export class LLMPlanner {
         },
       });
     }
-    const enriched = enrichPlannerOutput(coerced, text);
+    const enriched = this.config?.llmGroundingEnabled ? coerced : enrichPlannerOutput(coerced, text);
     const plan = {
       schemaVersion: 'ventas-ia-llm-plan.v2',
       provider: context.provider,
@@ -197,17 +206,19 @@ export class LLMPlanner {
       responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
       tone: tenant?.config?.agentPolicy?.tone,
       assistantName: tenant?.config?.agentPolicy?.assistantName ?? 'Rocío',
+      paymentMethods: paymentMethodsForTenant(tenant),
+      deliveryPolicy: deliveryPolicyForTenant(tenant),
     };
     if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
     return { tenant, config, provider: config.provider ?? 'deepseek' };
   }
 
-  async generateProviderPlan({ tenantId, text, customerProfile, conversation, context }) {
+  async generateProviderPlan({ tenantId, conversationId, text, normalized, customerProfile, conversation, context }) {
     const { config, provider } = context;
     // Catalog data is an internal compatibility dependency for the local
     // simulator/fallback only. It is not part of the interpreter contract or
     // the production provider prompt.
-    const products = await this.listProducts(tenantId);
+    const products = config.simulator ? await this.listProducts(tenantId) : [];
     if (provider === 'deepseek' && config.simulator === 'codex_cli') {
       const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) });
       return {
@@ -239,11 +250,18 @@ export class LLMPlanner {
         },
       };
     }
-    const apiResult = await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products });
+    const apiResult = await this.apiStructuredParse({ tenantId, conversationId, text, normalized, customerProfile, conversation, config, products });
     return { plan: apiResult.plan, providerMetadata: apiResult.providerMetadata, executionMode: 'provider_api' };
   }
 
-  async generateFallbackPlan({ tenantId, text, customerProfile, conversation, context }) {
+  async generateFallbackPlan({ tenantId, text, normalized, customerProfile, conversation, context }) {
+    if (this.config?.llmGroundingEnabled) {
+      const prior = conversation?.reasoningPlan?.pendingInterpretation;
+      return { plan: { intent: 'human_handoff', items: [], confidence: 0, reasoningSummary: 'Proveedor no disponible' },
+        executionMode: 'safe_handoff_fallback', providerMetadata: null,
+        diagnostics: { pendingInterpretation: { messageId: normalized?.messageId ?? null, text,
+          earlierMessages: prior ? [...(prior.earlierMessages ?? []), { messageId: prior.messageId, text: prior.text }].slice(-7) : [] } } };
+    }
     const products = await this.listProducts(tenantId);
     return {
       plan: this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products }),
@@ -252,72 +270,45 @@ export class LLMPlanner {
     };
   }
 
-  async apiStructuredParse({ text, customerProfile, conversation, config, products }) {
+  async apiStructuredParse({ tenantId, conversationId, text, normalized, customerProfile, conversation, config, products }) {
     if ((config.provider ?? 'deepseek') === 'mock') throw new Error('mock provider selected');
-    const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(config.provider));
-    if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(config.provider).join('/')}`);
-    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, config });
+    const prompt = buildPlannerPrompt({ text, normalized, customerProfile, conversation, products, config });
 
-    if (config.provider === 'google') return retryTransientProviderCall(() => callGemini({ config, apiKey, prompt }));
-    return retryTransientProviderCall(() => callChatCompletions({ config, apiKey, prompt }));
+    let result = await this.gateway.request({ config, prompt, attempts: this.config?.llmGroundingEnabled ? 1 : 3 });
+    if (this.config?.llmGroundingEnabled && (!Array.isArray(result.plan?.items)
+      || (result.plan?.schemaVersion && !['semantic-frame.v1', 'semantic-frame.v2'].includes(result.plan.schemaVersion)))) {
+      throw new Error('Invalid semantic frame from provider');
+    }
+    if (this.config?.llmGroundingEnabled) {
+      const contractIssues = (plan) => [...semanticCartIdentityIssues(plan, [
+        ...(conversation?.orderDraft?.items ?? []),
+        // A catalog follow-up refers to a known inquiry, not a purchased line.
+        ...(plan.intent === 'catalog_query' ? conversation?.catalogGrounding?.items ?? [] : []),
+      ], text),
+        ...semanticActionIssues(plan, conversation, text),
+        ...paymentChoiceIssues(plan, config.paymentMethods ?? paymentMethodsForTenant(null))];
+      const issues = contractIssues(result.plan);
+      if (issues.length) {
+        this.events.emit({ type: 'llm.cart_identity.repair', tenantId, conversationId,
+          detail: 'Interpreter must use valid cart identities and tenant payment IDs', metadata: { issues } });
+        // The unsuccessful attempt is billed too; the repaired response is
+        // recorded by plan(). No normal turn pays for a second interpretation.
+        this.usage?.recordLlmPlan(tenantId, { providerMetadata: result.providerMetadata, inputText: prompt,
+          outputPlan: result.plan, executionMode: 'provider_api', conversationId, stage: 'interpreter_contract_repair' });
+        result = await this.gateway.request({ config, attempts: 1,
+          prompt: `${prompt}\nCorrige el contrato con el contexto original: rawItemId debe ser null para nueva línea o un ID existente para actualizarla; paymentPreference debe ser exactamente un ID habilitado de paymentMethods, o null con unavailablePaymentPreference si no existe equivalencia contextual. Conserva el significado del cliente y reevalúa el intent si sus precondiciones no se cumplen. Devuelve el frame completo.\n${JSON.stringify({ invalidFrame: result.plan, validationErrors: issues })}` });
+        if (!Array.isArray(result.plan?.items) || contractIssues(result.plan).length) {
+          // Record the failed repair before the safe handoff as well.
+          this.usage?.recordLlmPlan(tenantId, { providerMetadata: result.providerMetadata, inputText: prompt,
+            outputPlan: result.plan, executionMode: 'provider_api', conversationId, stage: 'interpreter_contract_repair' });
+          throw new Error('Interpreter returned invalid cart/payment contract after one repair');
+        }
+      }
+    }
+    return { ...result, plan: normalizeProviderPlan(result.plan) };
   }
 
-  async composeReply({ tenantId, conversationId, facts, fallbackText }) {
-    const startedAt = Date.now();
-    const tenant = await this.getTenant(tenantId);
-    const platformConfig = platformLlmConfig(this.store.getState());
-    const config = {
-      timeoutMs: this.config?.llmRequestTimeoutMs,
-      maxTokens: Math.min(Number(this.config?.llmMaxTokens ?? 350), 500),
-      ...platformConfig,
-      responseLanguage: tenant?.config?.agentPolicy?.responseLanguage ?? platformConfig.responseLanguage,
-      tone: tenant?.config?.agentPolicy?.tone ?? 'tendero_colombiano',
-      assistantName: tenant?.config?.agentPolicy?.assistantName ?? 'Rocío',
-    };
-    if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
-    const provider = config.provider ?? 'deepseek';
-    const canCompose = this.config?.llmResponseComposerEnabled
-      && !config.simulator
-      && provider !== 'mock';
-    if (!canCompose) {
-      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
-    }
-    try {
-      const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(provider));
-      if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(provider).join('/')}`);
-      const prompt = buildReplyPrompt({ facts, fallbackText, config });
-      const result = provider === 'google'
-        ? await retryTransientProviderCall(() => callGeminiReply({ config, apiKey, prompt }))
-        : await retryTransientProviderCall(() => callChatReply({ config, apiKey, prompt }));
-      const text = validateComposedReply(result.text, { facts, fallbackText });
-      this.events.emit({
-        type: 'llm.reply.composed',
-        tenantId,
-        conversationId,
-        detail: `Customer reply composed via ${result.providerMetadata.provider}/${result.providerMetadata.model}`,
-        metadata: { providerMetadata: result.providerMetadata, voice: normalizeVoiceProfile(config.tone), durationMs: Date.now() - startedAt },
-      });
-      this.usage?.recordLlmPlan(tenantId, {
-        providerMetadata: result.providerMetadata,
-        inputText: prompt,
-        outputPlan: { reply: text },
-        executionMode: 'provider_api',
-        conversationId,
-        stage: 'composer',
-        durationMs: Date.now() - startedAt,
-      });
-      return { text, executionMode: 'provider_api', providerMetadata: result.providerMetadata };
-    } catch (error) {
-      this.events.emit({
-        type: 'llm.reply.fallback',
-        tenantId,
-        conversationId,
-        detail: `${provider} reply composer unavailable: ${error.message}`,
-        metadata: { provider, model: config.model, voice: normalizeVoiceProfile(config.tone) },
-      });
-      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
-    }
-  }
+  async composeReply(input) { return this.composer.composeReply(input); }
 
   codexSimulatedDeepSeekParse({ tenantId, text, customerProfile, conversation, products }) {
     const plan = this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products });
@@ -425,7 +416,7 @@ export class LLMPlanner {
     if (containsAny(normalized, ['pagado', 'transferencia', 'comprobante', 'confirmo'])) {
       return {
         intent: 'payment_confirmation',
-        recommendedTools: ['approval_gate'],
+        recommendedTools: ['whatsapp_business_messaging'],
         missingFields: [],
         confidence: 0.92,
       };
@@ -881,31 +872,68 @@ function looksLikeNewOrder(text) {
   ]);
 }
 
-function buildPlannerPrompt({ text, customerProfile, conversation, config = {} }) {
+function buildPlannerPrompt({ text, normalized, customerProfile, conversation, config = {} }) {
   return [
     'Eres el interprete semantico de un agente comercial por WhatsApp.',
-    'Devuelve solo JSON valido con el contrato semantic-frame.v2: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, replyTo, messageInterpretations, cartMutation, collectionComplete, proposedAction, ambiguities, confidence y reasoningSummary.',
+    'Devuelve solo JSON valido con el contrato semantic-frame.v2: intent, conversationAct, catalogSearchReady, delivery, customerDelta, items, missingCustomerFields, replyTo, messageInterpretations, cartMutation, collectionComplete, proposedAction, ambiguities, confidence y reasoningSummary. En catalog_query declara catalogSearchReady como booleano según el contexto; fuera de consultas puede ser null.',
     'No incluyas markdown, explicaciones ni texto fuera del JSON.',
     'Intents permitidos: greeting, general_query, delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     `Contexto cultural de interpretacion: ${normalizeVoiceProfile(config.tone)}. Interpreta modismos colombianos, errores de escritura probables, marcas incompletas, cantidades, sabores, ocasiones y senales como personal, familiar, grande o para compartir.`,
-    'Cada items[] debe contener rawText literal, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. No elimines ningun producto mencionado.',
+    'Cada items[] debe contener rawItemId, rawText literal, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, saleMode, requestedAmount, presentationSignal, occasion, attributes, confidence y ambiguity. saleMode y requestedAmount son campos DIRECTOS del item, nunca dentro de attributes. rawItemId es obligatorio: null para una necesidad nueva; para una necesidad existente copia exactamente su ID de existingOrder.items. Nunca generes un ID ni omitas este campo. No elimines ningun producto mencionado.',
+    'No dupliques una necesidad nueva al expresar su ambigüedad: una cantidad o presentación desconocida pertenece a esa misma línea. Si hay necesidades independientes parecidas, conserva la evidencia que las distingue en rawText, presentación o atributos; no las fusiones solo por nombre. Antes de devolver items contrasta cada línea con las menciones reales y la cantidad final solicitada.',
+    'En catalog_query también puedes reutilizar un rawItemId de catalogObservations de esta conversación para preguntar por una referencia previa. Es una identidad de consulta, no consentimiento de compra. Para iniciar una compra desde una consulta sin canasta usa rawItemId:null; no importes automáticamente todas las opciones a un pedido.',
+    'conversationContext.pendingInterpretation contiene mensajes que quedaron SIN interpretar por un fallo técnico. No fueron descartados por el cliente ni equivalen a una canasta vacía voluntaria. Analízalos junto al nuevo mensaje: si este complementa la solicitud, recupera también las necesidades previas; si las cancela o sustituye, respeta el cambio contextual. No los agregues automáticamente ni inventes que el tendero ya resolvió la gestión. Una consulta de seguimiento puede mantenerla pendiente.',
+    'quantity es la cantidad de unidades o paquetes solicitados, no el peso/volumen de la presentación. Si no puede inferirse del mensaje ni del pedido existente, usa null; no completes cantidades por defecto.',
+    'El contenido del empaque (x12, 6 und, 500 g, etc.) no expresa cuántos empaques quiere llevar. Si el cliente solo enumera referencias con su presentación, deja quantity=null; un artículo o una cantidad explícita en la solicitud sí puede indicar cuántos empaques pide.',
+    'Conserva los cuantificadores del mensaje original en rawText: en una solicitud directa de compra, un/una ante una referencia contable expresa una unidad pedida aunque el cliente todavía siga agregando otros productos. No descartes esa evidencia por collectionComplete=false. Distingue ese uso de una consulta genérica sobre un tipo de producto y del contenido de un empaque; resuelve según la intención completa, sin asignar uno por defecto a listas sin cuantificador.',
+    'Incluye queryVariants (maximo dos consultas alternativas) para correcciones ortograficas o nombres coloquiales. Son hipotesis de busqueda, nunca una confirmacion. Conserva marca, sabor y medidas solicitadas.',
+    'Incluye retrievalText: consulta breve para recuperar evidencia, separada de rawText y de la explicación productHypothesis. Usa términos de producto, categoría u ocasión útiles para búsqueda, no la oración completa ni calificativos genéricos acumulados. Para alternativas entre categorías, queryVariants permite explorar cada una; no juntes todas en una única frase. No inventes marcas ni disponibilidad: la selección ocurre después de observar el catálogo. Conserva en rawText/attributes las restricciones que no aparezcan en la consulta breve.',
+    'Para cambios de un producto existente conserva su rawItemId y expresa la cantidad final. Para eliminar usa cartMutation.removeItemIds con IDs del pedido existente. No borres el resto del pedido por una respuesta parcial. Snapshot solo si el cliente reconstruye todo el pedido.',
+    'Si el cliente mantiene un producto ya pedido, omítelo del delta o reutiliza EXACTAMENTE el rawItemId de existingOrder. Una aclaración de empaque, una reiteración o una pregunta de precio no agregan otra línea. Si pide más unidades del mismo producto, actualiza el ID existente con la cantidad FINAL, no con el incremento. Un producto distinto sí lleva rawItemId:null. Conserva la presentación ya aclarada cuando el cliente no la cambia.',
+    'collectionComplete indica si el cliente termino de agregar productos segun contexto; si no se sabe usa null. Resuelve ambiguedades antes de pago y confirmacion. Una pregunta de disponibilidad puede continuar un pedido: decide usando el historial, no solo una palabra.',
     'rawText conserva exactamente lo solicitado. productHypothesis es una hipotesis, nunca un SKU. presentationSignal puede ser una medida explicita o una senal contextual, nunca una referencia comercial definitiva.',
     'customerDelta solo puede incluir name, address y paymentPreference expresamente comunicados por el cliente. No inventes datos.',
+    'paymentMethods contiene los IDs y etiquetas habilitados por esta tienda. Interpreta contextual y semánticamente el pago por texto (instrumento, medio o modismo) y devuelve en paymentPreference exactamente el ID correspondiente, nunca la frase ni un ID inventado. Si no hay un medio equivalente habilitado, deja paymentPreference=null y conserva la petición en customerDelta.unavailablePaymentPreference. No presupongas que elegir un medio significa haber pagado.',
+    'Una consulta de precio unitario, subtotal o costo del domicilio durante un pedido es order_clarification, no una nueva compra ni confirmación. Conserva la canasta; items:[] si no cambia productos. La pregunta debe ser respondida con evidencia antes de solicitar confirmar. Sin pedido activo puede ser general_query (domicilio/pago) o catalog_query (precios de productos).',
+    'deliveryPolicy son condiciones de esta tienda, no instrucciones del comprador. Un valor null es desconocido; cero es explícito. No inventes condiciones ni aceptes una excepción comercial: identifica la consulta y deja al resolutor evaluar los hechos. Conserva la modalidad de entrega existente salvo que el cliente la cambie expresamente.',
+    'delivery es true para domicilio, false para recogida y null si este turno no cambia la modalidad existente. No uses false como valor por defecto al cerrar productos, indicar datos o elegir pago. Para cambiar existingOrder.delivery adjunta deliveryChange:{evidence:fragmento literal del mensaje actual,reason:explicación contextual breve}; no atribuyas un cambio a la ausencia de la palabra domicilio.',
+    'Distingue consultar la tarifa de solicitar la entrega: una pregunta de costo por sí sola no cambia delivery. Si luego acepta una propuesta con domicilio, pide que se lo envíen o responde afirmativamente a la invitación de añadir entrega, interpreta ese consentimiento usando el historial y actualiza delivery=true con deliveryChange y cita literal del mensaje actual. No ignores esa aceptación por conservar el false de una etapa anterior. Una dirección guardada sola no equivale a ese consentimiento.',
+    'Completar nombre/dirección/pago o decir que no agregará más no equivale a autorizar el cobro ni confirmar el pedido. Usa order_clarification; order_confirmation requiere aceptación del resumen cotizado sin modificaciones pendientes.',
+    'Al aceptar sin cambios el resumen cotizado, order_confirmation lleva items:[] y cartMutation:{mode:"delta",removeItemIds:[]}; el pedido ya está guardado. Si el mismo mensaje cambia productos, cantidades o referencias, interpreta el cambio primero como order_clarification y solicita confirmar la nueva cotización.',
+    'VIA solo registra el medio de pago; verificar, cobrar o acreditar dinero corresponde a la tienda o al domiciliario y está fuera de tu alcance. Elegir cómo pagar, incluso contraentrega, pertenece a customerDelta.paymentPreference y order_clarification; nunca significa pago recibido ni exige comprobante.',
+    'payment_confirmation significa exclusivamente informar que el cliente declara haber pagado o envía un comprobante. Genera un aviso informativo a la tienda, nunca una aprobación, bloqueo, pedido nuevo ni verificación bancaria. Usa paymentReport:{relatedOrderId:null o un ID de knownOrders} para asociar el aviso solo si el contexto lo identifica; no asumas que cualquier soporte corresponde al último pedido. Sin evidencia suficiente deja null para consultar la referencia, sin bloquear pedidos.',
+    'Interpreta la finalidad de un adjunto con el texto, pregunta pendiente e historial: una imagen tras anunciar un comprobante puede ser payment_confirmation; una foto para identificar un producto sigue catalog_query/human_handoff. Un adjunto aislado sin contexto requiere aclarar su finalidad (general_query), no asumir un comprobante. No ves los píxeles ni puedes leer o certificar una transferencia. Una promesa de enviar soporte sin currentMessage.mediaRef no es un adjunto recibido. Un agradecimiento posterior es general_query y no un nuevo reporte de pago.',
     'No incluyas SKU, precio, stock, subtotal, candidatos de catalogo, aliases, toolPlan, filtros, herramientas, recommendedTools ni una eleccion final de producto.',
     'No asumas disponibilidad. Si el termino es incierto, conserva rawText, plantea la mejor hipotesis y baja confidence o explica ambiguity.',
     'replyTo solo debe referenciar los messageId recibidos en este turno; messageInterpretations debe explicar cada mensaje de la rafaga en una etiqueta breve. cartMutation.mode es delta salvo que el cliente reconstruya explicitamente todo el pedido. proposedAction es una propuesta, no una herramienta ni un hecho comercial. reasoningSummary debe ser una sola frase breve, sin cadena de pensamiento privada.',
     'Si el cliente solo saluda (por ejemplo hola, buenas, buenas tardes, hola veci) usa greeting y no busques productos. Si hace una pregunta general sobre la tienda sin pedir productos usa general_query.',
-    'Si el cliente pregunta "tiene", "hay" o "maneja", usa catalog_query aunque mencione productos concretos. Si reclama un faltante, entrega equivocada, demora o dano, usa human_handoff.',
+    'Decide el acto del turno con el historial, no heredes automáticamente el intent anterior. Un cierre o agradecimiento después de una consulta usa general_query con items:[] si no contiene otra necesidad. No conviertas despedidas en búsquedas, compras vacías ni solicitudes humanas. Si además agrega o cambia algo, conserva ese significado y actúa sobre él. order_clarification corresponde a un pedido vigente; cerrar una consulta informativa no crea un pedido.',
+    'catalog_query requiere items con los sujetos reales de búsqueda (producto, categoría o necesidad contextual), incluidos los de una pregunta sobre opciones previas. No uses toda una despedida como productHypothesis. Descompón consultas combinadas en sujetos independientes; conserva el presupuesto como restricción, no como nombre de producto.',
+    'conversationAct=close expresa un cierre sin nueva necesidad; no borra una gestión pendiente. Si el turno agrega una consulta o cambio, interpreta esa necesidad y no lo marques como close. catalogSearchReady=false solo cuando no hay sujeto inferible ni en el mensaje ni en el historial para buscar: usa proposedAction=ask_clarification y explica la ambigüedad. Una pregunta sobre sabores sin producto conocido requiere preguntar de qué producto; una categoría, ocasión, producto con errores o referencia a opciones previas sí permite buscar, incluso si faltan marca o presentación. No confundas falta de sujeto con varias coincidencias posibles.',
+    'catalogSearchReady NO significa listo para comprar ni cantidad conocida. Una consulta de precio, uso o atributos de productos identificados requiere buscar aunque diga que solo está consultando o que no comprará. Si no hay sujeto inferible usa items:[]; no representes la falta de sujeto como un producto ficticio. Si hay subjects en items, decide una búsqueda para verificarlos, no una aclaración de checkout.',
+    'pendingHumanRequests son gestiones ya abiertas. Si retomas la misma necesidad, humanTask:{requestId:ID existente,newNeed:false}; únicamente una necesidad distinta justifica newNeed:true. Un agradecimiento no renueva ni resuelve automáticamente la gestión. El seguimiento puede ser general_query, informando que continúa pendiente sin abrir otra tarea.',
+    'Distingue una consulta de disponibilidad de una compra usando el turno completo y el pedido actual. Palabras como tiene, hay o maneja no anulan una intención de compra contextual. Si reclama un faltante, entrega equivocada, demora o dano, usa human_handoff.',
     'Sin domicilio, cantidad, presupuesto ni una accion directa de compra, una consulta abierta como "me colabora con mecato" o "jabon para lavar ropa" usa catalog_query; no pidas pago para una consulta. Expresiones como "necesito arroz, aceite y huevos", "quiero llevar X", "me haces un mercado" o una lista de productos solicitada para comprar son accion directa de compra y usan delivery_order aunque el cliente todavía no haya dicho domicilio o cantidades; en ese caso conserva los items y marca los campos faltantes.',
-    'Si el cliente pide "5000 de X", usa budgetAmount 5000; no lo conviertas en 5000 unidades.',
+    'Distingue por contexto compra por importe de presupuesto máximo o negociación. Para comprar 5000 pesos de un producto usa saleMode:"amount", requestedAmount:5000, quantity:null. Para consultar qué alcanza por 5000 usa budgetAmount:5000 sin requestedAmount. Para compra por unidades saleMode:"units", requestedAmount:null. No decidas si el catálogo autoriza la venta por valor: lo comprueba el resolutor con la bandera. Nunca interpretes esos pesos como miles de unidades.',
     JSON.stringify({
       text,
+      paymentMethods: config.paymentMethods ?? paymentMethodsForTenant(null),
+      currentMessage: { messageType: normalized?.messageType ?? 'text', mediaRef: normalized?.mediaRef ?? null },
+      knownOrders: conversation?.paymentOrderContext ?? [],
+      pendingHumanRequests: conversation?.pendingHumanRequests ?? [],
+      paymentNotices: (conversation?.paymentNotices ?? []).slice(-4).map(n => ({ kind: n.kind, orderId: n.orderId, hasAttachment: Boolean(n.attachment), createdAt: n.createdAt })),
+      deliveryPolicy: config.deliveryPolicy ?? null,
       customerProfile: customerProfile ? {
         name: customerProfile.name ?? null,
         defaultAddress: customerProfile.defaultAddress ?? null,
         preferredPaymentMethod: customerProfile.preferences?.preferredPaymentMethod ?? null,
       } : null,
       existingOrder: semanticOrderContext(conversation?.orderDraft),
+      catalogObservations: conversation?.catalogGrounding?.resolutions?.map((resolution) => ({
+        rawItemId: resolution.rawItemId, status: resolution.status, question: resolution.question,
+        options: (resolution.product ? [resolution.product] : (resolution.options ?? []).map((candidate) => candidate.product))
+          .map((product) => ({ name: product.name, presentation: product.presentation })),
+      })) ?? null,
       conversationContext: semanticConversationContext(conversation),
     }),
   ].join('\n');
@@ -917,12 +945,18 @@ function semanticOrderContext(draft) {
     version: Number(draft.version ?? 0),
     delivery: Boolean(draft.delivery),
     paymentMethod: draft.paymentMethod ?? null,
+    customerName: draft.customerName ?? null,
+    deliveryAddress: draft.deliveryAddress ?? null,
     missingFields: Array.isArray(draft.missingFields) ? draft.missingFields : [],
     items: (draft.items ?? []).map((item) => ({
       rawItemId: item.rawItemId ?? null,
-      rawText: item.rawName ?? item.catalogQuery ?? null,
+      rawText: item.rawText ?? item.rawName ?? item.catalogQuery ?? null,
+      productHypothesis: item.productHypothesis ?? item.catalogQuery ?? null,
       productName: item.product?.name ?? null,
       quantity: item.quantity ?? null,
+      saleMode: item.saleMode ?? null, requestedAmount: item.requestedAmount ?? null,
+      budgetAmount: item.budgetAmount ?? null,
+      resolutionStatus: item.resolution?.status ?? null,
       presentation: item.product?.presentation ?? item.requestedPresentation ?? null,
     })),
   };
@@ -936,70 +970,18 @@ function semanticConversationContext(conversation) {
     stage: conversation.stage ?? null,
     zone: conversation.zone ?? null,
     nextStep: conversation.nextStep ?? null,
+    pendingQuestion: conversation.pendingQuestion ?? null,
+    pendingInterpretation: conversation.reasoningPlan?.pendingInterpretation ?? null,
     lastTool: conversation.lastTool ?? null,
     recentMessages: messages.slice(-12).map((message) => ({
       id: message.id ?? null,
       role: message.role ?? null,
       text: String(message.text ?? '').slice(0, 600),
+      messageType: message.messageType ?? 'text',
+      hasAttachment: Boolean(message.mediaRef),
       createdAt: message.createdAt ?? null,
     })),
   };
-}
-
-function buildReplyPrompt({ facts, fallbackText, config }) {
-  const requiredTerms = replyRequiredTerms(facts, fallbackText);
-  return [
-    'Redacta la respuesta final para un comprador de una tienda colombiana por WhatsApp.',
-    'Devuelve solo JSON valido con la propiedad reply.',
-    `Perfil de voz: ${normalizeVoiceProfile(config.tone)}. Usa cercania colombiana solo si encaja; nunca caricaturices ni repitas muletillas.`,
-    `Nombre del asistente de esta tienda: ${String(config.assistantName ?? 'Rocío').trim() || 'Rocío'}. Preséntalo solo cuando el contexto lo requiera; no lo inventes ni lo repitas en cada mensaje.`,
-    'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
-    'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
-    'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
-    JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
-  ].join('\n');
-}
-
-function validateComposedReply(text, { facts, fallbackText }) {
-  const reply = String(text ?? '').replace(/\s+/g, ' ').trim();
-  if (reply.length < 3 || reply.length > 1_200) return fallbackText;
-  const normalizedReply = normalize(reply);
-  const requiredTerms = replyRequiredTerms(facts, fallbackText);
-  if (requiredTerms.some((term) => !normalizedReply.includes(normalize(term)))) return fallbackText;
-  const allowedMoney = extractMoneyTokens(JSON.stringify(facts ?? {}).concat(` ${fallbackText}`));
-  const replyMoney = extractMoneyTokens(reply);
-  if ([...replyMoney].some((value) => !allowedMoney.has(value))) return fallbackText;
-  return reply;
-}
-
-function replyRequiredTerms(facts, fallbackText) {
-  const products = facts?.products ?? facts?.items ?? [];
-  const names = products
-    .map((item) => item?.name ?? item?.product?.name)
-    .filter(Boolean)
-    .slice(0, 6);
-  const required = [...names, ...(facts?.requiredTerms ?? [])]
-    .map((value) => String(value).trim())
-    .filter(Boolean);
-  if (facts?.subtotal !== undefined && facts?.subtotal !== null) required.push(formatMoneyForReply(facts.subtotal));
-  return [...new Set(required)];
-}
-
-function extractMoneyTokens(value) {
-  return new Set((String(value ?? '').match(/\$\s?[\d.]+/g) ?? [])
-    .map((item) => item.replace(/\s+/g, '')));
-}
-
-function formatMoneyForReply(value) {
-  return `$ ${Number(value ?? 0).toLocaleString('es-CO')}`;
-}
-
-function normalizeVoiceProfile(value) {
-  const tone = String(value ?? 'tendero_colombiano').trim().toLowerCase();
-  if (tone === 'tendero_bogotano' || tone === 'tendero_colombiano') {
-    return 'tendero_colombiano: cercano, respetuoso, claro, breve y natural; puede usar modismos locales con moderación';
-  }
-  return tone || 'tendero_colombiano: cercano, respetuoso, claro y breve';
 }
 
 function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products }) {
@@ -1009,8 +991,8 @@ function buildCodexCliPlannerPrompt({ text, customerProfile, conversation, produ
     'Tu tarea es inferir heurísticamente la canasta: corrige errores ortográficos probables, modismos, marcas incompletas, presentaciones, cantidades y pedidos por valor.',
     'No confirmes disponibilidad ni propongas herramientas: solo interpreta lenguaje.',
     'Contrato JSON semantic-frame.v2: intent, conversationAct, delivery, customerDelta, items, missingCustomerFields, replyTo, messageInterpretations, cartMutation, collectionComplete, proposedAction, ambiguities, confidence y reasoningSummary.',
-    'Para cada item usa rawText original, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, presentationSignal, occasion, attributes, confidence y ambiguity. Trata familiar, personal y grande como hipotesis contextuales, no como medidas fijas.',
-    'Reglas clave: "5000 de X" es budgetAmount 5000, no 5000 unidades. "calchichon" probablemente es salchichon/salchicha/carnes frias. "coca-cola 350" pide presentacion 350 ml.',
+    'Para cada item usa rawText original, productHypothesis, brandHint, categoryHint, quantity, budgetAmount, saleMode, requestedAmount, presentationSignal, occasion, attributes, confidence y ambiguity. saleMode/requestedAmount son campos directos, nunca attributes. Trata familiar, personal y grande como hipotesis contextuales, no como medidas fijas.',
+    'Distingue compra por importe (saleMode:amount, requestedAmount en COP, quantity:null, budgetAmount:null) de consulta por presupuesto (budgetAmount, requestedAmount:null). Usa contexto, no conviertas dinero en unidades. El catálogo autoriza el importe más adelante. Infiere calchichon como hipótesis de salchichón/salchicha/carnes frías y coca-cola 350 como presentación posible de 350 ml, sin decidir identidad sin catálogo.',
     'Si cliente nuevo pide domicilio agrega customer_name y delivery_address. Conserva todos los productos candidatos.',
     'Si el cliente reclama entrega incompleta, producto equivocado, demora o faltante, escala a humano con human_handoff.',
     'No incluyas SKU, precio, stock, subtotal, candidatos de catalogo, aliases, toolPlan ni una respuesta dirigida al cliente.',
@@ -1135,145 +1117,6 @@ function execFileClosedStdin(command, args, options) {
     });
     child.stdin?.end();
   });
-}
-
-async function callChatCompletions({ config, apiKey, prompt }) {
-  const provider = config.provider ?? 'deepseek';
-  const url = resolveBaseUrl(config, provider) ?? (provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions');
-  const startedAt = Date.now();
-  const model = config.model ?? defaultModel(provider);
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: Number(config.temperature ?? 0),
-      max_tokens: Number(config.maxTokens ?? 1200),
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  }, Number(config.timeoutMs ?? 15000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  return {
-    plan: normalizeProviderPlan(JSON.parse(stripJson(payload.choices?.[0]?.message?.content ?? '{}'))),
-    providerMetadata: {
-      provider,
-      model,
-      endpoint: redactedEndpoint(url),
-      durationMs: Date.now() - startedAt,
-      usage: payload.usage ?? null,
-    },
-  };
-}
-
-async function callChatReply({ config, apiKey, prompt }) {
-  const provider = config.provider ?? 'deepseek';
-  const url = resolveBaseUrl(config, provider) ?? (provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions');
-  const startedAt = Date.now();
-  const model = config.model ?? defaultModel(provider);
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      temperature: Number(config.temperature ?? 0.2),
-      max_tokens: Number(config.maxTokens ?? 350),
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato solicitado.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  }, Number(config.timeoutMs ?? 15000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  const parsed = JSON.parse(stripJson(payload.choices?.[0]?.message?.content ?? '{}'));
-  return {
-    text: String(parsed.reply ?? '').trim(),
-    providerMetadata: {
-      provider,
-      model,
-      endpoint: redactedEndpoint(url),
-      durationMs: Date.now() - startedAt,
-      usage: payload.usage ?? null,
-    },
-  };
-}
-
-async function callGemini({ config, apiKey, prompt }) {
-  const model = config.model ?? defaultModel('google');
-  const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const joiner = baseUrl.includes('?') ? '&' : '?';
-  const startedAt = Date.now();
-  const endpoint = `${baseUrl}${joiner}key=${encodeURIComponent(apiKey)}`;
-  const response = await fetchWithTimeout(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      generationConfig: {
-        temperature: Number(config.temperature ?? 0),
-        maxOutputTokens: Number(config.maxTokens ?? 1200),
-        responseMimeType: 'application/json',
-      },
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    }),
-  }, Number(config.timeoutMs ?? 15000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`google API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  return {
-    plan: normalizeProviderPlan(JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'))),
-    providerMetadata: {
-      provider: 'google',
-      model,
-      endpoint: redactedEndpoint(endpoint),
-      durationMs: Date.now() - startedAt,
-      usage: payload.usageMetadata ?? null,
-    },
-  };
-}
-
-async function callGeminiReply({ config, apiKey, prompt }) {
-  const model = config.model ?? defaultModel('google');
-  const baseUrl = resolveBaseUrl(config, 'google') ?? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const joiner = baseUrl.includes('?') ? '&' : '?';
-  const endpoint = `${baseUrl}${joiner}key=${encodeURIComponent(apiKey)}`;
-  const startedAt = Date.now();
-  const response = await fetchWithTimeout(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      generationConfig: {
-        temperature: Number(config.temperature ?? 0.2),
-        maxOutputTokens: Number(config.maxTokens ?? 350),
-        responseMimeType: 'application/json',
-      },
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    }),
-  }, Number(config.timeoutMs ?? 15000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`google API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  const parsed = JSON.parse(stripJson(payload.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}'));
-  return {
-    text: String(parsed.reply ?? '').trim(),
-    providerMetadata: {
-      provider: 'google',
-      model,
-      endpoint: redactedEndpoint(endpoint),
-      durationMs: Date.now() - startedAt,
-      usage: payload.usageMetadata ?? null,
-    },
-  };
 }
 
 function normalizeProviderPlan(plan) {
@@ -1523,7 +1366,8 @@ function inferResponseStrategy({ intent, items, missingFields }) {
   if (intent === 'delivery_order') return missingFields.length ? 'ask_clarification' : 'quote';
   if (intent === 'order_clarification') return missingFields.length ? 'ask_clarification' : 'quote';
   if (intent === 'order_confirmation') return 'transactional_write';
-  if (intent === 'discount_request' || intent === 'payment_confirmation') return 'approval';
+  if (intent === 'discount_request') return 'approval';
+  if (intent === 'payment_confirmation') return 'conversation';
   if (intent === 'human_handoff') return 'handoff';
   return 'guide';
 }
@@ -1567,104 +1411,6 @@ function buildCodexReasoningNotes({ text, plan, customerProfile }) {
     notes.push(`Faltantes detectados: ${plan.missingFields.join(', ')}.`);
   }
   return notes;
-}
-
-function resolveBaseUrl(config, provider) {
-  const value = config.baseUrl ?? resolveSecret(config.baseUrlRef, defaultBaseUrlNames(provider));
-  if (!value) return null;
-  if (provider === 'deepseek' && !value.endsWith('/chat/completions')) return `${value.replace(/\/$/, '')}/chat/completions`;
-  if (provider === 'openai' && !value.endsWith('/chat/completions')) return `${value.replace(/\/$/, '')}/chat/completions`;
-  return value;
-}
-
-function resolveSecret(ref, fallbackNames) {
-  const names = [ref, ...(fallbackNames ?? [])].filter(Boolean);
-  for (const name of names) {
-    if (process.env[name]) return process.env[name];
-  }
-  return null;
-}
-
-function defaultKeyNames(provider) {
-  if (provider === 'openai') return ['OPENAI_API_KEY'];
-  if (provider === 'google') return ['GEMINI_API_KEY', 'GOOGLE_API_KEY'];
-  return ['DEEPSEEK_API_KEY'];
-}
-
-function defaultBaseUrlNames(provider) {
-  if (provider === 'openai') return ['OPENAI_BASE_URL'];
-  if (provider === 'google') return ['GEMINI_BASE_URL', 'GOOGLE_GENERATIVE_LANGUAGE_BASE_URL'];
-  return ['DEEPSEEK_BASE_URL'];
-}
-
-function defaultModel(provider) {
-  if (provider === 'openai') return 'gpt-4o-mini';
-  if (provider === 'google') return 'gemini-1.5-flash';
-  if (provider === 'mock') return 'mock-structured-parser';
-  return 'deepseek-chat';
-}
-
-function stripJson(value) {
-  return String(value)
-    .trim()
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '');
-}
-
-async function fetchWithTimeout(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error(`LLM API timeout after ${timeoutMs}ms`);
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Tres intentos acotados absorben cortes breves de red o respuestas temporales
-// del proveedor sin convertir una degradacion real en una espera indefinida.
-async function retryTransientProviderCall(action, { attempts = 3, delayMs = 250 } = {}) {
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      return await action();
-    } catch (error) {
-      lastError = error;
-      if (attempt >= attempts || !isTransientProviderError(error)) throw error;
-      await sleep(delayMs * attempt);
-    }
-  }
-  throw lastError;
-}
-
-function isTransientProviderError(error) {
-  const message = String(error?.message ?? '').toLowerCase();
-  return message.includes('fetch failed')
-    || message.includes('timeout')
-    || /api\s+(429|5\d\d)\b/.test(message);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function shorten(value, max = 500) {
-  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return text.length > max ? `${text.slice(0, max)}...` : text;
-}
-
-function redactedEndpoint(value) {
-  try {
-    const url = new URL(value);
-    if (url.searchParams.has('key')) url.searchParams.set('key', '***');
-    return url.toString();
-  } catch {
-    return String(value ?? '').replace(/key=[^&]+/i, 'key=***');
-  }
 }
 
 function normalize(value) {

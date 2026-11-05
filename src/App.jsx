@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
 import { patchJson, postJson } from './core/api/client.js';
 import { normalizeApiErrorMessage, normalizeOpsOverview } from './core/api/contracts.js';
-import OrderProgressCard from './features/orders/OrderProgressCard.jsx';
+import PaymentNotices from './features/orders/PaymentNotices.jsx';
+import OrderProgressCard, { OrderPricingSummary } from './features/orders/OrderProgressCard.jsx';
 import {
   Activity,
   AlertTriangle,
@@ -512,6 +513,7 @@ function App() {
     : []);
   const [requests, setRequests] = useState(loadFixtureSize ? pendingRequests : []);
   const [orders, setOrders] = useState([]);
+  const [paymentNotices, setPaymentNotices] = useState([]);
   const [queueFocus, setQueueFocus] = useState('pending');
   const [resolvingRequestId, setResolvingRequestId] = useState('');
   const [updatingOrderId, setUpdatingOrderId] = useState('');
@@ -647,6 +649,7 @@ function App() {
         if (!loadFixtureSize) setConversationList(overview.conversations ?? []);
         setRequests(overview.pendingRequests ?? []);
         setOrders(overview.orders ?? []);
+        setPaymentNotices(overview.paymentNotices ?? []);
         setEvents(overview.events ?? []);
         setUsageSummary(overview.usage ?? defaultUsageSummary(effectiveTenantId));
         const statusResponse = await fetch(`/api/saas/tenants/${encodeURIComponent(effectiveTenantId)}/status`, { credentials: 'include' });
@@ -874,13 +877,15 @@ function App() {
         credentials: 'include',
         body: JSON.stringify(configPatch),
       });
-      if (!response.ok) throw new Error(`Config update ${response.status}`);
-      const updatedTenant = await response.json();
+      const updatedTenant = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(updatedTenant.error ?? `No se pudo guardar la configuración (${response.status}).`);
       setTenantList((current) => current.map((item) => (item.id === updatedTenant.id ? updatedTenant : item)));
       setBackendStatus('connected');
       setRefreshKey((value) => value + 1);
-    } catch {
-      setBackendStatus('offline');
+      return updatedTenant;
+    } catch (error) {
+      if (error instanceof TypeError) setBackendStatus('offline');
+      throw error;
     }
   }
 
@@ -1041,14 +1046,23 @@ function App() {
   async function resolveRequest(id, outcome, options = {}) {
     const note = options.note ?? draftReply;
     const responseMode = options.responseMode ?? 'none';
+    const request = requests.find((item) => item.id === id);
+    const isDeliveryReview = request && isDeliveryPolicyReview(request);
     setResolvingRequestId(id);
     setQueueNotice(null);
     try {
       if (backendStatus !== 'connected') throw new Error('offline');
-      await postJson(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, { outcome, note, responseMode, approverId: auth?.user?.id ?? 'micro-app-user' }, { headers: csrfHeaders(auth) });
+      await postJson(`/api/pending-requests/${encodeURIComponent(id)}/resolve`, {
+        outcome, note, responseMode,
+        ...(isDeliveryReview ? { deliveryResolution: options.deliveryResolution } : {}),
+      }, { headers: csrfHeaders(auth) });
       if (selectedHumanRequestId === id) setSelectedHumanRequestId('');
       setRequests((current) => current.filter((item) => item.id !== id));
-      setQueueNotice({ type: 'success', text: outcome === 'approved' ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.' : 'Decisión guardada. La lista se actualizará enseguida.' });
+      setQueueNotice({ type: 'success', text: isDeliveryReview
+        ? 'Revisión comercial guardada. El cliente debe aceptar una cotización vigente antes de confirmar el pedido.'
+        : outcome === 'approved' && request && isDeliveryRequest(request)
+          ? 'Pedido tomado. Ya puedes alistarlo y marcarlo despachado.'
+          : 'Decisión guardada. La lista se actualizará enseguida.' });
       setRefreshKey((value) => value + 1);
     } catch (error) {
       setQueueNotice({ type: 'error', text: normalizeApiErrorMessage(error, 'No pudimos confirmar la decisión. Actualiza la lista antes de volver a intentarlo.') });
@@ -1288,6 +1302,10 @@ function App() {
           <Metric icon={Activity} label="En conversación" value={metrics.active} tone="green" />
           <Metric icon={ShoppingBag} label="Domicilios del plan" value={formatUsageRatio(usageSummary.metrics.deliveries_confirmed, usageSummary.limits.includedDeliveries)} tone="ink" />
         </section>
+
+        {['summary', 'approvals'].includes(activeView) && (
+          <PaymentNotices notices={paymentNotices.filter(n => n.tenantId === tenantId)} />
+        )}
 
         {activeView === 'summary' && (
           <SummaryView
@@ -3061,12 +3079,14 @@ function ConversationPanel({
           <div className={`whatsapp-message is-${message.role}`} key={message.id}>
             <span>{message.label}</span>
             <p>{message.text}</p>
+            {message.mediaRef && <a href={waHref} target="_blank" rel="noreferrer">Ver adjunto en WhatsApp</a>}
             <small>{formatMessageTime(message.createdAt)}</small>
           </div>
         ))}
       </div>
 
       <div className="info-stack compact-info conversation-side-card tab-summary">
+        <PaymentNotices notices={conversation.paymentNotices ?? []} />
         <InfoLine icon={Search} label="Necesidad" value={conversation.need} />
         <InfoLine icon={ShoppingBag} label="Valor / etapa" value={`${conversation.value} · ${stageLabel(conversation.stage)}`} />
         <InfoLine icon={PlugZap} label="Herramienta" value={toolLabel(conversation.lastTool)} />
@@ -3117,6 +3137,7 @@ function conversationMessages(conversation) {
           ? 'Aviso'
           : 'Asistente',
     text: message.text || `[${message.messageType ?? 'mensaje'}]`,
+    mediaRef: message.mediaRef ?? null,
     createdAt: message.createdAt,
   }));
 }
@@ -3146,11 +3167,16 @@ function InfoLine({ icon: Icon, label, value }) {
   );
 }
 
+function isDeliveryPolicyReview(request) {
+  const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
+  return request.action === 'delivery_policy_review' || snapshot.action === 'delivery_policy_review';
+}
+
 function isDeliveryRequest(request) {
+  if (isDeliveryPolicyReview(request)) return false;
   const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
   return request.action === 'prepare_delivery_order'
-    || snapshot.action === 'prepare_delivery_order'
-    || (request.assignedTeam === 'operaciones' && normalizeLabel(request.title).includes('pedido'));
+    || snapshot.action === 'prepare_delivery_order';
 }
 
 function operationalOrders(orders, requests) {
@@ -3166,26 +3192,34 @@ function operationalOrders(orders, requests) {
 function humanRequestViewModel(request, conversation) {
   const snapshot = request.contextSnapshot ?? request.context_snapshot ?? {};
   const isDeliveryOrder = isDeliveryRequest(request);
+  const isDeliveryReview = isDeliveryPolicyReview(request);
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const itemLines = items.map((item) => ({
-    name: item.name ?? item.catalogQuery ?? 'Producto por validar',
-    quantity: item.quantity ?? 1,
+    name: item.product?.name ?? item.name ?? item.catalogQuery ?? 'Producto por validar',
+    quantity: item.quantity ?? (isDeliveryReview ? '?' : 1),
+    saleMode: item.saleMode,
+    requestedAmount: item.requestedAmount,
     total: item.lineTotal ?? null,
   }));
-  const subtotal = snapshot.subtotal ?? itemLines.reduce((sum, item) => sum + Number(item.total ?? 0), 0);
+  const subtotal = snapshot.pricing?.subtotal ?? snapshot.subtotal ?? null;
   return {
     isDeliveryOrder,
-    title: isDeliveryOrder ? 'Pedido por preparar' : request.title,
-    task: isDeliveryOrder ? 'Pedido confirmado' : 'Cliente por responder',
+    isDeliveryReview,
+    title: isDeliveryReview ? 'Revisar condiciones del domicilio' : isDeliveryOrder ? 'Pedido por preparar' : request.title,
+    task: isDeliveryReview ? 'Revisión comercial · Sin confirmar' : isDeliveryOrder ? 'Pedido confirmado' : 'Cliente por responder',
     customer: snapshot.customerName ?? conversation?.customer ?? request.conversationId,
     address: snapshot.deliveryAddress ?? conversation?.deliveryAddress ?? 'Sin dirección registrada',
     waId: snapshot.customerWaId ?? conversation?.waId ?? '',
     orderId: snapshot.orderId ?? conversation?.orderId ?? '',
     items: itemLines,
     subtotal,
+    pricing: snapshot.pricing ?? null,
+    customerQuestion: snapshot.customerQuestion ?? snapshot.summary ?? '',
     paymentMethod: snapshot.paymentMethod ?? null,
     context: request.context,
-    consequence: isDeliveryOrder
+    consequence: isDeliveryReview
+      ? 'La decisión aplica solo a esta solicitud. El cliente debe aceptar el nuevo resumen antes de confirmar su pedido.'
+      : isDeliveryOrder
       ? 'Revisa productos y dirección. Al tomarlo, te encargas de alistarlo y coordinar la entrega.'
       : request.consequence,
     primaryAction: isDeliveryOrder ? 'Marcar tomado' : 'Aprobar',
@@ -3321,26 +3355,29 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                 <span className="request-kind">{view.task}</span>
               </div>
               <h3>{view.title}</h3>
-              {view.isDeliveryOrder ? (
+              {view.isDeliveryOrder || view.isDeliveryReview ? (
                 <div className="delivery-brief">
-                  <ol className="order-journey" aria-label="Estado del pedido">
-                    <li className="is-done"><Check size={13} aria-hidden="true" />Pedido confirmado</li>
-                    <li className="is-current"><ShoppingBag size={13} aria-hidden="true" />Por preparar</li>
-                    <li><Clock3 size={13} aria-hidden="true" />Entrega coordinada por tu tienda</li>
-                  </ol>
+                  {view.isDeliveryOrder && (
+                    <ol className="order-journey" aria-label="Estado del pedido">
+                      <li className="is-done"><Check size={13} aria-hidden="true" />Pedido confirmado</li>
+                      <li className="is-current"><ShoppingBag size={13} aria-hidden="true" />Por preparar</li>
+                      <li><Clock3 size={13} aria-hidden="true" />Entrega coordinada por tu tienda</li>
+                    </ol>
+                  )}
                   <div className="delivery-main">
                     <ShoppingBag size={20} />
                     <div>
-                      <span>Pedido</span>
-                      <strong>{view.orderId || 'Sin número de referencia'}</strong>
+                      <span>{view.isDeliveryReview ? 'Solicitud de domicilio' : 'Pedido'}</span>
+                      <strong>{view.isDeliveryReview ? 'Pendiente de revisión y aceptación del cliente' : view.orderId || 'Sin número de referencia'}</strong>
                     </div>
-                    <b>{formatCurrency(view.subtotal)}</b>
                   </div>
+                  <OrderPricingSummary pricing={view.pricing} subtotal={view.subtotal} showMinimum={view.isDeliveryReview} />
+                  {view.isDeliveryReview && <p className="request-summary">{view.customerQuestion || view.context}</p>}
                   <div className="delivery-items">
                     {view.items.slice(0, 5).map((item, index) => (
-                      <div key={`${item.name}-${index}`}>
-                        <strong>{item.quantity}x</strong>
-                        <span>{item.name}</span>
+                      <div key={`${item.name}-${index}`} className={item.saleMode === 'amount' ? 'is-amount-sale' : undefined}>
+                        <strong>{item.saleMode === 'amount' ? formatCurrency(item.requestedAmount) : `${item.quantity}x`}</strong>
+                        <span>{item.name}{item.saleMode === 'amount' ? ' · por valor' : ''}</span>
                       </div>
                     ))}
                     {view.items.length > 5 && <em>+ {view.items.length - 5} producto(s) más</em>}
@@ -3364,6 +3401,15 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                 </button>
                 <span>{view.waId || request.conversationId}</span>
               </div>
+              {view.isDeliveryReview ? (
+                <DeliveryPolicyReviewForm
+                  key={`${request.id}:${view.pricing?.draftVersion ?? ''}:${view.pricing?.policyRevision ?? ''}`}
+                  requestId={request.id}
+                  onResolve={onResolve}
+                  busy={Boolean(resolvingRequestId)}
+                />
+              ) : (
+              <>
               {!view.isDeliveryOrder && (
                 <>
                   <textarea value={draftReply} onChange={(event) => setDraftReply(event.target.value)} rows={2} placeholder="Respuesta corta para el cliente o nota interna" />
@@ -3397,11 +3443,75 @@ function HumanQueue({ requests, orders = [], conversations, onSelectConversation
                   </button>
                 )}
               </div>
+              </>
+              )}
             </article>
           );
         })}
       </div>
     </section>
+  );
+}
+
+function parseNullableCopAmount(value, label) {
+  const text = value.trim();
+  if (!text) return null;
+  const amount = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(amount) || amount < 0) {
+    throw new Error(`${label}: usa pesos enteros no negativos, sin puntos ni comas, dentro del rango seguro.`);
+  }
+  return amount;
+}
+
+function DeliveryPolicyReviewForm({ requestId, onResolve, busy }) {
+  const [minimumException, setMinimumException] = useState(false);
+  const [deliveryFee, setDeliveryFee] = useState('');
+  const [minimumSubtotal, setMinimumSubtotal] = useState('');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+
+  function resolve(outcome) {
+    setError('');
+    try {
+      if (!note.trim()) throw new Error('Escribe el motivo de esta decisión.');
+      const deliveryResolution = {
+        minimumException: outcome === 'approved' && minimumException,
+        deliveryFee: outcome === 'approved' ? parseNullableCopAmount(deliveryFee, 'Costo del domicilio') : null,
+        minimumSubtotal: outcome === 'approved' ? parseNullableCopAmount(minimumSubtotal, 'Pedido mínimo') : null,
+      };
+      onResolve(requestId, outcome, { responseMode: 'none', note: note.trim(), deliveryResolution });
+    } catch (failure) {
+      setError(failure.message);
+    }
+  }
+
+  return (
+    <form className="customer-reply-settings" noValidate onSubmit={(event) => { event.preventDefault(); resolve('approved'); }}>
+      <p>Valores solo para esta solicitud: deja vacío para conservar la condición actual o desconocida. Cero autoriza un valor de $0.</p>
+      <div className="config-field-grid">
+        <label className="config-field">
+          <span>Costo del domicilio autorizado (COP)</span>
+          <input inputMode="numeric" value={deliveryFee} disabled={busy} onChange={(event) => setDeliveryFee(event.target.value)} placeholder="Conservar condición actual" />
+        </label>
+        <label className="config-field">
+          <span>Pedido mínimo autorizado (COP)</span>
+          <input inputMode="numeric" value={minimumSubtotal} disabled={busy} onChange={(event) => setMinimumSubtotal(event.target.value)} placeholder="Conservar condición actual" />
+        </label>
+      </div>
+      <label className="payment-method-enabled">
+        <input type="checkbox" checked={minimumException} disabled={busy} onChange={(event) => setMinimumException(event.target.checked)} />
+        Autorizar excepción al mínimo solo para este pedido
+      </label>
+      <label className="config-field">
+        <span>Motivo de la decisión</span>
+        <textarea value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} rows={2} required placeholder="Explica por qué mantienes, autorizas o rechazas estas condiciones" />
+      </label>
+      {error && <p role="alert">{error}</p>}
+      <div className="button-row">
+        <button className="approve-btn" type="submit" disabled={busy}><Check size={16} />{busy ? 'Guardando…' : 'Guardar condiciones'}</button>
+        <button className="deny-btn" type="button" disabled={busy} onClick={() => resolve('denied')}><X size={16} />Rechazar excepción</button>
+      </div>
+    </form>
   );
 }
 
@@ -6126,9 +6236,67 @@ function editablePaymentMethods(methods) {
   }));
 }
 
+function DeliveryPolicySettings({ policy = {}, onSaveConfig }) {
+  const storedFee = policy.deliveryFee ?? null;
+  const storedMinimum = policy.deliveryMinimumSubtotal ?? null;
+  const [deliveryFee, setDeliveryFee] = useState(() => String(storedFee ?? ''));
+  const [minimumSubtotal, setMinimumSubtotal] = useState(() => String(storedMinimum ?? ''));
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState(null);
+
+  useEffect(() => { setDeliveryFee(String(storedFee ?? '')); }, [storedFee]);
+  useEffect(() => { setMinimumSubtotal(String(storedMinimum ?? '')); }, [storedMinimum]);
+
+  async function save(event) {
+    event.preventDefault();
+    setNotice(null);
+    try {
+      const fee = parseNullableCopAmount(deliveryFee, 'Costo del domicilio');
+      const minimum = parseNullableCopAmount(minimumSubtotal, 'Pedido mínimo');
+      const orderPolicy = {};
+      if (fee !== storedFee) orderPolicy.deliveryFee = fee;
+      if (minimum !== storedMinimum) orderPolicy.deliveryMinimumSubtotal = minimum;
+      if (!Object.keys(orderPolicy).length) {
+        setNotice({ type: 'success', text: 'No hay cambios por guardar.' });
+        return;
+      }
+      setSaving(true);
+      await onSaveConfig({ orderPolicy });
+      setNotice({ type: 'success', text: 'Condiciones de domicilio guardadas.' });
+    } catch (error) {
+      setNotice({ type: 'error', text: error.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="customer-reply-settings" noValidate onSubmit={save}>
+      <h3>Condiciones del domicilio</h3>
+      <p>Valores en pesos enteros. Un campo vacío queda sin configurar. Escribe 0 para ofrecer domicilio gratis o no exigir mínimo.</p>
+      <div className="config-field-grid">
+        <label className="config-field">
+          <span><Truck size={16} /> Costo del domicilio (COP)</span>
+          <input inputMode="numeric" value={deliveryFee} disabled={saving} onChange={(event) => { setDeliveryFee(event.target.value); setNotice(null); }} placeholder="Sin configurar" />
+          <small>Una tarifa por pedido. 0 = domicilio gratis.</small>
+        </label>
+        <label className="config-field">
+          <span><ShoppingBag size={16} /> Pedido mínimo para domicilio (COP)</span>
+          <input inputMode="numeric" value={minimumSubtotal} disabled={saving} onChange={(event) => { setMinimumSubtotal(event.target.value); setNotice(null); }} placeholder="Sin configurar" />
+          <small>Solo productos, sin sumar el domicilio. 0 = sin mínimo.</small>
+        </label>
+      </div>
+      {notice && <p role={notice.type === 'error' ? 'alert' : 'status'}>{notice.text}</p>}
+      <button className="approve-btn" type="submit" disabled={saving}><Check size={16} />{saving ? 'Guardando…' : 'Guardar condiciones de domicilio'}</button>
+    </form>
+  );
+}
+
 function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const [activeConfigTab, setActiveConfigTab] = useState('store');
   const [paymentMethods, setPaymentMethods] = useState(() => editablePaymentMethods(tenant.config?.orderPolicy?.paymentMethods));
+  const [savingReplySettings, setSavingReplySettings] = useState(false);
+  const [replySettingsNotice, setReplySettingsNotice] = useState(null);
   const [llmDraft, setLlmDraft] = useState(() => ({
     phoneNumberId: tenant.config?.whatsapp?.phoneNumberId ?? '',
     phoneNumberIdRef: tenant.config?.whatsapp?.phoneNumberIdRef ?? `${tenant.id.toUpperCase()}_WHATSAPP_PHONE_NUMBER_ID_REF`,
@@ -6136,7 +6304,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
     verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
     appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
     spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-    catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:P1000',
+    catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:Q1000',
     tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
     humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
     customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
@@ -6154,7 +6322,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
       verifyTokenRef: tenant.config?.whatsapp?.verifyTokenRef ?? 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF',
       appSecretRef: tenant.config?.whatsapp?.appSecretRef ?? 'WHATSAPP_APP_SECRET_REF',
       spreadsheetIdRef: tenant.config?.googleSheets?.spreadsheetIdRef ?? `${tenant.id.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`,
-      catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:P1000',
+      catalogRange: tenant.config?.googleSheets?.catalogRange ?? tenant.config?.googleSheets?.range ?? 'Catalogo!A1:Q1000',
       tone: tenant.config?.agentPolicy?.tone ?? 'tendero_colombiano',
       humanEscalation: tenant.config?.agentPolicy?.humanEscalation ?? true,
       customerProfilesRange: tenant.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
@@ -6175,10 +6343,21 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
   const removePaymentMethod = (index) => {
     setPaymentMethods((current) => current.length > 1 ? current.filter((_, methodIndex) => methodIndex !== index) : current);
   };
-  const saveCustomerReplySettings = () => onSaveConfig({
-    agentPolicy: { tone: llmDraft.tone },
-    orderPolicy: { paymentMethods },
-  });
+  const saveCustomerReplySettings = async () => {
+    setSavingReplySettings(true);
+    setReplySettingsNotice(null);
+    try {
+      await onSaveConfig({
+        agentPolicy: { tone: llmDraft.tone },
+        orderPolicy: { paymentMethods },
+      });
+      setReplySettingsNotice({ type: 'success', text: 'Atención y pagos guardados.' });
+    } catch (error) {
+      setReplySettingsNotice({ type: 'error', text: error.message });
+    } finally {
+      setSavingReplySettings(false);
+    }
+  };
   const fields = [
     ['Identificador WhatsApp', 'WHATSAPP_PHONE_NUMBER_ID_REF', MessageCircle],
     ['Token de verificación', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN_REF', KeyRound],
@@ -6231,6 +6410,7 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
             <span><MessageCircle size={18} /> <strong>{tenant.whatsappNumber || 'WhatsApp por conectar'}</strong></span>
           </div>
           <button className="approve-btn" type="button" onClick={() => onNavigate('onboarding')}>Revisar puesta en marcha <ArrowRight size={16} /></button>
+          <DeliveryPolicySettings key={tenant.id} policy={tenant.config?.orderPolicy} onSaveConfig={onSaveConfig} />
           <details className="advanced-config">
             <summary>Ver detalles técnicos</summary>
           {fields.map(([label, value, Icon]) => (
@@ -6433,7 +6613,8 @@ function Configuration({ onNavigate, onSaveConfig, tenant, tools: toolList }) {
                 </div>
               ))}
             </div>
-            <button className="approve-btn" type="button" onClick={saveCustomerReplySettings}><Check size={16} />Guardar atención y pagos</button>
+            {replySettingsNotice && <p role={replySettingsNotice.type === 'error' ? 'alert' : 'status'}>{replySettingsNotice.text}</p>}
+            <button className="approve-btn" type="button" disabled={savingReplySettings} onClick={saveCustomerReplySettings}><Check size={16} />{savingReplySettings ? 'Guardando…' : 'Guardar atención y pagos'}</button>
           </div>
         </article>
         )}

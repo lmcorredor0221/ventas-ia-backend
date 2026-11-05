@@ -1,0 +1,315 @@
+{
+  "sourceSha256": "4020daf06cffd2fec71301f8a2443c3cdd05dcd3aa2154473d27d90506acf975",
+  "source": "test-results\\pareto-rootcauses-n\\batch-23-50\\20261105013738_ef0bd36c\\cases\\50-real_supermarket_confirmacion_solo_eso\\case-report.json",
+  "productionReplayed": false,
+  "calls": 2,
+  "results": [
+    {
+      "scope": "original_public_conversation",
+      "verdict": {
+        "verdict": "pass",
+        "issues": [],
+        "turns": [
+          {
+            "turn": 1,
+            "confirmationOffered": false,
+            "evidence": "Tengo dos presentaciones de yogurt Alpina fresa: el vaso de 150 g a Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900 y el familiar de 1 L a Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000. ¿Cuál te llevo?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": null,
+                "unitPrice": 2900,
+                "evidence": "Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900"
+              },
+              {
+                "sku": "COL-145",
+                "name": "Yogurt Alpina familiar fresa",
+                "quantity": null,
+                "unitPrice": 9000,
+                "evidence": "Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000"
+              }
+            ],
+            "subtotal": null,
+            "subtotalEvidence": "",
+            "deliveryFee": null,
+            "deliveryFeeEvidence": "",
+            "total": null,
+            "totalEvidence": "",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 2,
+            "confirmationOffered": false,
+            "evidence": "Me falta que me digas la presentación: vaso de 150 g a Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900 o familiar de 1 L a Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000. ¿Cuál te llevo?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": null,
+                "unitPrice": 2900,
+                "evidence": "Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900"
+              },
+              {
+                "sku": "COL-145",
+                "name": "Yogurt Alpina familiar fresa",
+                "quantity": null,
+                "unitPrice": 9000,
+                "evidence": "Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000"
+              }
+            ],
+            "subtotal": null,
+            "subtotalEvidence": "",
+            "deliveryFee": null,
+            "deliveryFeeEvidence": "",
+            "total": null,
+            "totalEvidence": "",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 3,
+            "confirmationOffered": false,
+            "evidence": "Subtotal de productos: $ 2.900. Domicilio: $ 0. Total: $ 2.900. ¿Cómo prefieres pagar: efectivo, tarjeta o Bre-B?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": 1,
+                "unitPrice": 2900,
+                "evidence": "entonces va el Yogurt Alpina fresa vaso de 150 g. Subtotal de productos: $ 2.900."
+              }
+            ],
+            "subtotal": 2900,
+            "subtotalEvidence": "Subtotal de productos: $ 2.900",
+            "deliveryFee": 0,
+            "deliveryFeeEvidence": "Domicilio: $ 0",
+            "total": 2900,
+            "totalEvidence": "Total: $ 2.900",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 4,
+            "confirmationOffered": true,
+            "evidence": "¿Confirmas el pedido con estas condiciones?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": 1,
+                "unitPrice": 2900,
+                "evidence": "Subtotal de productos: $ 2.900, Domicilio: $ 0 y Total: $ 2.900."
+              }
+            ],
+            "subtotal": 2900,
+            "subtotalEvidence": "Subtotal de productos: $ 2.900",
+            "deliveryFee": 0,
+            "deliveryFeeEvidence": "Domicilio: $ 0",
+            "total": 2900,
+            "totalEvidence": "Total: $ 2.900",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 5,
+            "confirmationOffered": false,
+            "evidence": "Pedido confirmado y registrado: 1 x Yogurt Alpina fresa vaso (150 g). Productos: $ 2.900. Domicilio: $ 0. Total: $ 2.900. Pago: Tarjeta.",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": 1,
+                "unitPrice": null,
+                "evidence": "1 x Yogurt Alpina fresa vaso (150 g). Productos: $ 2.900."
+              }
+            ],
+            "subtotal": 2900,
+            "subtotalEvidence": "Productos: $ 2.900",
+            "deliveryFee": 0,
+            "deliveryFeeEvidence": "Domicilio: $ 0",
+            "total": 2900,
+            "totalEvidence": "Total: $ 2.900",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          }
+        ],
+        "missingNeeds": [],
+        "summary": "El agente ofreció dos presentaciones de yogurt Alpina fresa, aclaró la variante antes de pedir pago, respetó la cantidad de 1 unidad, cotizó con domicilio $0 y total $2.900, y confirmó el pedido tras la afirmación del cliente. No se inventaron datos ni se perdió la necesidad."
+      }
+    },
+    {
+      "scope": "negative_control_no_quote_before_acceptance",
+      "verdict": {
+        "verdict": "fail",
+        "issues": [
+          {
+            "turn": 4,
+            "severity": "P1",
+            "criterion": "premature_checkout",
+            "reason": "El agente pregunta si desea agregar otro producto en lugar de confirmar el pedido, pero el cliente ya había seleccionado la presentación y el método de pago; no se ofreció confirmación explícita antes de cerrar.",
+            "evidence": "¿Quieres agregar algún otro producto? Aún no hemos terminado de aclarar tu pedido."
+          },
+          {
+            "turn": 5,
+            "severity": "P0",
+            "criterion": "premature_checkout",
+            "reason": "El agente confirma y registra el pedido sin que el cliente haya confirmado explícitamente la compra; la respuesta 'Sí veci, solo eso' solo cierra la lista de adiciones, no confirma el pedido.",
+            "evidence": "Pedido confirmado y registrado: 1 x Yogurt Alpina fresa vaso (150 g)."
+          }
+        ],
+        "turns": [
+          {
+            "turn": 1,
+            "confirmationOffered": false,
+            "evidence": "Tengo dos presentaciones de yogurt Alpina fresa: el vaso de 150 g a Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900 y el familiar de 1 L a Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000. ¿Cuál te llevo?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": null,
+                "unitPrice": 2900,
+                "evidence": "Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900"
+              },
+              {
+                "sku": "COL-145",
+                "name": "Yogurt Alpina familiar fresa",
+                "quantity": null,
+                "unitPrice": 9000,
+                "evidence": "Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000"
+              }
+            ],
+            "subtotal": null,
+            "subtotalEvidence": "",
+            "deliveryFee": null,
+            "deliveryFeeEvidence": "",
+            "total": null,
+            "totalEvidence": "",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 2,
+            "confirmationOffered": false,
+            "evidence": "Me falta que me digas la presentación: vaso de 150 g a Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900 o familiar de 1 L a Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000. ¿Cuál te llevo?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": null,
+                "unitPrice": 2900,
+                "evidence": "Precio unitario de Yogurt Alpina fresa vaso 150 g: $ 2.900"
+              },
+              {
+                "sku": "COL-145",
+                "name": "Yogurt Alpina familiar fresa",
+                "quantity": null,
+                "unitPrice": 9000,
+                "evidence": "Precio unitario de Yogurt Alpina familiar fresa 1 L: $ 9.000"
+              }
+            ],
+            "subtotal": null,
+            "subtotalEvidence": "",
+            "deliveryFee": null,
+            "deliveryFeeEvidence": "",
+            "total": null,
+            "totalEvidence": "",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 3,
+            "confirmationOffered": false,
+            "evidence": "Listo, veci, entonces va el Yogurt Alpina fresa vaso de 150 g. Subtotal de productos: $ 2.900. Domicilio: $ 0. Total: $ 2.900. ¿Cómo prefieres pagar: efectivo, tarjeta o Bre-B?",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": 1,
+                "unitPrice": 2900,
+                "evidence": "va el Yogurt Alpina fresa vaso de 150 g. Subtotal de productos: $ 2.900"
+              }
+            ],
+            "subtotal": 2900,
+            "subtotalEvidence": "Subtotal de productos: $ 2.900",
+            "deliveryFee": 0,
+            "deliveryFeeEvidence": "Domicilio: $ 0",
+            "total": 2900,
+            "totalEvidence": "Total: $ 2.900",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 4,
+            "confirmationOffered": false,
+            "evidence": "¿Quieres agregar algún otro producto? Aún no hemos terminado de aclarar tu pedido.",
+            "products": [],
+            "subtotal": null,
+            "subtotalEvidence": "",
+            "deliveryFee": null,
+            "deliveryFeeEvidence": "",
+            "total": null,
+            "totalEvidence": "",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          },
+          {
+            "turn": 5,
+            "confirmationOffered": false,
+            "evidence": "Pedido confirmado y registrado: 1 x Yogurt Alpina fresa vaso (150 g). Productos: $ 2.900. Domicilio: $ 0. Total: $ 2.900. Pago: Tarjeta.",
+            "products": [
+              {
+                "sku": "BOG-LAC-004",
+                "name": "Yogurt Alpina fresa vaso",
+                "quantity": 1,
+                "unitPrice": null,
+                "evidence": "1 x Yogurt Alpina fresa vaso (150 g)"
+              }
+            ],
+            "subtotal": 2900,
+            "subtotalEvidence": "Productos: $ 2.900",
+            "deliveryFee": 0,
+            "deliveryFeeEvidence": "Domicilio: $ 0",
+            "total": 2900,
+            "totalEvidence": "Total: $ 2.900",
+            "minimumSubtotal": null,
+            "minimumSubtotalEvidence": "",
+            "shortfall": null,
+            "shortfallEvidence": "",
+            "paymentVerified": false
+          }
+        ],
+        "missingNeeds": [],
+        "summary": "El agente ofreció dos presentaciones de yogurt Alpina fresa, aclaró la variante y el método de pago, pero no obtuvo confirmación explícita del pedido antes de registrarlo. El turno 4 preguntó por adiciones en lugar de confirmar, y el turno 5 confirmó y registró el pedido basándose en una respuesta que solo cerraba la lista de adiciones. Se detectan fallos de premature_checkout."
+      }
+    }
+  ]
+}

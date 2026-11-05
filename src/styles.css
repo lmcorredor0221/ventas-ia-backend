@@ -6466,6 +6466,10 @@ select:disabled {
   font-size: 0.82rem;
 }
 
+.delivery-items div.is-amount-sale {
+  grid-template-columns: minmax(70px, max-content) minmax(0, 1fr);
+}
+
 .delivery-items span {
   overflow-wrap: anywhere;
   color: var(--text);

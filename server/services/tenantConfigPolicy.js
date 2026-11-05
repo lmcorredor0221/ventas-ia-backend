@@ -1,8 +1,12 @@
+import { normalizeDeliveryAmount } from '../domain/deliveryPolicy.js';
+
+const DELIVERY_AMOUNT_FIELDS = new Set(['deliveryFee', 'deliveryMinimumSubtotal']);
+
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
   ['agentPolicy', new Set(['tone', 'assistantName'])],
-  ['orderPolicy', new Set(['paymentMethods'])],
+  ['orderPolicy', new Set(['paymentMethods', ...DELIVERY_AMOUNT_FIELDS])],
 ]);
 
 const ADMIN_EDITABLE_SECTIONS = new Map([
@@ -14,7 +18,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['googleDrive', new Set(['rootFolderRef', 'customerProfileFolderRef', 'filePolicyRef', 'refreshMode', 'allowedMimeTypes'])],
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
   ['agentPolicy', new Set(['tone', 'assistantName', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
-  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
+  ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods', ...DELIVERY_AMOUNT_FIELDS])],
   ['secretsPolicy', null],
 ]);
 
@@ -65,7 +69,9 @@ export function sanitizeAdminConfigPatch(patch = {}) {
       if (!allowedFields.has(field)) {
         throw configError(`El campo ${section}.${field} no esta contemplado por el contrato.`);
       }
-      cleanSection[field] = normalizeAdminValue(`${section}.${field}`, fieldValue);
+      cleanSection[field] = section === 'orderPolicy' && DELIVERY_AMOUNT_FIELDS.has(field)
+        ? normalizeDeliveryAmount(fieldValue, `${section}.${field}`)
+        : normalizeAdminValue(`${section}.${field}`, fieldValue);
     }
     output[section] = cleanSection;
   }
@@ -83,6 +89,9 @@ export function mergeTenantConfig(base, patch) {
 }
 
 function normalizeOwnerField(section, field, value) {
+  if (section === 'orderPolicy' && DELIVERY_AMOUNT_FIELDS.has(field)) {
+    return normalizeDeliveryAmount(value, `${section}.${field}`);
+  }
   if (section === 'agentPolicy' && field === 'assistantName') {
     const assistantName = String(value ?? '').trim().replace(/\s+/g, ' ');
     if (!assistantName || assistantName.length > 60) {

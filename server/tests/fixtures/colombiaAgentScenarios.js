@@ -449,7 +449,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Ya hice la transferencia y te mando comprobante',
     expect: {
       intent: 'payment_confirmation',
-      summary: 'Payment write approval requested',
+      summary: 'Payment notice recorded; no verification required',
     },
   },
   {
@@ -650,7 +650,7 @@ export const colombiaAgentScenarioSet = [
     text: 'Ya hice la transferencia y te mando comprobante',
     expect: {
       intent: 'payment_confirmation',
-      summary: 'Payment write approval requested',
+      summary: 'Payment notice recorded; no verification required',
     },
   },
   {

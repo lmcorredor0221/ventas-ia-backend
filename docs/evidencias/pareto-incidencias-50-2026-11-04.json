@@ -1,0 +1,134 @@
+{
+  "unit": "caso × familia de incidencia funcional",
+  "total": 44,
+  "uniqueCases": 34,
+  "rows": [
+    {
+      "family": "Recibo: presentación y modalidad",
+      "ids": [
+        1,
+        4,
+        22,
+        23,
+        24,
+        29,
+        30,
+        32,
+        33,
+        34,
+        35,
+        40,
+        42,
+        44,
+        50
+      ],
+      "status": "corregido; validando",
+      "count": 15,
+      "share": 34.090909090909086,
+      "cumulative": 34.090909090909086
+    },
+    {
+      "family": "Tareas humanas duplicadas",
+      "ids": [
+        17,
+        18,
+        28,
+        37,
+        39,
+        46,
+        47,
+        49
+      ],
+      "status": "corregido; validando",
+      "count": 8,
+      "share": 18.181818181818183,
+      "cumulative": 52.27272727272727
+    },
+    {
+      "family": "Evidencia de catálogo / afirmaciones",
+      "ids": [
+        6,
+        10,
+        11,
+        14,
+        17,
+        27,
+        42,
+        50
+      ],
+      "status": "mejorado; validando",
+      "count": 8,
+      "share": 18.181818181818183,
+      "cumulative": 70.45454545454545
+    },
+    {
+      "family": "Cierre convertido en búsqueda / compra",
+      "ids": [
+        12,
+        13,
+        14,
+        15,
+        19,
+        26
+      ],
+      "status": "corregido; validando",
+      "count": 6,
+      "share": 13.636363636363635,
+      "cumulative": 84.0909090909091
+    },
+    {
+      "family": "Composición y transporte incompletos",
+      "ids": [
+        10,
+        13,
+        18,
+        26,
+        40
+      ],
+      "status": "corregido; validando",
+      "count": 5,
+      "share": 11.363636363636363,
+      "cumulative": 95.45454545454545
+    },
+    {
+      "family": "Venta por valor sin contrato claro",
+      "ids": [
+        45
+      ],
+      "status": "pendiente contrato y prueba",
+      "count": 1,
+      "share": 2.272727272727273,
+      "cumulative": 97.72727272727273
+    },
+    {
+      "family": "Reconfirmación innecesaria",
+      "ids": [
+        24
+      ],
+      "status": "pendiente verificación",
+      "count": 1,
+      "share": 2.272727272727273,
+      "cumulative": 100
+    }
+  ],
+  "excluded": {
+    "fixed": [
+      38,
+      48
+    ],
+    "latency": [
+      2,
+      9,
+      13,
+      22,
+      23,
+      33,
+      34
+    ],
+    "connection": [
+      3,
+      17
+    ]
+  },
+  "baseline": "Resultado-50-casos-version-final-y-auditoria-2026-11-04.md"
+}

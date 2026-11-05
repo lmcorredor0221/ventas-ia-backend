@@ -51,8 +51,22 @@ export function semanticFrameFromPlan(plan = {}, { text = '', messageId = null, 
   return {
     schemaVersion: FRAME_VERSION,
     intent,
+    humanTask: {
+      requestId: nullableString(semantic.humanTask?.requestId),
+      newNeed: semantic.humanTask?.newNeed === true,
+    },
+    // A contextual association, never proof of settlement or authorization.
+    paymentReport: intent === 'payment_confirmation' ? {
+      relatedOrderId: nullableString(semantic.paymentReport?.relatedOrderId),
+    } : null,
     conversationAct: normalizeConversationAct(semantic.conversationAct, intent, conversation),
-    delivery: Boolean(semantic.delivery ?? semantic.order?.delivery ?? semantic.customerUnderstanding?.delivery ?? containsDeliveryText(text)),
+    // Explicit interpretation by the LLM; absence keeps existing search behavior.
+    catalogSearchReady: typeof semantic.catalogSearchReady === 'boolean' ? semantic.catalogSearchReady : null,
+    delivery: Boolean(semantic.delivery ?? semantic.order?.delivery ?? semantic.customerUnderstanding?.delivery
+      ?? conversation?.orderDraft?.delivery ?? containsDeliveryText(text)),
+    deliveryChange: semantic.deliveryChange ? {
+      evidence: nullableString(semantic.deliveryChange.evidence), reason: nullableString(semantic.deliveryChange.reason),
+    } : null,
     customerDelta,
     items,
     missingCustomerFields,
@@ -77,10 +91,13 @@ export function semanticFrameToLegacyPlan(frame, { sourcePlan = {} } = {}) {
     rawName: item.rawText,
     retrievalText: item.retrievalText,
     productHypothesis: item.productHypothesis,
+    queryVariants: item.queryVariants,
     catalogQuery: item.productHypothesis || item.rawText,
     brandHint: item.brandHint,
     quantity: item.quantity,
     budgetAmount: item.budgetAmount,
+    saleMode: item.saleMode,
+    requestedAmount: item.requestedAmount,
     requestedPresentation: item.presentationSignal,
     presentationSignal: item.presentationSignal,
     categoryHint: item.categoryHint,
@@ -318,7 +335,10 @@ function normalizeSemanticItem(item = {}, { index, messageId, existingItems, tex
     // no recibe el mensaje original, conserva solamente la pista que el frame
     // anterior ya sometio a la comprobacion de evidencia.
     ?? (!String(text ?? '').trim() ? nullableString(item.retrievalText) : null);
-  const matchingExisting = existingById ?? existingItems.find((candidate) => sameRequestedNeed(candidate, { rawText, productHypothesis }));
+  // Explicit null means the LLM chose a new need. Only legacy frames without
+  // an identity field use the old compatibility matcher.
+  const matchingExisting = existingById ?? (!Object.hasOwn(item, 'rawItemId')
+    ? existingItems.find((candidate) => sameRequestedNeed(candidate, { rawText, productHypothesis })) : null);
   const presentationSignal = nullableString(
     item.presentationSignal
     ?? item.requestedPresentation
@@ -333,9 +353,12 @@ function normalizeSemanticItem(item = {}, { index, messageId, existingItems, tex
     retrievalText,
     productHypothesis,
     brandHint: nullableString(item.brandHint ?? item.brand),
+    queryVariants: Array.isArray(item.queryVariants) ? item.queryVariants.filter((q) => typeof q === 'string').slice(0, 2).map((q) => q.slice(0, 240)) : [],
     categoryHint: nullableString(item.categoryHint ?? item.category),
     quantity: isBundlePresentationWithoutQuantity(rawText, presentationSignal, requestedQuantity) ? null : requestedQuantity,
     budgetAmount: positiveNumberOrNull(item.budgetAmount),
+    saleMode: ['amount', 'units'].includes(item.saleMode) ? item.saleMode : null,
+    requestedAmount: positiveNumberOrNull(item.requestedAmount),
     // El texto del cliente se conserva intacto. Cuando el interprete ya
     // expreso una medida normalizada en su hipotesis (por ejemplo, "coca 350"
     // -> "Coca-Cola 350ml"), esa medida sigue siendo una restriccion del
@@ -436,6 +459,7 @@ function normalizeCustomerDelta(value = {}) {
     name: nullableString(value.name ?? value.customerName),
     address: nullableString(value.address ?? value.deliveryAddress ?? value.defaultAddress),
     paymentPreference: nullableString(value.paymentPreference ?? value.paymentMethod),
+    unavailablePaymentPreference: nullableString(value.unavailablePaymentPreference),
     rawNeed: nullableString(value.rawNeed),
   };
 }
@@ -458,7 +482,7 @@ function normalizeIntent(value) {
 
 function normalizeConversationAct(value, intent, conversation) {
   const normalized = normalize(value).replace(/\s+/g, '_');
-  if (['new_request', 'add_item', 'clarify', 'confirm', 'support'].includes(normalized)) return normalized;
+  if (['new_request', 'add_item', 'clarify', 'confirm', 'support', 'close'].includes(normalized)) return normalized;
   if (intent === 'greeting' || intent === 'general_query') return 'new_request';
   if (intent === 'order_confirmation') return 'confirm';
   if (intent === 'order_clarification' || conversation?.orderDraft) return 'clarify';
@@ -494,7 +518,7 @@ function normalizeCartMutation(value, conversationAct, intent) {
   const reason = nullableString(value?.reason)
     ?? (conversationAct === 'add_item' ? 'customer_added_items' : null)
     ?? (intent === 'order_confirmation' ? 'confirmation_turn' : null);
-  return { mode: normalizedMode, reason };
+  return { mode: normalizedMode, reason, removeItemIds: Array.isArray(value?.removeItemIds) ? value.removeItemIds.filter((id) => typeof id === 'string').slice(0, 24) : [] };
 }
 
 function normalizeProposedAction(value, intent, missingFields, ambiguities) {
@@ -772,12 +796,12 @@ function contextualPreference(signal) {
   return null;
 }
 
-function presentationMatches(product, requested) {
+export function presentationMatches(product, requested) {
   const actual = presentationMeasure(product.normalizedPresentation ?? product.presentation ?? product.name);
   return Boolean(actual && actual.dimension === requested.dimension && actual.value === requested.value);
 }
 
-function presentationMeasure(value) {
+export function presentationMeasure(value) {
   const normalized = normalize(value)
     .replace(/un litro y medio/g, '1 5 l')
     .replace(/medio kilo/g, '500 g')
@@ -819,7 +843,7 @@ function numberOrNull(value) {
 }
 
 function hasQuantityOrBudget(item) {
-  return Number(item.quantity ?? 0) > 0 || Number(item.budgetAmount ?? 0) > 0;
+  return Number(item.quantity ?? 0) > 0 || Number(item.budgetAmount ?? 0) > 0 || (item.saleMode === 'amount' && Number(item.requestedAmount) > 0);
 }
 
 function nullableString(value) {

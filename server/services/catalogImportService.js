@@ -15,6 +15,7 @@ const CANONICAL_HEADERS = [
   'presentacion_normalizada',
   'atributos_json',
   'origen_catalogo',
+  'permite_venta_por_valor',
 ];
 
 const HEADER_ALIASES = {
@@ -34,6 +35,7 @@ const HEADER_ALIASES = {
   presentacion_normalizada: ['presentacion_normalizada', 'presentation_normalized', 'tamano_normalizado', 'medida_normalizada'],
   atributos_json: ['atributos_json', 'attributes_json', 'atributos', 'attributes'],
   origen_catalogo: ['origen_catalogo', 'catalog_origin', 'origen'],
+  permite_venta_por_valor: ['permite_venta_por_valor', 'allows_sale_by_amount', 'allowsSaleByAmount'],
 };
 
 export function validateCatalogCsv(csvText) {
@@ -67,6 +69,8 @@ export function validateCatalogCsv(csvText) {
     if (record.every((value) => !String(value ?? '').trim())) continue;
     const rowNumber = index + 1;
     const row = canonicalRow(record, headerMap);
+    const amountFlag = headerMap.permite_venta_por_valor === undefined ? '' : String(record[headerMap.permite_venta_por_valor] ?? '').trim();
+    if (!/^(true|false|si|sí|no|1|0)?$/iu.test(amountFlag)) errors.push({ row: rowNumber, field: 'permite_venta_por_valor', message: 'Usa TRUE/FALSE o Sí/No.' });
     if (!row.sku) errors.push({ row: rowNumber, field: 'sku', message: 'El SKU es obligatorio.' });
     if (!row.nombre) errors.push({ row: rowNumber, field: 'nombre', message: 'El nombre del producto es obligatorio.' });
     if (row.sku && seenSkus.has(row.sku)) {
@@ -114,6 +118,7 @@ export function catalogRowsToSheetValues(rows) {
     row.presentacion_normalizada,
     row.atributos_json,
     row.origen_catalogo,
+    row.permite_venta_por_valor === true ? 'TRUE' : 'FALSE',
   ])];
 }
 
@@ -135,6 +140,7 @@ export function catalogRowToProduct(row) {
     normalizedPresentation: row.presentacion_normalizada || normalizePresentation(row.presentacion),
     attributes: parseAttributes(row.atributos_json) ?? {},
     catalogOrigin: row.origen_catalogo || null,
+    allowsSaleByAmount: row.permite_venta_por_valor === true,
   };
 }
 
@@ -159,6 +165,7 @@ function canonicalRow(record, headerMap) {
     presentacion_normalizada: value('presentacion_normalizada') || normalizePresentation(value('presentacion')),
     atributos_json: value('atributos_json'),
     origen_catalogo: value('origen_catalogo'),
+    permite_venta_por_valor: /^(true|si|sí|1)$/iu.test(value('permite_venta_por_valor')),
   };
 }
 

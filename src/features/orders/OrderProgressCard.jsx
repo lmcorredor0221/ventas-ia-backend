@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, Check, Clock3, Store, UserCheck } from 'lucide-react';
+import { AlertTriangle, Check, CircleDollarSign, Clock3, Store, UserCheck } from 'lucide-react';
 import { ORDER_STAGE_LABELS, orderStageIndex, orderStatusLabel } from '../../domain/orders/status.js';
 
 export default function OrderProgressCard({ order, conversationAvailable, onSelectConversation, onAdvance, busy, selected }) {
@@ -10,8 +10,9 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
         <span className={`order-status-chip is-${order.status}`}>{orderStatusLabel(order.status)}</span>
         <span className="request-kind">{formatDateShort(order.updatedAt ?? order.createdAt)}</span>
       </div>
-      <h3>{order.customerName || 'Cliente'} · {formatCurrency(order.subtotal)}</h3>
+      <h3>{order.customerName || 'Cliente'}</h3>
       <p className="order-progress-reference">Pedido {order.id}</p>
+      <OrderPricingSummary pricing={order.pricing} subtotal={order.subtotal} />
       {order.status === 'cancelled' ? (
         <p className="order-cancelled-note">Este pedido no se pudo alistar. Conservamos el registro para que puedas revisarlo.</p>
       ) : (
@@ -25,7 +26,7 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
       )}
       <div className="delivery-items">
         {(order.items ?? []).slice(0, 5).map((item, index) => (
-          <div key={`${item.name}-${index}`}><strong>{item.quantity ?? 1}x</strong><span>{item.name ?? item.catalogQuery ?? 'Producto'}</span></div>
+          <div key={`${item.name}-${index}`} className={item.saleMode === 'amount' ? 'is-amount-sale' : undefined}><strong>{item.saleMode === 'amount' ? formatCurrency(item.requestedAmount) : `${item.quantity ?? 1}x`}</strong><span>{item.name ?? item.catalogQuery ?? 'Producto'}{item.saleMode === 'amount' ? ' · por valor' : ''}</span></div>
         ))}
         {(order.items ?? []).length > 5 && <em>+ {(order.items ?? []).length - 5} productos más</em>}
       </div>
@@ -41,6 +42,26 @@ export default function OrderProgressCard({ order, conversationAvailable, onSele
         {conversationAvailable && <button className="text-btn" type="button" onClick={() => onSelectConversation(order.conversationId)}>Abrir conversación</button>}
       </div>
     </article>
+  );
+}
+
+export function OrderPricingSummary({ pricing, subtotal, showMinimum = false }) {
+  const amount = (value, unknown = 'Por definir') => Number.isSafeInteger(value) && value >= 0 ? formatCurrency(value) : unknown;
+  return (
+    <div className="delivery-destination order-pricing-summary" aria-label="Desglose del pedido en COP">
+      <InfoLine icon={CircleDollarSign} label={pricing?.status === 'basket_incomplete' ? 'Subtotal parcial de productos' : 'Subtotal de productos'} value={amount(pricing ? pricing.subtotal : subtotal, 'No registrado')} />
+      <InfoLine icon={CircleDollarSign} label={pricing?.delivery === false ? 'Domicilio (no aplica al retiro)' : 'Domicilio'} value={pricing ? amount(pricing.deliveryFee) : 'Desglose de domicilio no registrado'} />
+      <InfoLine icon={CircleDollarSign} label="Total" value={pricing ? amount(pricing.total, 'Pendiente de cotizar') : 'No registrado'} />
+      {pricing?.status === 'basket_incomplete' && <p>Canasta incompleta. Estos importes aún no son una cotización final.</p>}
+      {pricing?.status === 'configuration_incomplete' && <p>Condiciones del domicilio pendientes de definir antes de confirmar.</p>}
+      {showMinimum && pricing && (
+        <>
+          <InfoLine icon={CircleDollarSign} label="Mínimo de productos" value={amount(pricing.minimumSubtotal)} />
+          <InfoLine icon={CircleDollarSign} label="Faltante para el mínimo" value={amount(pricing.shortfall)} />
+          <p>{pricing.status === 'exception_approved' ? 'Excepción al mínimo autorizada para este pedido.' : pricing.delivery === false ? 'Mínimo de domicilio no aplicable al retiro.' : pricing.minimumMet === true ? 'Mínimo cumplido.' : pricing.minimumMet === false ? 'Mínimo sin cumplir. Requiere completar productos o una excepción autorizada.' : 'Condiciones pendientes de validar.'}</p>
+        </>
+      )}
+    </div>
   );
 }
 

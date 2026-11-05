@@ -1,5 +1,8 @@
 import { appendAuditEvent } from './authService.js';
+import { attributeText, catalogEvidence } from '../domain/catalogEvidence.js';
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
+import { isDeepStrictEqual } from 'node:util';
+import { assertDeliveryPricing, deliveryPolicyRevision, evaluateDeliveryPolicy, catalogLineTotal } from '../domain/deliveryPolicy.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
@@ -107,7 +110,7 @@ export class ToolRegistry {
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
     return {
       status: rows.length ? 'success' : 'error',
-      columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'driveFileId'],
+      columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'driveFileId', 'allowsSaleByAmount'],
       rows: filterRows(rows, payload.filters),
       source: live ? 'google_sheets_live' : 'local_test_fixture',
       source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
@@ -188,6 +191,7 @@ export class ToolRegistry {
   }
 
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
+    payload = structuredClone(payload);
     await sleep(25);
     const now = new Date().toISOString();
     const connection = this.store.getState().googleConnectionsByTenant?.[tenantId];
@@ -199,6 +203,16 @@ export class ToolRegistry {
       throw googleConnectionRequiredError('No se pudo registrar el pedido en Google Sheets de esta tienda.');
     }
     const status = assertOrderStatus(payload.status ?? 'pending_human_preparation');
+    if (payload.pricing === undefined) {
+      const conversation = this.store.getState().conversations?.find(item => item.id === conversationId && item.tenantId === tenantId);
+      if (payload.delivery === true || conversation?.orderDraft?.pricing || payload.items?.some(i => i.saleMode === 'amount')) {
+        throw Object.assign(new Error('El pedido requiere una cotización comercial vigente antes de guardarlo.'), {
+          code: 'invalid_order_pricing', statusCode: 400,
+        });
+      }
+    }
+    const pricing = payload.pricing === undefined ? undefined
+      : await this.validateOrderPricing(tenantId, conversationId, payload);
     const order = {
       id: `ord-${crypto.randomUUID().slice(0, 10)}`,
       tenantId,
@@ -207,7 +221,10 @@ export class ToolRegistry {
       customerName: payload.customer_name,
       deliveryAddress: payload.delivery_address,
       items: payload.items ?? [],
-      subtotal: payload.subtotal ?? 0,
+      subtotal: pricing?.subtotal ?? payload.subtotal ?? 0,
+      ...(pricing === undefined ? {} : { pricing }),
+      ...(payload.delivery === undefined ? {} : { delivery: payload.delivery }),
+      paymentMethod: payload.paymentMethod ?? null,
       status,
       createdAt: now,
       updatedAt: now,
@@ -215,18 +232,32 @@ export class ToolRegistry {
       sheetSyncStatus: hasLiveConnection ? 'queued' : 'not_connected',
     };
     const sheetProjectionEntry = this.createOrderSheetCreateEntry(order);
-    this.store.mutate((state) => {
-      state.ordersByTenant ??= {};
-      state.ordersByTenant[tenantId] ??= [];
-      state.ordersByTenant[tenantId].unshift(order);
-    });
     // PostgreSQL is the source of truth. A Google token refresh or Sheets
     // outage must never sit between a confirmed order and its local write.
-    if (this.store.persistOrderWithOutbox) {
-      await this.store.persistOrderWithOutbox(tenantId, order.id, sheetProjectionEntry ? [sheetProjectionEntry] : []);
+    const entries = sheetProjectionEntry ? [sheetProjectionEntry] : [];
+    if (this.store.persistNewOrderWithOutbox) {
+      // Keep an uncommitted order out of the deferred app_state snapshot.
+      await this.store.persistNewOrderWithOutbox(order, entries);
     } else {
-      await this.store.persistOrder?.(tenantId, order.id);
-      if (sheetProjectionEntry) await this.store.enqueueOutbox?.(sheetProjectionEntry);
+      try {
+        this.store.mutate((state) => {
+          state.ordersByTenant ??= {};
+          state.ordersByTenant[tenantId] ??= [];
+          state.ordersByTenant[tenantId].unshift(order);
+        });
+        if (this.store.persistOrderWithOutbox) {
+          await this.store.persistOrderWithOutbox(tenantId, order.id, entries);
+        } else {
+          await this.store.persistOrder?.(tenantId, order.id);
+          if (sheetProjectionEntry) await this.store.enqueueOutbox?.(sheetProjectionEntry);
+        }
+      } catch (error) {
+        this.store.mutate((state) => {
+          state.ordersByTenant[tenantId] = (state.ordersByTenant[tenantId] ?? []).filter((item) => item.id !== order.id);
+          state.integrationOutbox = (state.integrationOutbox ?? []).filter((entry) => !entries.some((item) => item.id === entry.id));
+        });
+        throw error;
+      }
     }
     const projection = { provider: 'google_sheets', status: sheetProjectionEntry ? 'queued' : 'not_queued' };
     this.audit(tenantId, 'tool.google_sheets_order_write', 'order', {
@@ -243,6 +274,72 @@ export class ToolRegistry {
       source: hasLiveConnection ? 'google_sheets_outbox' : 'local_test_fixture',
       projection,
     };
+  }
+
+  async validateOrderPricing(tenantId, conversationId, payload) {
+    const tenant = this.store.getTenant ? await this.store.getTenant(tenantId)
+      : this.store.getState().tenants.find((item) => item.id === tenantId);
+    if (!tenant || payload.pricing?.tenantId !== tenantId
+      || payload.pricing?.policyRevision !== deliveryPolicyRevision(tenant)) {
+      throw orderPricingError('La política de domicilio cambió. Se requiere una nueva cotización.', 'delivery_policy_revision_conflict');
+    }
+    if (typeof payload.delivery !== 'boolean' || !Array.isArray(payload.items)) {
+      throw orderPricingError('La cotización requiere modalidad de entrega y líneas de productos válidas.');
+    }
+    const conversation = this.store.getConversation ? await this.store.getConversation(conversationId)
+      : this.store.getState().conversations?.find((item) => item.id === conversationId);
+    if (conversation && conversation.tenantId !== tenantId) throw orderPricingError('La conversación no pertenece a esta tienda.');
+    if (conversation?.orderDraft?.version != null && conversation.orderDraft.version !== payload.pricing.draftVersion) {
+      throw orderPricingError('La canasta cambió. Se requiere una nueva cotización.');
+    }
+    // Only persisted human review state can authorize an exception. A pricing
+    // object supplied by a caller is never an authorization source.
+    let resolution = null;
+    if (conversation?.deliveryResolution) {
+      const requests = this.store.listPendingRequests ? await this.store.listPendingRequests({ tenantId })
+        : this.store.getState().pendingRequests ?? [];
+      const request = requests.find((item) => item.id === conversation.deliveryResolution.requestId);
+      if (request?.tenantId === tenantId && request.conversationId === conversationId
+        && request.action === 'delivery_policy_review' && request.status === 'resolved'
+        && isDeepStrictEqual(request.deliveryResolution, conversation.deliveryResolution)) {
+        resolution = request.deliveryResolution;
+      }
+    }
+    // The writer receives catalog unit prices; line totals and subtotal are
+    // checked against domain arithmetic, never used as calculation inputs.
+    const items = payload.items.map((item) => ({ ...item, product: undefined }));
+    for (const item of items.filter(i => i.saleMode === 'amount')) {
+      const result = await this.googleSheetsReadTable(tenantId, { filters: { sku: item.sku } });
+      const product = result.rows?.find(p => p.sku === item.sku);
+      const saved = conversation?.orderDraft?.items?.find(i => i.product?.sku === item.sku
+        && i.saleMode === 'amount' && i.requestedAmount === item.requestedAmount && i.quantity == null);
+      if (!saved || product?.allowsSaleByAmount !== true || product.active === false || !(product.stock > 0)) {
+        throw orderPricingError('La venta por valor requiere autorización vigente del catálogo y del borrador de esta tienda.');
+      }
+      if (item.unitPrice !== product.price || item.allowsSaleByAmount !== true) {
+        throw orderPricingError('La referencia de venta por valor cambió; se requiere una nueva cotización.');
+      }
+      item.product = product;
+      item.allowsSaleByAmount = true;
+      item.unitPrice = product.price;
+    }
+    const fresh = evaluateDeliveryPolicy({ tenant, items, delivery: payload.delivery,
+      draftVersion: payload.pricing.draftVersion, resolution });
+    assertDeliveryPricing(fresh);
+    assertDeliveryPricing(payload.pricing);
+    for (const field of ['schemaVersion', 'tenantId', 'currency', 'delivery', 'subtotal', 'deliveryFee',
+      'minimumSubtotal', 'shortfall', 'minimumMet', 'status', 'total', 'policyRevision',
+      'basketRevision', 'draftVersion', 'resolution', 'canConfirm']) {
+      if (!isDeepStrictEqual(payload.pricing[field], fresh[field])) {
+        throw orderPricingError(`La cotización no coincide con los datos vigentes (${field}).`);
+      }
+    }
+    if (payload.subtotal !== undefined && payload.subtotal !== fresh.subtotal) throw orderPricingError('Subtotal de productos inconsistente.');
+    for (const item of items) {
+      const lineTotal = catalogLineTotal(item);
+      if (item.lineTotal !== undefined && item.lineTotal !== lineTotal) throw orderPricingError('Importe de línea inconsistente.');
+    }
+    return structuredClone(fresh);
   }
 
   createOrderSheetCreateEntry(order) {
@@ -304,7 +401,7 @@ export class ToolRegistry {
   }
 
   async readLiveCatalogRows({ tenantId, tenant, live, range }) {
-    const sheetRange = range ?? 'Catalogo!A1:P1000';
+    const sheetRange = (range ?? 'Catalogo!A1:Q1000').replace(/(:)P(?=\d|$)/, '$1Q');
     const cacheKey = `${tenantId}:${live.spreadsheetId}:${sheetRange}`;
     const cached = this.liveCatalogCache.get(cacheKey);
     if (cached?.rows && cached.expiresAt > Date.now()) return cached.rows;
@@ -465,7 +562,7 @@ export class ToolRegistry {
   }
 
   async approvalGate(tenantId, conversationId, payload) {
-    const request = {
+    let request = {
       id: `hitl-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
       conversationId,
@@ -479,9 +576,10 @@ export class ToolRegistry {
       resolvedAt: null,
       gateKey: payload.gate_key,
       approvalToken: null,
+      contextSnapshot: payload.context_snapshot ?? payload.payload_summary ?? {},
     };
     this.store.mutate((state) => {
-      state.pendingRequests.unshift(request);
+      request = upsertPendingHumanNeed(state, request, payload);
       updateConversation(state, conversationId, {
         status: 'approval_required',
         zone: 'approval',
@@ -502,7 +600,7 @@ export class ToolRegistry {
   }
 
   async humanHandoff(tenantId, conversationId, payload) {
-    const request = {
+    let request = {
       id: `handoff-${crypto.randomUUID().slice(0, 8)}`,
       tenantId,
       conversationId,
@@ -521,7 +619,7 @@ export class ToolRegistry {
       assignedTeam: payload.assigned_team ?? 'ventas',
     };
     this.store.mutate((state) => {
-      state.pendingRequests.unshift(request);
+      request = upsertPendingHumanNeed(state, request, payload);
       updateConversation(state, conversationId, {
         status: 'blocked',
         zone: 'approval',
@@ -718,6 +816,7 @@ function parseCatalogRows(values = []) {
         normalizedPresentation: cell(row, headerMap, 'presentacion_normalizada', 'presentation_normalized') || normalizePresentation(cell(row, headerMap, 'presentacion', 'presentation')),
         attributes: parseJsonCell(cell(row, headerMap, 'atributos_json', 'attributes_json', 'atributos'), {}),
         catalogOrigin: cell(row, headerMap, 'origen_catalogo', 'catalog_origin', 'origen'),
+        allowsSaleByAmount: /^(true|si|sí|1)$/iu.test(cell(row, headerMap, 'permite_venta_por_valor', 'allows_sale_by_amount', 'allowsSaleByAmount').trim()),
       };
     })
     .filter((row) => row?.sku && row.name && row.active !== false);
@@ -775,8 +874,13 @@ function orderToSheetRow(order) {
     order.updatedAt,
     'whatsapp',
     order.llmModel ?? '',
-    JSON.stringify({ conversationId: order.conversationId }),
+    JSON.stringify({ conversationId: order.conversationId, pricing: order.pricing,
+      paymentMethod: order.paymentMethod, delivery: order.delivery }),
   ];
+}
+
+function orderPricingError(message, code = 'invalid_order_pricing') {
+  return Object.assign(new Error(message), { code, statusCode: 409 });
 }
 
 function buildWhatsAppMessagePayload(payload) {
@@ -924,6 +1028,7 @@ function rankRowsByQuery(rows, query) {
         row.presentation,
         row.normalizedPresentation,
         row.description,
+        attributeText(row.attributes),
         ...(row.tags ?? []),
       ].filter(Boolean).join(' '));
       const nameFirstToken = nameTokens[0] ?? '';
@@ -961,6 +1066,7 @@ function rankRowsByQuery(rows, query) {
       return {
         ...row,
         matchScore: Number((score / queryTokens.length).toFixed(2)),
+        matchEvidence: catalogEvidence(row, query),
         matchType: strongMatches > 0 && coverage >= 0.5 ? 'exact_or_alias' : 'similar',
       };
     })
@@ -1022,6 +1128,40 @@ function summarize(value) {
   if (!value) return {};
   const json = JSON.stringify(value);
   return json.length > 240 ? `${json.slice(0, 240)}...` : value;
+}
+
+// A conversation has one open work item per operational need, not per reply.
+// The interpreter may identify a separate need or refer to an existing one;
+// tenant, action, order and approval gate remain execution boundaries.
+function upsertPendingHumanNeed(state, request, payload) {
+  const decision = payload.context_snapshot?.plan?.semanticFrame?.humanTask ?? {};
+  const orderId = request.contextSnapshot?.orderId ?? null;
+  const eligible = state.pendingRequests.filter(r => r.status === 'pending'
+    && r.tenantId === request.tenantId && r.conversationId === request.conversationId
+    && r.type === request.type && (r.action ?? null) === (request.action ?? null)
+    && (r.gateKey ?? null) === (request.gateKey ?? null)
+    && (r.contextSnapshot?.orderId ?? null) === orderId);
+  const previous = eligible.find(r => r.id === decision.requestId)
+    ?? (orderId || decision.newNeed !== true ? eligible[0] : null);
+  const contextSnapshot = { ...previous?.contextSnapshot, ...request.contextSnapshot };
+  // Preserve received evidence across turns, without classifying the image or
+  // associating it with a payment. Only this tenant's conversation is eligible.
+  const conversation = state.conversations.find(c => c.tenantId === request.tenantId && c.id === request.conversationId);
+  const attachments = new Map();
+  for (const item of [...(previous?.contextSnapshot?.attachments ?? []),
+    ...(conversation?.messages ?? []), ...(request.contextSnapshot?.attachments ?? []),
+    request.contextSnapshot?.normalized]) {
+    if (!item?.mediaRef) continue;
+    const attachment = { mediaRef: item.mediaRef, messageType: item.messageType ?? null,
+      providerMessageId: item.providerMessageId ?? item.messageId ?? null };
+    const key = JSON.stringify([attachment.mediaRef, attachment.providerMessageId]);
+    attachments.set(key, attachment);
+  }
+  if (attachments.size) contextSnapshot.attachments = [...attachments.values()];
+  if (!previous) { request.contextSnapshot = contextSnapshot; state.pendingRequests.unshift(request); return request; }
+  Object.assign(previous, request, { id: previous.id, createdAt: previous.createdAt,
+    updatedAt: new Date().toISOString(), contextSnapshot });
+  return previous;
 }
 
 function updateConversation(state, conversationId, patch) {

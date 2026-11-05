@@ -68,6 +68,9 @@ function seedReferenceCatalog() {
   });
 }
 
+// Wording assertions ignore accents/case and the optional quantity separator;
+// product identities, quantities, actions and monetary assertions stay intact.
+function normalizeReply(value) { return String(value).toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/(\d+)\s*[x×]\s+/g, '$1 '); }
 function assertStep({ scenario, step, run, waId }) {
   const expectation = step.expect;
   const { plan, summary } = run.result;
@@ -106,12 +109,13 @@ function assertStep({ scenario, step, run, waId }) {
   }
   if (expectation.replyIncludes) {
     for (const fragment of expectation.replyIncludes) {
-      assert.ok(reply.includes(fragment), `${scenario.id}: la respuesta no incluye "${fragment}". Respuesta: ${reply}`);
+      // Capitalization at the start of a sentence does not change the message.
+      assert.ok(normalizeReply(reply).includes(normalizeReply(fragment)), `${scenario.id}: la respuesta no incluye "${fragment}". Respuesta: ${reply}`);
     }
   }
   if (expectation.notReplyIncludes) {
     for (const fragment of expectation.notReplyIncludes) {
-      assert.equal(reply.includes(fragment), false, `${scenario.id}: la respuesta no debe incluir "${fragment}". Respuesta: ${reply}`);
+      assert.equal(normalizeReply(reply).includes(normalizeReply(fragment)), false, `${scenario.id}: la respuesta no debe incluir "${fragment}". Respuesta: ${reply}`);
     }
   }
   if (expectation.orderItems) {
