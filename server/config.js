@@ -24,6 +24,10 @@ export const RUNTIME_CONFIG = {
   llmGroundingMaxRounds: Number(process.env.LLM_GROUNDING_MAX_ROUNDS ?? 2),
   llmGroundingTimeoutMs: Number(process.env.LLM_GROUNDING_TIMEOUT_MS ?? 15000),
   llmGroundingMaxTokens: Number(process.env.LLM_GROUNDING_MAX_TOKENS ?? 1600),
+  // Catalog reads are independent evidence collection, not extra LLM
+  // decisions. Bound their overlap so multi-product turns do not wait for
+  // every Google Sheets request serially while protecting the provider.
+  catalogReadConcurrency: Number(process.env.CATALOG_READ_CONCURRENCY ?? 4),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The mock payment route is useful in local contracts only. Production must

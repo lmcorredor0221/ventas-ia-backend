@@ -41,26 +41,37 @@ export class ConversationGroundingCoordinator {
     try {
       for (let round = 1; round <= maxRounds; round++) {
         if (!await isCurrent()) return { aborted: true, reason: 'conversation_changed' };
-        for (const obs of observations) {
+        // Each item is an independent read-only observation. Keep the
+        // resolver/LLM as the owner of interpretation, but overlap catalog
+        // I/O with a small bound so a two- or three-product request does not
+        // pay the full Google latency once per item.
+        const readConcurrency = Math.max(1, Math.min(4, Number(this.config.catalogReadConcurrency ?? 4)));
+        const readResults = await mapWithConcurrency(observations, readConcurrency, async (obs) => {
+          let connectionRequired = false;
           if (obs.boundSku && !obs.searched.length) {
-            if (Date.now() - startedAt >= budget) return fail('grounding_deadline');
+            if (Date.now() - startedAt >= budget) return { obs, connectionRequired: false, deadline: true };
             const result = await withinDeadline(this.tools.call('google_sheets_read_table', tenantId, conversationId,
               { filters: { sku: obs.boundSku }, cache_policy: 'short_ttl' }), budget - (Date.now() - startedAt));
-            if (result.status === 'connection_required') return fail('catalog_connection_required');
+            if (result.status === 'connection_required') connectionRequired = true;
             obs.rows = (result.rows ?? []).filter(row => row.sku === obs.boundSku && (!row.tenantId || row.tenantId === tenantId));
             obs.searched.push(`sku:${obs.boundSku}`);
           }
           for (const query of obs.queries) {
             if (obs.searched.includes(query)) continue;
-            if (Date.now() - startedAt >= budget) return fail('grounding_deadline');
+            if (Date.now() - startedAt >= budget) return { obs, connectionRequired, deadline: true };
             const result = await withinDeadline(this.tools.call('google_sheets_read_table', tenantId, conversationId,
               { filters: { query }, cache_policy: 'short_ttl' }), budget - (Date.now() - startedAt));
-            if (result.status === 'connection_required') return fail('catalog_connection_required');
+            if (result.status === 'connection_required') connectionRequired = true;
             obs.searched.push(query);
             const bySku = new Map(obs.rows.map((row) => [row.sku, row]));
             for (const row of (result.rows ?? []).slice(0, 8)) if (!row.tenantId || row.tenantId === tenantId) bySku.set(row.sku, row);
             obs.rows = [...bySku.values()].slice(0, 16);
           }
+          return { obs, connectionRequired, deadline: false };
+        });
+        if (readResults.some(result => result.deadline)) return fail('grounding_deadline');
+        if (readResults.some(result => result.connectionRequired)) return fail('catalog_connection_required');
+        for (const obs of observations) {
           emit('catalog.grounding.observed', { round, rawItemId: obs.item.rawItemId, queries: obs.searched,
             candidates: obs.rows.map(({ sku, matchScore, matchEvidence }) => ({ sku, matchScore, matchEvidence })) });
         }
@@ -150,4 +161,18 @@ async function withinDeadline(promise, remainingMs) {
       timer = setTimeout(() => reject(Object.assign(new Error('Grounding deadline'), { code: 'GROUNDING_DEADLINE' })), Math.max(1, remainingMs));
     })]);
   } finally { clearTimeout(timer); }
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }

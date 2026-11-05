@@ -321,11 +321,17 @@ export class AgentRuntime {
     if (normalized.interactive?.optionId) {
       return this.handleInteractiveReply({ tenantId, conversationId, normalized });
     }
-    const customerLookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
-      wa_id: normalized.waId,
-      profile_name: normalized.profileName,
-    });
-    const customerProfile = customerLookup.profile;
+    // The semantic interpreter does not need a live customer-sheet read for
+    // greetings, general questions or catalog discovery. Reuse the local
+    // profile snapshot when available and defer the live lookup until the
+    // interpreted turn actually requires order data. This keeps the
+    // interpreter/context split intact while removing a network hop from
+    // most inbound messages.
+    let customerProfile = await this.getCustomerProfile(tenantId, normalized.waId);
+    let customerLookup = {
+      status: customerProfile ? 'found' : 'not_requested',
+      profile: customerProfile,
+    };
     if (customerProfile?.name) {
       await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
     }
@@ -345,6 +351,18 @@ export class AgentRuntime {
       zone: 'agent',
       progress: Math.max(currentConversation?.progress ?? 0, 22),
     });
+
+    const needsCustomerProfile = ['delivery_order', 'order_confirmation', 'order_clarification'].includes(plan.intent);
+    if (needsCustomerProfile && !customerProfile) {
+      customerLookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+        wa_id: normalized.waId,
+        profile_name: normalized.profileName,
+      });
+      customerProfile = customerLookup.profile;
+      if (customerProfile?.name) {
+        await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
+      }
+    }
 
     if (plan.intent === 'payment_confirmation') {
       return this.handlePaymentNotice({ tenantId, conversationId, normalized, plan, currentConversation, paymentOrderContext });
