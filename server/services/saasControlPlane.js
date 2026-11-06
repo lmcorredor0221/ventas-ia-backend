@@ -733,6 +733,160 @@ export class SaasControlPlane {
     return { accessToken, spreadsheetId: workspace.spreadsheet.id, connection, workspace };
   }
 
+  async listGoogleResources(tenantId) {
+    const tenant = this.requireTenant(tenantId);
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId] ?? null;
+    const workspace = state.googleWorkspacesByTenant?.[tenantId] ?? null;
+    if (connection?.status !== 'connected' || workspace?.status !== 'provisioned') {
+      const error = new Error('Conecta Google y crea la estructura de la tienda antes de seleccionar un archivo.');
+      error.statusCode = 428;
+      error.code = 'google_connection_required';
+      throw error;
+    }
+
+    if (connection.mode !== 'live') {
+      return {
+        tenantId: tenant.id,
+        mode: connection.mode,
+        current: publicGoogleWorkspace(workspace),
+        spreadsheets: workspace.spreadsheet ? [publicGoogleFile({
+          id: workspace.spreadsheet.id,
+          name: workspace.spreadsheet.name,
+          mimeType: 'application/vnd.google-apps.spreadsheet',
+          url: workspace.spreadsheet.url,
+        })] : [],
+        folders: (workspace.folders ?? []).map((folder) => publicGoogleFile({ id: folder.id, name: folder.name })),
+        selectionSupported: false,
+        message: 'El entorno local usa recursos de prueba; la selección de archivos se habilita con una conexión Google live.',
+      };
+    }
+
+    const live = await this.liveGoogleContext(tenantId);
+    const resources = await this.googleWorkspace.listSelectableResources({ accessToken: live.accessToken });
+    return {
+      tenantId: tenant.id,
+      mode: connection.mode,
+      current: publicGoogleWorkspace(workspace),
+      spreadsheets: resources.spreadsheets,
+      folders: resources.folders,
+      selectionSupported: true,
+      message: resources.spreadsheets.length
+        ? 'Selecciona la hoja que contiene el catálogo de esta tienda. VIA validará sus pestañas antes de guardarla.'
+        : 'Google no devolvió hojas disponibles para esta aplicación. Puedes pegar el enlace de una hoja que hayas autorizado.',
+    };
+  }
+
+  async selectGoogleResources(tenantId, input = {}) {
+    const tenant = this.requireTenant(tenantId);
+    const state = this.store.getState();
+    const connection = state.googleConnectionsByTenant?.[tenantId] ?? null;
+    const current = state.googleWorkspacesByTenant?.[tenantId] ?? null;
+    if (connection?.status !== 'connected' || current?.status !== 'provisioned') {
+      const error = new Error('Conecta Google y crea la estructura de la tienda antes de seleccionar un archivo.');
+      error.statusCode = 428;
+      error.code = 'google_connection_required';
+      throw error;
+    }
+
+    const spreadsheetId = googleResourceId(input.spreadsheetId, 'spreadsheet');
+    if (!spreadsheetId) {
+      const error = new Error('Indica el ID o enlace de una hoja de cálculo de Google válida.');
+      error.statusCode = 422;
+      error.code = 'google_spreadsheet_required';
+      throw error;
+    }
+    const rootFolderId = input.rootFolderId
+      ? googleResourceId(input.rootFolderId, 'folder')
+      : current.rootFolder?.id ?? null;
+    const customerProfileFolderId = input.customerProfileFolderId
+      ? googleResourceId(input.customerProfileFolderId, 'folder')
+      : current.customerProfileFolder?.id ?? null;
+
+    assertGoogleResourceAvailable(state, tenantId, spreadsheetId, 'spreadsheet');
+    if (rootFolderId) assertGoogleResourceAvailable(state, tenantId, rootFolderId, 'folder');
+    if (customerProfileFolderId) assertGoogleResourceAvailable(state, tenantId, customerProfileFolderId, 'folder');
+
+    let spreadsheet;
+    let rootFolder = current.rootFolder ?? null;
+    let customerProfileFolder = current.customerProfileFolder ?? null;
+    if (connection.mode === 'live') {
+      const live = await this.liveGoogleContext(tenantId);
+      const metadata = await this.googleWorkspace.getSpreadsheetMetadata({ accessToken: live.accessToken, spreadsheetId });
+      const sheetNames = new Set((metadata.sheets ?? []).map((sheet) => sheet.properties?.title));
+      if (!sheetNames.has('Catalogo')) {
+        const error = new Error('La hoja seleccionada no contiene una pestaña «Catalogo». Selecciona el archivo operativo de esta tienda.');
+        error.statusCode = 422;
+        error.code = 'google_catalog_sheet_missing';
+        throw error;
+      }
+      spreadsheet = {
+        id: metadata.spreadsheetId ?? spreadsheetId,
+        name: metadata.properties?.title ?? spreadsheetId,
+        url: `https://docs.google.com/spreadsheets/d/${metadata.spreadsheetId ?? spreadsheetId}`,
+        sheets: (metadata.sheets ?? []).map((sheet) => ({
+          name: sheet.properties?.title,
+          sheetId: sheet.properties?.sheetId,
+          index: sheet.properties?.index,
+        })),
+      };
+      if (rootFolderId) {
+        const folder = await this.googleWorkspace.getFileMetadata({ accessToken: live.accessToken, fileId: rootFolderId });
+        assertGoogleMimeType(folder, 'application/vnd.google-apps.folder', 'rootFolderId');
+        rootFolder = publicGoogleFile(folder);
+      }
+      if (customerProfileFolderId) {
+        const folder = await this.googleWorkspace.getFileMetadata({ accessToken: live.accessToken, fileId: customerProfileFolderId });
+        assertGoogleMimeType(folder, 'application/vnd.google-apps.folder', 'customerProfileFolderId');
+        customerProfileFolder = publicGoogleFile(folder);
+      }
+    } else {
+      const known = current.spreadsheet?.id === spreadsheetId;
+      if (!known) {
+        const error = new Error('El entorno local solo permite seleccionar el recurso de prueba ya aprovisionado.');
+        error.statusCode = 422;
+        error.code = 'google_resource_not_in_sandbox';
+        throw error;
+      }
+      spreadsheet = structuredClone(current.spreadsheet);
+    }
+
+    const now = new Date().toISOString();
+    const nextWorkspace = {
+      ...structuredClone(current),
+      spreadsheet,
+      rootFolder,
+      customerProfileFolder,
+      selectedAt: now,
+      selectionSource: 'tenant_owner',
+      updatedAt: now,
+    };
+    this.store.mutate((next) => {
+      next.googleWorkspacesByTenant[tenantId] = nextWorkspace;
+      const nextTenant = next.tenants.find((item) => item.id === tenantId);
+      if (nextTenant) {
+        nextTenant.config.googleSheets.spreadsheetIdRef = nextTenant.config.googleSheets.spreadsheetIdRef
+          ?? `${tenantId.toUpperCase()}_GOOGLE_SHEETS_OPS_SPREADSHEET_ID_REF`;
+        nextTenant.config.googleDrive.rootFolderRef = nextTenant.config.googleDrive.rootFolderRef
+          ?? `${tenantId.toUpperCase()}_GOOGLE_DRIVE_ROOT_FOLDER_ID_REF`;
+        nextTenant.lifecycle = { ...(nextTenant.lifecycle ?? {}), updatedAt: now };
+      }
+    });
+    await this.persistTenantCritical(tenantId);
+    this.events.emit({ type: 'google.workspace.selected', tenantId, detail: 'Recurso Google seleccionado por la tienda', metadata: {
+      spreadsheetId,
+      rootFolderId,
+      customerProfileFolderId,
+    } });
+    this.audit(tenantId, 'google.workspace.selected', 'google_workspace', {
+      spreadsheetId,
+      rootFolderId,
+      customerProfileFolderId,
+      source: 'tenant_owner',
+    });
+    return { status: 'selected', workspace: nextWorkspace, statusSummary: this.getOnboardingStatus(tenantId) };
+  }
+
   validateTenantSetup(tenantId) {
     const validation = this.getOnboardingStatus(tenantId);
     this.store.mutate((next) => {
@@ -2000,6 +2154,9 @@ export function ensureSaasState(state) {
     tenant.config.orderPolicy = {
       ...tenantConfigFor(tenant.id).orderPolicy,
       ...(tenant.config.orderPolicy ?? {}),
+      // Migrate older tenants without overwriting explicit zero values.
+      deliveryFee: tenant.config.orderPolicy?.deliveryFee ?? 0,
+      deliveryMinimumSubtotal: tenant.config.orderPolicy?.deliveryMinimumSubtotal ?? 10000,
       paymentMethods: normalizePaymentMethods(tenant.config.orderPolicy?.paymentMethods),
     };
     tenant.lifecycle ??= {
@@ -2093,6 +2250,8 @@ function tenantConfigFor(tenantId) {
       customerProfileStore: 'google_sheets',
       confirmedOrderStore: 'google_sheets',
       confirmedOrderHandoff: 'preparation_and_delivery',
+      deliveryFee: 0,
+      deliveryMinimumSubtotal: 10000,
       paymentMethods: DEFAULT_PAYMENT_METHODS,
     },
     secretsPolicy: 'references_only_no_plaintext_values',
@@ -2597,6 +2756,77 @@ function nextStepFromChecks(checks, lifecycle = {}) {
   if (missing) return missing.key;
   if (lifecycle.activationStatus !== 'active') return 'activation';
   return 'ready';
+}
+
+function publicGoogleFile(file = {}) {
+  return {
+    id: file.id ?? null,
+    name: file.name ?? file.id ?? 'Recurso Google',
+    mimeType: file.mimeType ?? null,
+    url: file.url ?? file.webViewLink ?? null,
+    parents: Array.isArray(file.parents) ? file.parents : [],
+    modifiedTime: file.modifiedTime ?? null,
+  };
+}
+
+function publicGoogleWorkspace(workspace = {}) {
+  return {
+    mode: workspace.mode ?? null,
+    selectedAt: workspace.selectedAt ?? null,
+    selectionSource: workspace.selectionSource ?? null,
+    spreadsheet: workspace.spreadsheet ? publicGoogleFile({
+      id: workspace.spreadsheet.id,
+      name: workspace.spreadsheet.name,
+      url: workspace.spreadsheet.url,
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+    }) : null,
+    sheets: (workspace.spreadsheet?.sheets ?? []).map((sheet) => ({
+      name: sheet.name ?? sheet.properties?.title ?? null,
+      sheetId: sheet.sheetId ?? sheet.properties?.sheetId ?? null,
+      index: sheet.index ?? sheet.properties?.index ?? null,
+    })),
+    rootFolder: workspace.rootFolder ? publicGoogleFile(workspace.rootFolder) : null,
+    customerProfileFolder: workspace.customerProfileFolder ? publicGoogleFile(workspace.customerProfileFolder) : null,
+    folders: (workspace.folders ?? []).map(publicGoogleFile),
+  };
+}
+
+function googleResourceId(value, kind) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const patterns = kind === 'folder'
+    ? [/drive\.google\.com\/drive\/folders\/([a-zA-Z0-9_-]+)/i, /[?&]id=([a-zA-Z0-9_-]+)/i]
+    : [/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/i, /[?&]id=([a-zA-Z0-9_-]+)/i];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match) return match[1];
+  }
+  return /^[a-zA-Z0-9_-]{8,}$/.test(raw) ? raw : null;
+}
+
+function assertGoogleResourceAvailable(state, tenantId, resourceId, kind) {
+  for (const [otherTenantId, workspace] of Object.entries(state.googleWorkspacesByTenant ?? {})) {
+    if (otherTenantId === tenantId) continue;
+    const matches = kind === 'spreadsheet'
+      ? workspace?.spreadsheet?.id === resourceId
+      : workspace?.rootFolder?.id === resourceId
+        || workspace?.customerProfileFolder?.id === resourceId
+        || (workspace?.folders ?? []).some((folder) => folder.id === resourceId);
+    if (matches) {
+      const error = new Error('Ese recurso de Google ya está asociado a otra tienda. Cada tenant debe usar sus propios archivos.');
+      error.statusCode = 409;
+      error.code = 'google_resource_bound_to_other_tenant';
+      throw error;
+    }
+  }
+}
+
+function assertGoogleMimeType(file, expected, field) {
+  if (file?.mimeType === expected && file.trashed !== true) return;
+  const error = new Error(`El recurso ${field} no es una carpeta de Google válida.`);
+  error.statusCode = 422;
+  error.code = 'google_resource_type_invalid';
+  throw error;
 }
 
 function parseEmailFromIdToken(idToken) {

@@ -53,6 +53,8 @@ export function createSeedState() {
           customerProfileStore: 'google_sheets',
           confirmedOrderStore: 'google_sheets',
           confirmedOrderHandoff: 'preparation_and_delivery',
+          deliveryFee: 0,
+          deliveryMinimumSubtotal: 10000,
           paymentMethods: DEFAULT_PAYMENT_METHODS,
         },
         secretsPolicy: 'references_only_no_plaintext_values',

@@ -149,6 +149,34 @@ export function createSaasRouter({ controlPlane, auth }) {
     }
   });
 
+  router.get('/tenants/:tenantId/google/resources', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      res.json(await controlPlane.listGoogleResources(req.params.tenantId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/google/resources/select', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      const result = await controlPlane.selectGoogleResources(req.params.tenantId, req.body ?? {});
+      auth.recordTenantAction(req, {
+        tenantId: req.params.tenantId,
+        action: 'google.workspace.selected',
+        resource: 'google_workspace',
+        metadata: {
+          spreadsheetId: result.workspace?.spreadsheet?.id,
+          rootFolderId: result.workspace?.rootFolder?.id,
+        },
+      });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/tenants/:tenantId/google/catalog/validate', (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });

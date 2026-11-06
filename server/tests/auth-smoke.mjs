@@ -73,6 +73,14 @@ try {
   }, { cookie, csrfToken });
   assert.equal(ownerConfig.body.tenant?.config?.googleSheets?.catalogRange ?? ownerConfig.body.config?.googleSheets?.catalogRange, 'Catalogo!A1:J1000');
 
+  const deliveryConfig = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
+    googleSheets: { catalogRange: 'Catalogo!A1:Q1000' },
+    orderPolicy: { deliveryFee: 0, deliveryMinimumSubtotal: 10000 },
+  }, { cookie, csrfToken });
+  assert.equal(deliveryConfig.body.config.googleSheets.catalogRange, 'Catalogo!A1:Q1000');
+  assert.equal(deliveryConfig.body.config.orderPolicy.deliveryFee, 0);
+  assert.equal(deliveryConfig.body.config.orderPolicy.deliveryMinimumSubtotal, 10000);
+
   const beforeOtherTenant = structuredClone(store.getState().tenants.find(t => t.id === 'norte').config);
   const named = await patchJson(`${base}/api/tenants/${created.body.tenant.id}/config`, {
     agentPolicy: { displayName: '  Lucía  ' },

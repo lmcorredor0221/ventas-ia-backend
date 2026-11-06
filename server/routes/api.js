@@ -239,7 +239,7 @@ export function createApiRouter({ store, events, runtime, tools, orders, manualO
     }
   });
 
-  router.patch('/tenants/:tenantId/config', (req, res, next) => {
+  router.patch('/tenants/:tenantId/config', async (req, res, next) => {
     try {
     auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
     const configPatch = sanitizeOwnerConfigPatch(req.body ?? {});
@@ -250,6 +250,10 @@ export function createApiRouter({ store, events, runtime, tools, orders, manualO
       tenant.config = mergeTenantConfig(tenant.config, configPatch);
     });
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    // Return only after the tenant row has been durably written. The deferred
+    // runtime snapshot is intentionally asynchronous, but owner configuration
+    // must survive a refresh/restart before the UI reports success.
+    await store.persistTenantCritical?.(tenant.id);
     events.emit({ type: 'tool.binding.changed', tenantId: tenant.id, detail: 'Tenant configuration updated' });
     auth.recordTenantAction(req, {
       tenantId: tenant.id,

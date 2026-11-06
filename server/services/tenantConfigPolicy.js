@@ -4,7 +4,7 @@ import { normalizeAgentDisplayName } from '../domain/agentIdentity.js';
 const OWNER_EDITABLE_SECTIONS = new Map([
   ['businessHours', new Set(['start', 'end', 'weekdays'])],
   ['googleSheets', new Set(['range', 'catalogRange', 'customerProfilesRange', 'ordersRange'])],
-  ['orderPolicy', new Set(['paymentMethods'])],
+  ['orderPolicy', new Set(['paymentMethods', 'deliveryFee', 'deliveryMinimumSubtotal'])],
   ['agentPolicy', new Set(['displayName'])],
 ]);
 
@@ -90,6 +90,13 @@ function normalizeOwnerField(section, field, value) {
   if (section === 'orderPolicy' && field === 'paymentMethods') {
     return normalizePaymentMethodsValue(value);
   }
+  if (section === 'orderPolicy' && ['deliveryFee', 'deliveryMinimumSubtotal'].includes(field)) {
+    const amount = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+    if (!Number.isSafeInteger(amount) || amount < 0) {
+      throw configValueError(`${section}.${field} debe ser un entero no negativo en COP.`);
+    }
+    return amount;
+  }
   if (section === 'businessHours' && field === 'weekdays') {
     if (!Array.isArray(value) || value.some((item) => !Number.isInteger(Number(item)) || Number(item) < 1 || Number(item) > 7)) {
       throw configError('businessHours.weekdays debe contener dias del 1 al 7.');
@@ -130,5 +137,12 @@ function configError(message) {
   const error = new Error(message);
   error.statusCode = 403;
   error.code = 'tenant_config_field_not_allowed';
+  return error;
+}
+
+function configValueError(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  error.code = 'tenant_config_invalid_value';
   return error;
 }
