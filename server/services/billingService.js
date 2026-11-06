@@ -87,7 +87,10 @@ export function normalizePlan(plan, now = new Date().toISOString()) {
     isDefault: Boolean(plan.isDefault ?? plan.is_default ?? false),
     mercadoPagoPlanId: plan.mercadoPagoPlanId ?? plan.mercadopago_plan_id ?? process.env.MERCADOPAGO_PREAPPROVAL_PLAN_ID ?? null,
     createdAt: plan.createdAt ?? plan.created_at ?? now,
-    updatedAt: now,
+    // Hydration runs on every backend restart. Preserve the persisted
+    // timestamp when the plan itself did not change, otherwise startup
+    // mutates the full app_state snapshot and contends with the old instance.
+    updatedAt: plan.updatedAt ?? plan.updated_at ?? now,
   };
 }
 
