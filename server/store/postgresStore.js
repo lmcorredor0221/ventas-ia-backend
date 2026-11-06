@@ -29,6 +29,11 @@ export class PostgresStore {
     });
     this.state = null;
     this.saveQueue = Promise.resolve();
+    // Tenant configuration must not wait behind unrelated operational writes.
+    // The database transaction remains serialized within this lane, while the
+    // snapshot lane below is kept independent from it.
+    this.criticalQueue = Promise.resolve();
+    this.criticalWrites = new Set();
     // Snapshot writes are intentionally independent from critical row writes.
     // A large app_state projection must never make an operator wait to take
     // or dispatch an order already persisted through its mirror table.
@@ -255,7 +260,7 @@ export class PostgresStore {
   }
 
   persistTenantCritical(tenantId) {
-    return this.queueWrite(async () => {
+    return this.queueCriticalWrite(async () => {
       const state = this.getState();
       const tenant = state.tenants.find((item) => item.id === tenantId);
       if (!tenant) return;
@@ -853,7 +858,7 @@ export class PostgresStore {
     ).then((result) => result.rows.map(outboxRow));
   }
 
-  async save() {
+  async save({ includeMirrors = true } = {}) {
     // Freeze one coherent projection. Mutations arriving during SQL writes are
     // persisted by their own critical write / next scheduled snapshot.
     const state = structuredClone(this.getState());
@@ -876,7 +881,10 @@ export class PostgresStore {
         `,
         ['runtime', JSON.stringify(state), state.schemaVersion ?? 'unknown'],
       );
-      await upsertMirrorTables(client, state);
+      // Operational tables are persisted by their dedicated write methods.
+      // Rebuilding every mirror table in each deferred snapshot can hold the
+      // runtime/tenant locks for minutes and block configuration writes.
+      if (includeMirrors) await upsertMirrorTables(client, state);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -908,7 +916,7 @@ export class PostgresStore {
     this.snapshotSaveDeferred = null;
     this.snapshotDirty = false;
     this.snapshotSaving = true;
-    const write = this.queueSnapshotWrite(() => this.save(), 'deferred snapshot save');
+    const write = this.queueSnapshotWrite(() => this.save({ includeMirrors: false }), 'deferred snapshot save');
     write.then(
       () => snapshot?.resolve(),
       (error) => snapshot?.reject(error),
@@ -927,6 +935,20 @@ export class PostgresStore {
     return this.saveQueue;
   }
 
+  queueCriticalWrite(operation, label) {
+    this.criticalQueue = this.criticalQueue.catch(() => undefined).then(operation);
+    const write = this.criticalQueue;
+    this.criticalWrites.add(write);
+    write.then(
+      () => this.criticalWrites.delete(write),
+      () => this.criticalWrites.delete(write),
+    );
+    write.catch((error) => {
+      console.error(`PostgresStore ${label} failed`, error);
+    });
+    return write;
+  }
+
   queueSnapshotWrite(operation, label) {
     this.snapshotQueue = this.snapshotQueue.catch(() => undefined).then(operation);
     this.snapshotQueue.catch((error) => {
@@ -941,10 +963,10 @@ export class PostgresStore {
       this.snapshotSaveTimer = null;
     }
     this.startSnapshotSave();
-    await Promise.all([this.saveQueue, this.snapshotQueue]);
+    await Promise.all([this.saveQueue, this.snapshotQueue, this.criticalQueue]);
     if (this.snapshotDirty) {
       this.startSnapshotSave();
-      await Promise.all([this.saveQueue, this.snapshotQueue]);
+      await Promise.all([this.saveQueue, this.snapshotQueue, this.criticalQueue]);
     }
   }
 
