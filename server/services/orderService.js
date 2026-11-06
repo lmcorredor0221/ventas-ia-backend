@@ -1,4 +1,8 @@
 import { canTransition, assertOrderStatus, ORDER_STATUSES } from '../domain/orderStatus.js';
+import { EDITABLE_ORDER_STATUSES, assertOrderEditVersion, assertOrderEditPolicy, orderCommercialFields } from '../domain/orderEdit.js';
+import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
+import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
+import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
 
 export class OrderService {
   constructor({ store, events, tools, outbox = null }) {
@@ -14,6 +18,130 @@ export class OrderService {
     return Object.values(state.ordersByTenant ?? {})
       .flat()
       .find((order) => order.id === orderId && (!tenantId || order.tenantId === tenantId)) ?? null;
+  }
+
+  async catalogForEditing(tenantId) {
+    const result = await this.tools.googleSheetsReadTable(tenantId, { filters: {}, cache_policy: 'short_ttl' });
+    if (result.status !== 'success') throw Object.assign(new Error('No pudimos cargar el catálogo. Puedes reintentar sin perder el pedido.'), { code: 'order_catalog_unavailable', statusCode: 503 });
+    return (result.rows ?? []).filter(row => row.active !== false && !catalogCommerceCategory(row)).map(row => ({
+      sku: String(row.sku), name: row.name, presentation: row.presentation ?? '', description: row.description ?? '',
+      brand: row.brand ?? '', category: row.category ?? '', productFamily: row.productFamily ?? '',
+      price: Number(row.price), stock: row.stock == null ? null : Number(row.stock),
+      allowsSaleByAmount: row.allowsSaleByAmount === true,
+    }));
+  }
+
+  async workspace({ orderId, tenantId, includeCatalog = true }) {
+    const order = this.store.getOrder
+      ? await this.store.getOrder(tenantId, orderId)
+      : this.findOrder(orderId, tenantId);
+    if (!order) throw Object.assign(new Error('Pedido no encontrado.'), { code: 'order_not_found', statusCode: 404 });
+    const state = this.store.getState();
+    const conversation = await this.store.getConversation?.(order.conversationId)
+      ?? state.conversations?.find(item => item.id === order.conversationId && item.tenantId === tenantId)
+      ?? null;
+    const tenant = this.store.getTenant
+      ? await this.store.getTenant(tenantId)
+      : state.tenants.find(item => item.id === tenantId);
+    const entries = await this.store.listOutbox?.({ tenantId, aggregateId: order.id, kind: 'order.summary_notification', limit: 5 }) ?? [];
+    const notification = entries.find(entry => Number(entry.payload?.version) === Number(order.version));
+    const effectiveOrder = { ...order, status: this.effectiveStatus(order) };
+    const canEdit = EDITABLE_ORDER_STATUSES.includes(effectiveOrder.status);
+    return {
+      order: effectiveOrder,
+      canEdit,
+      summaryNotification: notification ? { status: notification.result?.status ?? notification.payload?.result?.status ?? notification.status, version: order.version } : null,
+      conversation: conversation ? { id: conversation.id, customer: conversation.customer ?? conversation.customerName ?? null, waId: conversation.waId, status: conversation.status, messages: conversation.messages ?? [] } : null,
+      products: canEdit && includeCatalog ? await this.catalogForEditing(tenantId) : [],
+      paymentMethods: paymentMethodsForTenant(tenant),
+      deliveryPolicy: deliveryPolicyForTenant(tenant),
+    };
+  }
+
+  async edit({ orderId, tenantId, input, actorId = 'local-owner' }) {
+    const key = `${tenantId}:${orderId}`;
+    const previous = this.transitionLocks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const chain = previous.then(() => gate);
+    this.transitionLocks.set(key, chain);
+    await previous;
+    try {
+      return await this.editUnlocked({ orderId, tenantId, input, actorId });
+    } finally {
+      release();
+      if (this.transitionLocks.get(key) === chain) this.transitionLocks.delete(key);
+    }
+  }
+
+  async editUnlocked({ orderId, tenantId, input, actorId = 'local-owner' }) {
+    const current = this.store.getOrder
+      ? await this.store.getOrder(tenantId, orderId)
+      : this.findOrder(orderId, tenantId);
+    assertOrderEditVersion(current && { ...current, status: this.effectiveStatus(current) }, input?.expectedVersion);
+    if (input?.customerConfirmed !== true) throw Object.assign(new Error('Confirma que acordaste estos cambios con el cliente.'), { code: 'order_customer_confirmation_required', statusCode: 422 });
+    const customerName = String(input.customerName ?? '').trim();
+    const deliveryAddress = String(input.deliveryAddress ?? '').trim();
+    const delivery = input.delivery !== false;
+    if (!customerName || customerName.length > 160 || deliveryAddress.length > 500 || (delivery && !deliveryAddress)) {
+      throw Object.assign(new Error('Revisa el nombre y la dirección del cliente.'), { code: 'invalid_order_customer', statusCode: 422 });
+    }
+    const tenant = this.store.getTenant
+      ? await this.store.getTenant(tenantId)
+      : this.store.getState().tenants.find(item => item.id === tenantId);
+    assertOrderEditPolicy(tenant, current);
+    const methods = paymentMethodsForTenant(tenant);
+    const payment = methods.find(method => method.id === input.paymentMethod) ?? resolvePaymentMethod(input.paymentMethod, methods);
+    if (!payment) throw Object.assign(new Error('Selecciona un medio de pago habilitado por tu tienda.'), { code: 'invalid_payment_method', statusCode: 422 });
+    if (!Array.isArray(input.items) || !input.items.length || input.items.length > 100) throw Object.assign(new Error('El pedido debe tener entre 1 y 100 productos.'), { code: 'invalid_order_items', statusCode: 422 });
+    const products = await this.catalogForEditing(tenantId);
+    const seen = new Set();
+    const items = input.items.map(line => {
+      const product = products.find(item => item.sku === line?.sku);
+      if (!product || seen.has(line.sku)) throw Object.assign(new Error('Hay un producto no disponible o repetido. Revisa el catálogo.'), { code: 'invalid_order_items', statusCode: 422 });
+      seen.add(line.sku);
+      const amountSale = line.saleMode === 'amount';
+      const quantity = amountSale ? null : Number(line.quantity);
+      const requestedAmount = amountSale ? Number(line.requestedAmount) : null;
+      if (amountSale && (product.allowsSaleByAmount !== true || !Number.isSafeInteger(requestedAmount) || requestedAmount < 1 || line.quantity != null)) {
+        throw Object.assign(new Error(`Este producto no permite solicitar un valor específico: ${product.name}.`), { code: 'invalid_sale_mode', statusCode: 422 });
+      }
+      if (!amountSale && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999)) throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'invalid_order_quantity', statusCode: 422 });
+      if (!Number.isSafeInteger(product.price) || product.price <= 0 || !Number.isFinite(product.stock) || (!amountSale && product.stock < quantity)) throw Object.assign(new Error(`Revisa el precio o las existencias de ${product.name}.`), { code: 'invalid_order_product', statusCode: 422 });
+      if (line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw Object.assign(new Error(`Cambió el precio de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
+      return { sku: product.sku, name: product.name, presentation: product.presentation, quantity, saleMode: amountSale ? 'amount' : 'units', requestedAmount, unitPrice: product.price, lineTotal: amountSale ? requestedAmount : product.price * quantity, allowsSaleByAmount: product.allowsSaleByAmount === true };
+    });
+    assertCommerceOrderAllowed(items, products);
+    const policy = deliveryPolicyForTenant(tenant);
+    const deliveryFee = delivery ? Number(input.deliveryFee ?? policy.deliveryFee) : 0;
+    if (!Number.isSafeInteger(deliveryFee) || deliveryFee < 0) throw Object.assign(new Error('Escribe el costo del domicilio en pesos, sin decimales.'), { code: 'invalid_delivery_fee', statusCode: 422 });
+    const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+    const belowMinimum = delivery && subtotal < policy.deliveryMinimumSubtotal;
+    const editReason = String(input.reason ?? '').trim();
+    const exceptionReason = String(input.minimumExceptionReason ?? editReason).trim();
+    if (belowMinimum && (input.minimumException !== true || !exceptionReason)) throw Object.assign(new Error('El pedido no alcanza el mínimo. Autoriza la excepción e indica el acuerdo con el cliente.'), { code: 'delivery_minimum_exception_required', statusCode: 409 });
+    const evaluatedPricing = evaluateDeliveryPolicy({ tenant, items, delivery, draftVersion: Number(current.version ?? 0) + 1, resolution: belowMinimum ? {
+      authorized: true, requestId: `order-edit:${orderId}:${Number(current.version ?? 0) + 1}`, actorId, tenantId,
+      policyRevision: deliveryPolicyRevision(tenant), basketRevision: deliveryBasketRevision(items), deliveryFee,
+      minimumSubtotal: policy.deliveryMinimumSubtotal, minimumException: true, reason: exceptionReason,
+    } : null });
+    const pricing = assertDeliveryPricing({ ...evaluatedPricing, deliveryFee, total: subtotal + deliveryFee });
+    if (input.expectedTotal !== undefined && Number(input.expectedTotal) !== pricing.total) {
+      throw Object.assign(new Error('El total cambió. Revisa el desglose antes de guardar.'), { code: 'order_total_changed', statusCode: 409 });
+    }
+    const now = new Date().toISOString();
+    const order = { ...structuredClone(current), customerName, deliveryAddress, delivery, items, subtotal, pricing,
+      paymentMethod: payment.id, paymentMethodLabel: payment.label, version: Number(current.version ?? 0) + 1, updatedAt: now,
+      sheetSyncStatus: this.outbox ? 'pending' : 'not_queued', editHistory: [...(current.editHistory ?? []), {
+        at: now, actorId, reason: editReason || exceptionReason || 'Ajuste manual antes de alistamiento', version: Number(current.version ?? 0) + 1,
+        before: orderCommercialFields(current), after: orderCommercialFields({ ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing, paymentMethod: payment.id, paymentMethodLabel: payment.label }),
+      }] };
+    const entries = [this.outbox?.createEntry({ tenantId, kind: 'order.sheet_edit', aggregateType: 'order', aggregateId: orderId,
+      idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`, payload: { tenantId, orderId, version: order.version } }),
+    this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
+      idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version } })].filter(Boolean);
+    await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries, catalogProducts: products });
+    return { order, notification: entries.some(entry => entry.kind === 'order.summary_notification') ? 'queued' : 'not_queued' };
   }
 
   effectiveStatus(order, requests = this.store.getState().pendingRequests ?? []) {

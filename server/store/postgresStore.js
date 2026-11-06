@@ -14,6 +14,7 @@ import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
 import { CLOSED_CONVERSATION_STATUSES } from '../domain/conversationStatus.js';
+import { applyOrderEdit, assertOrderEditVersion, assertOrderEditPolicy, refreshOrderConversation, refreshPreparationRequest } from '../domain/orderEdit.js';
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -469,6 +470,50 @@ export class PostgresStore {
     }, 'order and outbox write');
   }
 
+  commitOrderEdit(change) {
+    return this.queueWrite(async () => {
+      const { order, expectedVersion, entries = [] } = change;
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const tenantRow = await client.query('SELECT payload FROM tenants WHERE id = $1 FOR UPDATE', [order.tenantId]);
+        assertOrderEditPolicy(tenantRow.rows[0]?.payload, order);
+        const result = await client.query('SELECT payload FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE', [order.id, order.tenantId]);
+        assertOrderEditVersion(result.rows[0]?.payload, expectedVersion);
+        await client.query(
+          'UPDATE orders SET payload = $3::jsonb, version = $4, updated_at = $5, subtotal = $6 WHERE id = $1 AND tenant_id = $2',
+          [order.id, order.tenantId, JSON.stringify(order), order.version, order.updatedAt, order.subtotal],
+        );
+        const conversationRow = await client.query(
+          'SELECT payload FROM conversations WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+          [order.conversationId, order.tenantId],
+        );
+        if (conversationRow.rows[0]) {
+          const conversation = conversationRow.rows[0].payload;
+          refreshOrderConversation(conversation, order, change.catalogProducts);
+          await upsertConversation(client, conversation);
+        }
+        const requests = await client.query(
+          "SELECT payload FROM pending_requests WHERE tenant_id = $1 AND conversation_id = $2 AND status = 'pending' FOR UPDATE",
+          [order.tenantId, order.conversationId],
+        );
+        for (const row of requests.rows) {
+          const request = row.payload;
+          refreshPreparationRequest(request, order);
+          await client.query('UPDATE pending_requests SET payload = $2::jsonb WHERE id = $1', [request.id, JSON.stringify(request)]);
+        }
+        for (const entry of entries) await insertOutboxEntry(client, entry);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      this.mutate(state => applyOrderEdit(state, change));
+    }, 'order edit');
+  }
+
   commitManualOrder(commit) {
     return this.queueWrite(async () => {
       const { order, conversationPatch, entries, period } = commit;
@@ -860,12 +905,24 @@ export class PostgresStore {
     }, 'tenant operational purge');
   }
 
-  listOutbox({ status, limit = 100 } = {}) {
+  listOutbox({ status, tenantId, aggregateId, kind, limit = 100 } = {}) {
     const values = [];
     const clauses = [];
     if (status) {
       values.push(status);
       clauses.push(`status = $${values.length}`);
+    }
+    if (tenantId) {
+      values.push(tenantId);
+      clauses.push(`tenant_id = $${values.length}`);
+    }
+    if (aggregateId) {
+      values.push(aggregateId);
+      clauses.push(`aggregate_id = $${values.length}`);
+    }
+    if (kind) {
+      values.push(kind);
+      clauses.push(`kind = $${values.length}`);
     }
     values.push(Number(limit) || 100);
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';

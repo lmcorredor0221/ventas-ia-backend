@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { paymentMethodsForTenant } from './paymentMethods.js';
 import { billingPeriodForTenant } from './usageService.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
+import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
 
 const fail = (message, code = 'manual_order_invalid', statusCode = 422) => Object.assign(new Error(message), { code, statusCode });
 
@@ -29,21 +30,24 @@ export class ManualOrderService {
     return (result.rows ?? []).filter(row => !catalogCommerceCategory(row)).map(row => ({
       sku: String(row.sku), name: row.name, presentation: row.presentation ?? '', description: row.description ?? '',
       price: Number(row.price), stock: row.stock == null ? null : Number(row.stock),
+      brand: row.brand ?? '', category: row.category ?? '', productFamily: row.productFamily ?? '',
+      attributes: structuredClone(row.attributes ?? {}), tags: structuredClone(row.tags ?? []), allowsSaleByAmount: row.allowsSaleByAmount === true,
     }));
   }
 
   async context(tenantId, id) {
     const conversation = await this.conversation(tenantId, id);
     const existing = this.existingOrder(tenantId, id);
-    if (existing) return { order: existing };
+    if (existing) return { conversation: manualConversationSnapshot(conversation), order: existing, products: [], paymentMethods: [], deliveryPolicy: deliveryPolicyForTenant(this.store.getState().tenants.find(item => item.id === tenantId)) };
     this.assertManual(conversation);
     const state = this.store.getState();
     const products = await this.catalog(tenantId);
     const profile = state.customerProfilesByTenant?.[tenantId]?.[conversation.waId] ?? {};
     const draft = conversation.orderDraft ?? {};
     return {
-      conversationId: id, products,
+      conversation: manualConversationSnapshot(conversation), conversationId: id, products,
       paymentMethods: paymentMethodsForTenant(state.tenants.find(item => item.id === tenantId)).filter(method => method.enabled !== false),
+      deliveryPolicy: deliveryPolicyForTenant(state.tenants.find(item => item.id === tenantId)),
       draft: {
         customerName: draft.customerName ?? profile.name ?? '',
         deliveryAddress: draft.deliveryAddress ?? profile.defaultAddress ?? '',
@@ -97,32 +101,61 @@ export class ManualOrderService {
       if (!Number.isFinite(product.price) || product.price <= 0) throw fail(`Revisa el precio de ${product.name} en el catálogo.`);
       if (!Number.isFinite(product.stock) || product.stock < quantity) throw fail(`No hay existencias suficientes de ${product.name}. Actualiza el catálogo o ajusta la cantidad.`);
       if (Number(item.unitPrice) !== product.price) throw fail(`Cambió el precio de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
-      return { sku: product.sku, name: product.name, presentation: product.presentation, quantity, unitPrice: product.price, lineTotal: product.price * quantity };
+      return { sku: product.sku, name: product.name, presentation: product.presentation, quantity, saleMode: 'units', requestedAmount: null, unitPrice: product.price, lineTotal: product.price * quantity };
     });
     assertCommerceOrderAllowed(items, products);
+    const delivery = input.delivery !== false;
+    const policy = deliveryPolicyForTenant(tenant);
+    const subtotal = items.reduce((total, item) => total + item.lineTotal, 0);
+    const belowMinimum = delivery && policy.deliveryMinimumSubtotal != null && subtotal < policy.deliveryMinimumSubtotal;
+    const exceptionReason = String(input.minimumExceptionReason ?? '').trim();
+    if (belowMinimum && (input.minimumException !== true || !exceptionReason)) {
+      throw fail('El pedido no alcanza el mínimo para domicilio. Autoriza la excepción e indica el acuerdo con el cliente.', 'delivery_minimum_exception_required', 409);
+    }
+    const pricing = evaluateDeliveryPolicy({ tenant, items, delivery, draftVersion: 1, resolution: belowMinimum ? {
+      authorized: true, requestId: `manual-order:${id}:1`, actorId, tenantId,
+      policyRevision: deliveryPolicyRevision(tenant), basketRevision: deliveryBasketRevision(items),
+      deliveryFee: policy.deliveryFee, minimumSubtotal: policy.deliveryMinimumSubtotal,
+      minimumException: true, reason: exceptionReason,
+    } : null });
+    assertDeliveryPricing(pricing);
     await this.usage.assertCanRecordDelivery(tenantId, { conversationId: id });
     const now = new Date().toISOString();
     // Stable identity makes retries safe even after a server restart.
     const orderId = `ord-manual-${createHash('sha256').update(`${tenantId}:${id}`).digest('hex').slice(0, 20)}`;
     const order = {
       id: orderId, tenantId, conversationId: id, waId: conversation.waId, customerName, deliveryAddress,
-      items, subtotal: items.reduce((total, item) => total + item.lineTotal, 0),
+      items, subtotal, pricing, delivery,
+      minimumException: belowMinimum ? { reason: exceptionReason, authorizedBy: actorId } : null,
       paymentMethod: payment.id, paymentMethodLabel: payment.label,
       status: 'preparing', version: 0, source: 'manual_whatsapp', confirmedBy: actorId, customerConfirmedAt: now,
       sheetSyncStatus: this.outbox ? 'pending' : 'not_queued', createdAt: now, updatedAt: now,
       statusHistory: [{ status: 'preparing', at: now, actorId, source: 'manual_whatsapp' }],
     };
     const conversationPatch = {
-      orderId, orderStatus: 'preparing', value: order.subtotal, status: 'manual_active', caseStatus: 'active', inboxState: 'active',
+      orderId, orderStatus: 'preparing', value: order.pricing.total, status: 'manual_active', caseStatus: 'active', inboxState: 'active',
       manualMode: 'whatsapp_external', aiPaused: true, manualLastActivityAt: now,
       stage: 'fulfillment', zone: 'human', closedAt: null, closeReason: null,
       nextStep: 'Pedido confirmado por la tienda. Alístalo y márcalo en camino desde Pedidos y pendientes.', updatedAt: now,
     };
     const entry = this.outbox?.createEntry({ tenantId, kind: 'order.sheet_create', aggregateType: 'order', aggregateId: orderId,
       idempotencyKey: `order-sheet-create:${orderId}`, payload: { tenantId, orderId, conversationId: id } });
-    const result = await this.store.commitManualOrder({ order, conversationPatch, entries: entry ? [entry] : [], period: billingPeriodForTenant(this.store.getState(), tenantId) });
+    const notification = this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
+      idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: id, version: order.version } });
+    const result = await this.store.commitManualOrder({ order, conversationPatch, entries: [entry, notification].filter(Boolean), period: billingPeriodForTenant(this.store.getState(), tenantId) });
     if (result.created) this.events?.emit({ type: 'order.manual_confirmed', tenantId, conversationId: id,
-      detail: `Pedido ${orderId} confirmado por la tienda y en alistamiento.`, metadata: { orderId, actorId, subtotal: order.subtotal, itemCount: items.length } });
-    return result;
+      detail: `Pedido ${orderId} confirmado por la tienda y en alistamiento.`, metadata: { orderId, actorId, subtotal: order.subtotal, itemCount: items.length, summaryNotification: notification ? 'queued' : 'not_queued' } });
+    return { ...result, notification: notification ? 'queued' : 'not_queued' };
   }
+}
+
+function manualConversationSnapshot(conversation) {
+  return {
+    id: conversation.id,
+    tenantId: conversation.tenantId,
+    waId: conversation.waId,
+    customer: conversation.customer ?? conversation.customerName ?? null,
+    status: conversation.status,
+    messages: Array.isArray(conversation.messages) ? conversation.messages : [],
+  };
 }

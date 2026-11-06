@@ -47,7 +47,8 @@ try {
   assert.equal(store.state.ordersByTenant.shop.length, 1);
   assert.equal((await usage.summary('shop')).metrics.deliveries_confirmed, 1);
   assert.equal(store.state.pendingRequests[0].status, 'resolved');
-  assert.equal(store.state.integrationOutbox.length, 1);
+  assert.equal(store.state.integrationOutbox.length, 2);
+  assert.equal(store.state.integrationOutbox.some(entry => entry.kind === 'order.summary_notification'), true);
   assert.equal(store.state.conversations[0].aiPaused, true);
   assert.equal(sends, 0, 'Saving an agreed manual order must not send a WhatsApp message');
   const runtime = Object.create(AgentRuntime.prototype);

@@ -27,6 +27,7 @@ import { ManualOrderService } from './services/manualOrderService.js';
 import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js';
 import { IntegrationOutbox } from './services/integrationOutbox.js';
 import { RuntimeTelemetry } from './services/runtimeTelemetry.js';
+import { createOrderSummaryNotification } from './services/orderSummaryNotification.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -118,6 +119,22 @@ function createExpressRuntime({ config, store }) {
         await store.persistOrder?.(entry.payload.tenantId, entry.payload.orderId);
         return result;
       },
+      'order.sheet_edit': async (entry) => {
+        const order = Object.values(store.getState().ordersByTenant ?? {})
+          .flat()
+          .find((item) => item.id === entry.payload.orderId && item.tenantId === entry.payload.tenantId);
+        if (!order) throw new Error(`Order ${entry.payload.orderId} not found for outbox edit`);
+        const result = await tools.appendOrderProjection({ tenantId: entry.payload.tenantId, order });
+        if (result.status === 'synced') {
+          store.mutate((state) => {
+            const current = (state.ordersByTenant?.[entry.payload.tenantId] ?? []).find((item) => item.id === entry.payload.orderId);
+            if (current) { current.sheetSyncStatus = 'synced'; current.sheetSyncedAt = new Date().toISOString(); }
+          });
+          await store.persistOrder?.(entry.payload.tenantId, entry.payload.orderId);
+        }
+        return result;
+      },
+      'order.summary_notification': createOrderSummaryNotification({ store, tools, events }),
       'whatsapp.inbound_processing': async (entry) => {
         if (!runtime) throw new Error('Inbound worker started before agent runtime initialization');
         return runtime.processQueuedInbound(entry.payload.messageId);
