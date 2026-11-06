@@ -53,13 +53,17 @@ export class PostgresStore {
     const result = await this.pool.query('SELECT document FROM app_state WHERE id = $1', ['runtime']);
     if (result.rows[0]?.document) {
       this.state = result.rows[0].document;
+      const persistedState = structuredClone(this.state);
       mergeSeedCatalog(this.state);
       ensureSaasState(this.state);
       ensureIdentityState(this.state);
       ensureUsageState(this.state);
       ensureSecretState(this.state);
       ensurePlatformState(this.state);
-      await this.save();
+      // A restart must not rewrite the whole snapshot while the previous
+      // Render instance is still serving traffic. Persist only migrations or
+      // seed changes that actually changed the hydrated document.
+      if (!isDeepStrictEqual(this.state, persistedState)) await this.save();
       return this.state;
     }
     this.state = createSeedState();

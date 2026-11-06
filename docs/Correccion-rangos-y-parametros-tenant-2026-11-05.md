@@ -37,4 +37,22 @@ estaba aplicando el default.
   un error de rangos ni de persistencia. Debe auditarse por separado antes de
   usar la suite completa como criterio de release.
 
-No se desplegó ni se modificaron datos de producción.
+## Incidente de arranque en Render
+
+Durante el primer reemplazo de instancia, Render reportó `statement timeout`
+al insertar el índice de `app_state`. La causa no era el rango ni el valor del
+domicilio: la hidratación de estado ejecutaba un `save()` completo en cada
+arranque, aunque no hubiera cambios, y competía con la instancia anterior
+durante el rolling deploy.
+
+Se corrigió en dos capas:
+
+- La hidratación de identidad y facturación conserva sus marcas de tiempo si
+  no cambió el contenido.
+- `PostgresStore.load()` compara el documento persistido con el estado
+  hidratado y solo guarda cuando la migración o la carga de semillas cambió
+  realmente el documento.
+
+La validación local volvió a pasar y el despliegue posterior debe verificarse
+por estado `Live`, commit activo y `/health/ready`. No se purgaron ni alteraron
+datos de producción como parte de esta corrección.
