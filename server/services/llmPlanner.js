@@ -73,11 +73,12 @@ const STOPWORDS = new Set([
 ]);
 
 export class LLMPlanner {
-  constructor({ store, events, usage, config }) {
+  constructor({ store, events, usage, config, telemetry = null }) {
     this.store = store;
     this.events = events;
     this.usage = usage;
     this.config = config;
+    this.telemetry = telemetry;
   }
 
   async plan({ tenantId, conversationId, normalized, customerProfile, conversation }) {
@@ -102,6 +103,8 @@ export class LLMPlanner {
     let executionMode = 'mock_structured_fallback';
     let parsed;
     let providerMetadata = null;
+    let providerError = null;
+    const providerStartedAt = performance.now();
     try {
       if (provider === 'deepseek' && config.simulator === 'codex_cli') {
         const cliResult = await callCodexCli({ config, prompt: buildCodexCliPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods, config }) });
@@ -124,6 +127,7 @@ export class LLMPlanner {
         executionMode = 'provider_api';
       }
     } catch (error) {
+      providerError = error;
       providerMetadata = error.providerMetadata ?? null;
       const strictProduction = this.config?.allowLocalCatalogFallback === false && this.config?.whatsappMode === 'live';
       parsed = strictProduction
@@ -142,6 +146,22 @@ export class LLMPlanner {
         metadata: { provider, model: config.model, simulator: config.simulator, executionMode, reason: shorten(error.message, 180), providerMetadata },
       });
     }
+    this.telemetry?.record('llm', 'plan', {
+      durationMs: performance.now() - providerStartedAt,
+      status: providerError ? 'fallback' : 'ok',
+      tenantId,
+      traceId: normalized.traceId ?? conversation?.traceId ?? null,
+      metadata: {
+        provider,
+        model: config.model ?? defaultModel(provider),
+        executionMode,
+        requestCount: providerMetadata?.requestCount ?? null,
+        inputTokens: providerMetadata?.usage?.prompt_tokens ?? providerMetadata?.usage?.input_tokens ?? null,
+        outputTokens: providerMetadata?.usage?.completion_tokens ?? providerMetadata?.usage?.output_tokens ?? null,
+        totalTokens: providerMetadata?.usage?.total_tokens ?? providerMetadata?.usage?.totalTokens ?? null,
+        errorCode: providerError?.code ?? null,
+      },
+    });
     const coerced = coercePlanWithConversation(parsed, { text, conversation, paymentMethods });
     const enriched = enrichPlannerOutput(coerced, text);
     const plan = {
@@ -200,7 +220,17 @@ export class LLMPlanner {
     if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
     const provider = config.provider ?? 'deepseek';
     const canCompose = this.config?.llmResponseComposerEnabled && !config.simulator && provider !== 'mock';
-    if (!canCompose) return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    if (!canCompose) {
+      this.telemetry?.record('llm', 'reply', {
+        durationMs: 0,
+        status: 'fallback',
+        tenantId,
+        traceId: facts?.traceId ?? null,
+        metadata: { provider, model: config.model ?? defaultModel(provider), executionMode: 'deterministic_fallback' },
+      });
+      return { text: fallbackText, executionMode: 'deterministic_fallback', providerMetadata: null };
+    }
+    const replyStartedAt = performance.now();
     try {
       const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(provider));
       if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(provider).join('/')}`);
@@ -209,6 +239,20 @@ export class LLMPlanner {
         ? await callGeminiReply({ config, apiKey, prompt })
         : await callChatReply({ config, apiKey, prompt });
       const text = validateComposedReply(result.text, { facts, fallbackText });
+      this.telemetry?.record('llm', 'reply', {
+        durationMs: performance.now() - replyStartedAt,
+        status: 'ok',
+        tenantId,
+        traceId: facts?.traceId ?? null,
+        metadata: {
+          provider: result.providerMetadata.provider,
+          model: result.providerMetadata.model,
+          requestCount: result.providerMetadata.requestCount ?? null,
+          inputTokens: result.providerMetadata.usage?.prompt_tokens ?? result.providerMetadata.usage?.input_tokens ?? null,
+          outputTokens: result.providerMetadata.usage?.completion_tokens ?? result.providerMetadata.usage?.output_tokens ?? null,
+          totalTokens: result.providerMetadata.usage?.total_tokens ?? result.providerMetadata.usage?.totalTokens ?? null,
+        },
+      });
       this.events.emit({
         type: 'llm.reply.composed',
         tenantId,
@@ -218,6 +262,13 @@ export class LLMPlanner {
       });
       return { text, executionMode: 'provider_api', providerMetadata: result.providerMetadata };
     } catch (error) {
+      this.telemetry?.record('llm', 'reply', {
+        durationMs: performance.now() - replyStartedAt,
+        status: 'fallback',
+        tenantId,
+        traceId: facts?.traceId ?? null,
+        metadata: { provider, model: config.model ?? defaultModel(provider), errorCode: error.code ?? null },
+      });
       this.events.emit({
         type: 'llm.reply.fallback',
         tenantId,

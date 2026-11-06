@@ -8,7 +8,7 @@ import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsap
 import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
 
 export class AgentRuntime {
-  constructor({ store, events, tools, planner, usage, config, orders = null }) {
+  constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null }) {
     this.store = store;
     this.events = events;
     this.tools = tools;
@@ -16,6 +16,7 @@ export class AgentRuntime {
     this.usage = usage;
     this.config = config;
     this.orders = orders;
+    this.telemetry = telemetry;
     this.manualSweepTimer = null;
     this.conversationEnsureLocks = new Map();
   }
@@ -37,7 +38,31 @@ export class AgentRuntime {
     this.manualSweepTimer = null;
   }
 
-  async processInbound(normalized, { skipIdempotency = false } = {}) {
+  async processInbound(normalized, options = {}) {
+    const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
+    const traceId = normalized.traceId
+      ?? (normalized.messageId ? `wa:${normalized.messageId}` : `inbound:${Date.now()}`);
+    normalized.traceId = traceId;
+    const trace = this.telemetry?.startTrace({
+      traceId,
+      tenantId,
+      messageId: normalized.messageId ?? null,
+      conversationId: normalized.conversationId ?? null,
+      source: normalized.provider ?? 'inbound',
+    });
+    try {
+      const result = await this.processInboundCore(normalized, options);
+      trace?.complete(result?.duplicate ? 'duplicate' : 'ok', {
+        conversationId: result?.conversation?.id ?? normalized.conversationId ?? null,
+      });
+      return result;
+    } catch (error) {
+      trace?.complete('error', { errorCode: error.code ?? null, toolName: error.toolName ?? null });
+      throw error;
+    }
+  }
+
+  async processInboundCore(normalized, { skipIdempotency = false } = {}) {
     if (normalized.coexistenceEvent) return processCoexistenceEvent(this, normalized);
     normalized.waId = requireWhatsAppRecipient(normalized.waId);
     const tenantId = normalized.tenantId ?? this.config.defaultTenantId;
@@ -128,6 +153,16 @@ export class AgentRuntime {
     const inbound = await this.store.getInboundMessage?.(messageId);
     if (!inbound) throw new Error(`Inbound message ${messageId} not found`);
     if (inbound.status === 'completed') return { duplicate: true, inbound };
+    const receivedAt = Date.parse(inbound.receivedAt ?? inbound.createdAt ?? inbound.payload?.receivedAt);
+    if (Number.isFinite(receivedAt)) {
+      this.telemetry?.record('inbound', 'queue_wait', {
+        durationMs: Math.max(0, Date.now() - receivedAt),
+        status: 'ok',
+        tenantId: inbound.tenantId ?? inbound.payload?.tenantId ?? null,
+        traceId: inbound.payload?.traceId ?? null,
+        metadata: { messageId, status: inbound.status },
+      });
+    }
     await this.store.markInboundMessageProcessing?.(messageId);
     try {
       const result = await this.processInbound(inbound.payload, { skipIdempotency: true });

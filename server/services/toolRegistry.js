@@ -29,13 +29,14 @@ function googleConnectionRequiredResult(message) {
 }
 
 export class ToolRegistry {
-  constructor({ store, events, usage, config, googleWorkspace, secretVault }) {
+  constructor({ store, events, usage, config, googleWorkspace, secretVault, telemetry }) {
     this.store = store;
     this.events = events;
     this.usage = usage;
     this.config = config;
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
+    this.telemetry = telemetry;
     this.outbox = null;
     this.googleAccessTokenCache = new Map();
     this.liveCatalogCache = new Map();
@@ -46,6 +47,8 @@ export class ToolRegistry {
   }
 
   async call(toolName, tenantId, conversationId, payload = {}) {
+    const startedAt = performance.now();
+    let status = 'ok';
     const traceId = payload.traceId
       ?? this.store.getState().conversations?.find((conversation) => conversation.id === conversationId)?.traceId
       ?? null;
@@ -68,6 +71,7 @@ export class ToolRegistry {
       this.usage?.recordToolCall(tenantId, toolName, { conversationId });
       return result;
     } catch (error) {
+      status = 'error';
       error.toolName ??= toolName;
       this.events.emit({
         type: 'tool.call.failed',
@@ -77,6 +81,14 @@ export class ToolRegistry {
         metadata: { toolName, traceId },
       });
       throw error;
+    } finally {
+      this.telemetry?.record('tool', 'call', {
+        durationMs: performance.now() - startedAt,
+        status,
+        tenantId,
+        traceId,
+        metadata: { toolName, conversationId },
+      });
     }
   }
 

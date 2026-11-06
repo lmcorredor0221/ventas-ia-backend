@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { recordWebhookEvent } from '../services/platformService.js';
 
-export function createWhatsAppRouter({ store, runtime, controlPlane, config = {} }) {
+export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}, telemetry = null }) {
   const router = express.Router();
 
   router.get('/whatsapp', (req, res) => {
@@ -32,6 +32,20 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
   router.post('/whatsapp', async (req, res, next) => {
     const startedAt = Date.now();
     let normalized = null;
+    res.on('finish', () => {
+      telemetry?.record('webhook', 'http', {
+        durationMs: Date.now() - startedAt,
+        status: res.statusCode >= 400 ? 'error' : 'ok',
+        tenantId: normalized?.tenantId ?? null,
+        traceId: normalized?.traceId ?? null,
+        metadata: {
+          httpStatus: res.statusCode,
+          eventType: normalized?.messageType ?? null,
+          messageId: normalized?.messageId ?? null,
+          asyncInbound: Boolean(config.asyncInboundEnabled),
+        },
+      });
+    });
     try {
       if (!verifySignature(req)) {
         recordWebhookEvent(store, webhookRecordFromRequest(req, {
@@ -51,6 +65,9 @@ export function createWhatsAppRouter({ store, runtime, controlPlane, config = {}
 
       async function processEvent(event) {
         normalized = event;
+        normalized.traceId ??= normalized.messageId
+          ? `wa:${normalized.messageId}`
+          : `inbound:${Date.now()}`;
         if (!normalized.tenantId) {
           recordWebhookEvent(store, webhookRecordFromRequest(req, {
             status: 'ignored',

@@ -46,6 +46,10 @@ export const RUNTIME_CONFIG = {
     : true,
   integrationOutboxMaxAttempts: Number(process.env.INTEGRATION_OUTBOX_MAX_ATTEMPTS ?? 8),
   llmResponseComposerEnabled: process.env.LLM_RESPONSE_COMPOSER_ENABLED !== 'false',
+  telemetryMaxSamples: Number(process.env.TELEMETRY_MAX_SAMPLES ?? 4000),
+  telemetryMaxTraces: Number(process.env.TELEMETRY_MAX_TRACES ?? 1000),
+  telemetrySlowThresholdMs: Number(process.env.TELEMETRY_SLOW_THRESHOLD_MS ?? 1000),
+  telemetryLogTraces: process.env.TELEMETRY_LOG_TRACES !== 'false',
 };
 
 export const REQUIRED_EVENTS = [

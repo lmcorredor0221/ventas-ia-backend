@@ -3,9 +3,10 @@ const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_MAX_ATTEMPTS = 8;
 
 export class IntegrationOutbox {
-  constructor({ store, config = {}, handlers = {} }) {
+  constructor({ store, config = {}, handlers = {}, telemetry = null }) {
     this.store = store;
     this.handlers = handlers;
+    this.telemetry = telemetry;
     this.enabled = Boolean(config.integrationOutboxEnabled);
     this.intervalMs = Number(config.integrationOutboxIntervalMs ?? DEFAULT_INTERVAL_MS);
     this.batchSize = Number(config.integrationOutboxBatchSize ?? DEFAULT_BATCH_SIZE);
@@ -56,26 +57,54 @@ export class IntegrationOutbox {
 
   async drain() {
     if (!this.enabled || this.running || !this.store.claimOutbox) return { processed: 0, skipped: true };
+    const startedAt = performance.now();
     this.running = true;
     let processed = 0;
+    let failed = 0;
+    let entries = [];
+    let drainStatus = 'ok';
     try {
-      const entries = await this.store.claimOutbox({ limit: this.batchSize });
+      entries = await this.store.claimOutbox({ limit: this.batchSize });
       for (const entry of entries) {
         const handler = this.handlers[entry.kind];
+        const entryStartedAt = performance.now();
+        let entryStatus = 'ok';
         try {
           if (!handler) throw new Error(`No outbox handler registered for ${entry.kind}`);
           const result = await handler(entry);
           await this.store.completeOutbox(entry.id, result);
           processed += 1;
         } catch (error) {
-          const failed = await this.store.failOutbox(entry.id, error, { maxAttempts: this.maxAttempts });
-          if (entry.kind === 'whatsapp.inbound_processing' && failed?.status === 'failed') {
+          entryStatus = 'error';
+          failed += 1;
+          const failure = await this.store.failOutbox(entry.id, error, { maxAttempts: this.maxAttempts });
+          if (entry.kind === 'whatsapp.inbound_processing' && failure?.status === 'failed') {
             await this.store.failInboundMessage?.(entry.payload.messageId, error, { terminal: true });
           }
+        } finally {
+          this.telemetry?.record('outbox', 'entry', {
+            durationMs: performance.now() - entryStartedAt,
+            status: entryStatus,
+            tenantId: entry.tenantId,
+            traceId: entry.payload?.traceId ?? null,
+            metadata: {
+              kind: entry.kind,
+              attempts: entry.attempts,
+              queueAgeMs: Date.parse(entry.createdAt) ? Date.now() - Date.parse(entry.createdAt) : null,
+            },
+          });
         }
       }
       return { processed, skipped: false };
+    } catch (error) {
+      drainStatus = 'error';
+      throw error;
     } finally {
+      this.telemetry?.record('outbox', 'drain', {
+        durationMs: performance.now() - startedAt,
+        status: drainStatus,
+        metadata: { claimed: entries.length, processed, failed, batchSize: this.batchSize },
+      });
       this.running = false;
     }
   }

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import pg from 'pg';
@@ -42,6 +43,22 @@ export class PostgresStore {
     this.snapshotSaveDeferred = null;
     this.snapshotSaving = false;
     this.snapshotDirty = false;
+    this.snapshotDirtyMutations = 0;
+    this.snapshotFirstDirtyAt = null;
+    this.telemetry = null;
+  }
+
+  setTelemetry(telemetry) {
+    this.telemetry = telemetry;
+    this.telemetry?.setGauge('postgres.pool', this.poolStats());
+  }
+
+  poolStats() {
+    return {
+      totalCount: this.pool.totalCount,
+      idleCount: this.pool.idleCount,
+      waitingCount: this.pool.waitingCount,
+    };
   }
 
   async load() {
@@ -858,18 +875,32 @@ export class PostgresStore {
     ).then((result) => result.rows.map(outboxRow));
   }
 
-  async save({ includeMirrors = true } = {}) {
+  async save({ includeMirrors = true, telemetryContext = {} } = {}) {
     // Freeze one coherent projection. Mutations arriving during SQL writes are
     // persisted by their own critical write / next scheduled snapshot.
+    const startedAt = performance.now();
+    const cloneStartedAt = performance.now();
     const state = structuredClone(this.getState());
-    const client = await this.pool.connect();
+    const cloneDurationMs = performance.now() - cloneStartedAt;
+    let serializedBytes = null;
+    let sqlDurationMs = null;
+    let status = 'ok';
+    let errorCode = null;
+    let poolWaitMs = null;
+    let client = null;
     try {
+      const poolStartedAt = performance.now();
+      client = await this.pool.connect();
+      poolWaitMs = performance.now() - poolStartedAt;
+      const sqlStartedAt = performance.now();
       await client.query('BEGIN');
       const persisted = await client.query("SELECT document FROM app_state WHERE id='runtime' FOR UPDATE");
       mergeNewerGoogleConnections(state, persisted.rows[0]?.document);
       mergeNewerGoogleConnections(this.state, persisted.rows[0]?.document);
       mergeNewerWhatsAppCheckpoints(state, persisted.rows[0]?.document);
       mergeNewerWhatsAppCheckpoints(this.state, persisted.rows[0]?.document);
+      const serialized = JSON.stringify(state);
+      serializedBytes = Buffer.byteLength(serialized, 'utf8');
       await client.query(
         `
           INSERT INTO app_state (id, document, schema_version, updated_at)
@@ -879,23 +910,44 @@ export class PostgresStore {
               schema_version = EXCLUDED.schema_version,
               updated_at = now()
         `,
-        ['runtime', JSON.stringify(state), state.schemaVersion ?? 'unknown'],
+        ['runtime', serialized, state.schemaVersion ?? 'unknown'],
       );
       // Operational tables are persisted by their dedicated write methods.
       // Rebuilding every mirror table in each deferred snapshot can hold the
       // runtime/tenant locks for minutes and block configuration writes.
       if (includeMirrors) await upsertMirrorTables(client, state);
       await client.query('COMMIT');
+      sqlDurationMs = performance.now() - sqlStartedAt;
     } catch (error) {
-      await client.query('ROLLBACK');
+      status = 'error';
+      errorCode = error.code ?? error.name ?? 'postgres_error';
+      if (client) await client.query('ROLLBACK');
       throw error;
     } finally {
-      client.release();
+      client?.release();
+      this.telemetry?.setGauge('postgres.pool', this.poolStats());
+      this.telemetry?.record('postgres', 'snapshot', {
+        durationMs: performance.now() - startedAt,
+        status,
+        metadata: {
+          includeMirrors,
+          serializedBytes,
+          cloneMs: Number(cloneDurationMs.toFixed(2)),
+          sqlMs: sqlDurationMs === null ? null : Number(sqlDurationMs.toFixed(2)),
+          queueWaitMs: telemetryContext.queueWaitMs ?? null,
+          poolWaitMs: poolWaitMs === null ? null : Number(poolWaitMs.toFixed(2)),
+          dirtyMutations: telemetryContext.dirtyMutations ?? null,
+          errorCode,
+          ...this.poolStats(),
+        },
+      });
     }
   }
 
   queueSave() {
+    if (!this.snapshotDirty) this.snapshotFirstDirtyAt = Date.now();
     this.snapshotDirty = true;
+    this.snapshotDirtyMutations += 1;
     if (!this.snapshotSaveDeferred) this.snapshotSaveDeferred = deferred();
     this.scheduleSnapshotSave();
     return this.snapshotSaveDeferred.promise;
@@ -915,8 +967,14 @@ export class PostgresStore {
     const snapshot = this.snapshotSaveDeferred;
     this.snapshotSaveDeferred = null;
     this.snapshotDirty = false;
+    const telemetryContext = {
+      queueWaitMs: this.snapshotFirstDirtyAt ? Math.max(0, Date.now() - this.snapshotFirstDirtyAt) : null,
+      dirtyMutations: this.snapshotDirtyMutations,
+    };
+    this.snapshotFirstDirtyAt = null;
+    this.snapshotDirtyMutations = 0;
     this.snapshotSaving = true;
-    const write = this.queueSnapshotWrite(() => this.save({ includeMirrors: false }), 'deferred snapshot save');
+    const write = this.queueSnapshotWrite(() => this.save({ includeMirrors: false, telemetryContext }), 'deferred snapshot save');
     write.then(
       () => snapshot?.resolve(),
       (error) => snapshot?.reject(error),
@@ -928,7 +986,23 @@ export class PostgresStore {
   }
 
   queueWrite(operation, label) {
-    this.saveQueue = this.saveQueue.catch(() => undefined).then(operation);
+    const queuedAt = performance.now();
+    this.saveQueue = this.saveQueue.catch(() => undefined).then(async () => {
+      const startedAt = performance.now();
+      let status = 'ok';
+      try {
+        return await operation();
+      } catch (error) {
+        status = 'error';
+        throw error;
+      } finally {
+        this.telemetry?.record('postgres', 'queued_write', {
+          durationMs: performance.now() - startedAt,
+          status,
+          metadata: { label, queueWaitMs: startedAt - queuedAt },
+        });
+      }
+    });
     this.saveQueue.catch((error) => {
       console.error(`PostgresStore ${label} failed`, error);
     });
@@ -936,7 +1010,23 @@ export class PostgresStore {
   }
 
   queueCriticalWrite(operation, label) {
-    this.criticalQueue = this.criticalQueue.catch(() => undefined).then(operation);
+    const queuedAt = performance.now();
+    this.criticalQueue = this.criticalQueue.catch(() => undefined).then(async () => {
+      const startedAt = performance.now();
+      let status = 'ok';
+      try {
+        return await operation();
+      } catch (error) {
+        status = 'error';
+        throw error;
+      } finally {
+        this.telemetry?.record('postgres', 'critical_write', {
+          durationMs: performance.now() - startedAt,
+          status,
+          metadata: { label, queueWaitMs: startedAt - queuedAt },
+        });
+      }
+    });
     const write = this.criticalQueue;
     this.criticalWrites.add(write);
     write.then(
@@ -950,7 +1040,23 @@ export class PostgresStore {
   }
 
   queueSnapshotWrite(operation, label) {
-    this.snapshotQueue = this.snapshotQueue.catch(() => undefined).then(operation);
+    const queuedAt = performance.now();
+    this.snapshotQueue = this.snapshotQueue.catch(() => undefined).then(async () => {
+      const startedAt = performance.now();
+      let status = 'ok';
+      try {
+        return await operation();
+      } catch (error) {
+        status = 'error';
+        throw error;
+      } finally {
+        this.telemetry?.record('postgres', 'snapshot_queue', {
+          durationMs: performance.now() - startedAt,
+          status,
+          metadata: { label, queueWaitMs: startedAt - queuedAt },
+        });
+      }
+    });
     this.snapshotQueue.catch((error) => {
       console.error(`PostgresStore ${label} failed`, error);
     });

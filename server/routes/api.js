@@ -2,7 +2,7 @@ import express from 'express';
 import { mergeTenantConfig, sanitizeOwnerConfigPatch } from '../services/tenantConfigPolicy.js';
 import { isClosedConversation } from '../domain/conversationStatus.js';
 
-export function createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth }) {
+export function createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth, telemetry }) {
   const router = express.Router();
 
   router.get('/tenants', async (req, res, next) => {
@@ -216,6 +216,26 @@ export function createApiRouter({ store, events, runtime, tools, orders, manualO
       });
     } catch (error) {
       next(error);
+    }
+  });
+
+  router.get('/ops/telemetry', async (req, res, next) => {
+    try {
+      const tenants = await readTenants(store);
+      const visibleTenants = auth.filterTenantsForRequest(req, tenants);
+      const tenantId = req.query.tenantId || null;
+      if (tenantId) auth.authorizeTenant(req, tenantId);
+      const allowedTenantIds = tenantId ? [tenantId] : visibleTenants.map((tenant) => tenant.id);
+      const sinceMs = req.query.sinceMs ? Number(req.query.sinceMs) : null;
+      return res.json(telemetry?.snapshot({ tenantId, tenantIds: allowedTenantIds, sinceMs }) ?? {
+        generatedAt: new Date().toISOString(),
+        operations: {},
+        recentTraces: [],
+        activeTraces: [],
+        gauges: {},
+      });
+    } catch (error) {
+      return next(error);
     }
   });
 

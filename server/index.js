@@ -26,6 +26,7 @@ import { OrderService } from './services/orderService.js';
 import { ManualOrderService } from './services/manualOrderService.js';
 import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js';
 import { IntegrationOutbox } from './services/integrationOutbox.js';
+import { RuntimeTelemetry } from './services/runtimeTelemetry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -59,15 +60,23 @@ function createStore(config) {
 
 function createExpressRuntime({ config, store }) {
   const runtimeValidation = validateRuntimeConfig(config);
+  const telemetry = new RuntimeTelemetry({
+    maxSamples: config.telemetryMaxSamples,
+    maxTraces: config.telemetryMaxTraces,
+    slowThresholdMs: config.telemetrySlowThresholdMs,
+    logTraces: config.telemetryLogTraces,
+  });
+  store.setTelemetry?.(telemetry);
   const events = new EventService(store);
   const usage = new UsageService({ store, events });
   const secretVault = new SecretVault({ store });
   const googleWorkspace = new GoogleWorkspaceService({ config });
-  const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault });
+  const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault, telemetry });
   let runtime;
   const integrationOutbox = new IntegrationOutbox({
     store,
     config,
+    telemetry,
     handlers: {
       'order.sheet_projection': async (entry) => {
         const order = Object.values(store.getState().ordersByTenant ?? {})
@@ -118,8 +127,8 @@ function createExpressRuntime({ config, store }) {
   tools.setOutbox?.(integrationOutbox);
   const orders = new OrderService({ store, events, tools, outbox: integrationOutbox });
   const manualOrders = new ManualOrderService({ store, events, tools, usage, outbox: integrationOutbox });
-  const planner = new LLMPlanner({ store, events, usage, config });
-  runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders });
+  const planner = new LLMPlanner({ store, events, usage, config, telemetry });
+  runtime = new AgentRuntime({ store, events, tools, planner, usage, config, orders, telemetry });
   if (config.backgroundWorkersEnabled) {
     runtime.start();
     integrationOutbox.start();
@@ -175,8 +184,8 @@ function createExpressRuntime({ config, store }) {
   app.use('/api/billing', createBillingRouter({ controlPlane, auth }));
   app.use('/api/saas', createSaasRouter({ controlPlane, auth }));
   app.use('/api/admin', createAdminRouter({ store, usage, auth, controlPlane }));
-  app.use('/api', createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth }));
-  app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane, config }));
+  app.use('/api', createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth, telemetry }));
+  app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane, config, telemetry }));
   app.use('/webhooks', createMercadoPagoRouter({ controlPlane, store }));
 
   const distPath = path.join(rootDir, 'dist');
