@@ -353,13 +353,16 @@ function autoLinkOwnedTenants(state, user, now) {
 function upsertTenantMember(state, member) {
   if (!TENANT_ROLES.has(member.role)) throw new Error(`Invalid tenant role: ${member.role}`);
   const existing = state.tenantMembers.find((item) => item.tenantId === member.tenantId && item.userId === member.userId);
-  const now = new Date().toISOString();
   if (existing) {
+    const nextStatus = member.status ?? existing.status;
+    if (existing.role === member.role && existing.status === nextStatus) return existing;
+    const now = new Date().toISOString();
     existing.role = member.role;
-    existing.status = member.status ?? existing.status;
+    existing.status = nextStatus;
     existing.updatedAt = now;
     return existing;
   }
+  const now = new Date().toISOString();
   const next = {
     tenantId: member.tenantId,
     userId: member.userId,
