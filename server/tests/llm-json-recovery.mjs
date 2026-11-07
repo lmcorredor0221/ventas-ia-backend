@@ -25,6 +25,10 @@ try {
   const planner = new LLMPlanner({ store, events: eventBus, usage, config: {
     whatsappMode: 'live', allowLocalCatalogFallback: false, llmRequestTimeoutMs: 8000,
     llmMaxTokens: 600, llmJsonRetryMaxTokens: 1800,
+    // This file validates bounded recovery of the legacy single-call
+    // structured contract; staged context/product interpretation is covered
+    // by llm-provider.mjs.
+    llmTwoStageInterpretationEnabled: false,
   } });
   const valid = { intent: 'delivery_order', order: { delivery: true, items: [
     { rawName: 'leche entera', catalogQuery: 'leche entera', quantity: 1 },

@@ -27,7 +27,9 @@ store.mutate(state => {
     apiKeyRef: real ? 'DEEPSEEK_API_KEY' : 'VIA_CHECKOUT_TEST_KEY', temperature: 0, maxTokens: 900, simulator: null };
 });
 const planner = new LLMPlanner({ store, events: { emit: e => events.push(e) },
-  config: { llmRequestTimeoutMs: 8000, llmMaxTokens: 900, llmJsonRetryMaxTokens: 1800, allowLocalCatalogFallback: false, whatsappMode: 'live' } });
+  // This contract suite validates legacy planner normalization and checkout
+  // continuity. The staged provider contract is covered by llm-provider.mjs.
+  config: { llmRequestTimeoutMs: 8000, llmMaxTokens: 900, llmJsonRetryMaxTokens: 1800, allowLocalCatalogFallback: false, whatsappMode: 'live', llmTwoStageInterpretationEnabled: false } });
 const cart = { delivery: true, items: [{ skuHint: 'MILK-C', catalogQuery: 'Leche entera Colanta', quantity: 1 }], missingFields: ['payment_method'],
   checkout: { phase: 'review' } };
 const cases = [

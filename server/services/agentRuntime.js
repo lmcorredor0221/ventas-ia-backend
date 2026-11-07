@@ -6,9 +6,10 @@ import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
 import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
+import { CatalogResolutionService } from './catalogResolutionService.js';
 
 export class AgentRuntime {
-  constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null }) {
+  constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null, catalogResolver = null }) {
     this.store = store;
     this.events = events;
     this.tools = tools;
@@ -17,8 +18,19 @@ export class AgentRuntime {
     this.config = config;
     this.orders = orders;
     this.telemetry = telemetry;
+    this.catalogResolution = catalogResolver ?? new CatalogResolutionService({
+      getPlanner: () => this.planner,
+      events,
+      telemetry,
+      enabled: () => this.contextualProductSelectionEnabled(),
+    });
     this.manualSweepTimer = null;
     this.conversationEnsureLocks = new Map();
+  }
+
+  contextualProductSelectionEnabled() {
+    return this.config?.contextualProductSelectionV2 === true
+      || process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true';
   }
 
   start() {
@@ -511,6 +523,7 @@ export class AgentRuntime {
       const matches = await Promise.all(catalogSearches.map(async (search) => {
         const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
           range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+          query: search.query,
           filters: search.filters,
           cache_policy: 'short_ttl',
         });
@@ -554,6 +567,7 @@ export class AgentRuntime {
     const query = search.query;
     const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
       range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
+      query,
       filters: search.filters,
       cache_policy: 'short_ttl',
     });
@@ -569,7 +583,14 @@ export class AgentRuntime {
     });
 
     const quote = selected
-      ? buildCatalogReply({ selected, alternatives, drive, delivery: Boolean(plan.order?.delivery), query })
+      ? buildCatalogReply({
+        selected,
+        alternatives,
+        drive,
+        delivery: Boolean(plan.order?.delivery),
+        query,
+        categoryQuery: Boolean(search.categoryQuery),
+      })
       : 'No encontre una coincidencia clara en el catalogo. Puedo pedir apoyo humano o buscar con mas detalles.';
 
     await this.patchConversation(conversationId, {
@@ -606,25 +627,46 @@ export class AgentRuntime {
       customerDetails: collected,
       delivery: Boolean(plan.order?.delivery),
     });
-    const orderItems = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
+    const contextualSelection = this.contextualProductSelectionEnabled()
+      && typeof this.planner?.adjudicateCatalogCandidates === 'function';
+    const currentConversation = await this.getConversation(conversationId);
+    const orderItemsFromCatalog = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         range: tenant?.config?.googleSheets?.range,
-        filters: deliveryItemFiltersFromPlan(plan, item, index),
+        filters: deliveryItemFiltersFromPlan(plan, item, index, normalized.text),
         cache_policy: 'short_ttl',
       });
-      const product = selectAcceptableOrderProduct(catalog.rows, item);
+      const product = contextualSelection
+        ? selectUniqueAcceptableOrderProduct(catalog.rows, item)
+        : selectAcceptableOrderProduct(catalog.rows, item);
+      const catalogCandidates = contextualSelection
+        ? catalogEvidenceForItem(catalog.rows, item, product)
+        : undefined;
       return {
         ...item,
         ...(!catalog.rows.length && catalog.restrictedItems?.length
           ? { commerceCategory: catalog.restrictedItems[0].category } : {}),
         product,
         presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
+        ...(catalogCandidates ? { catalogCandidates } : {}),
         lineTotal: quotedLineTotal({ ...item, product }),
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
       };
     }));
-
-    const currentConversation = await this.getConversation(conversationId);
+    const resolution = contextualSelection
+      ? await this.catalogResolution.resolve({
+        tenantId,
+        conversationId,
+        normalized,
+        conversation: currentConversation,
+        items: orderItemsFromCatalog,
+      })
+      : { items: orderItemsFromCatalog, status: 'legacy_fallback' };
+    const orderItems = resolution.items.map((item) => ({
+      ...item,
+      lineTotal: quotedLineTotal(item),
+      available: Boolean(item.product && item.product.stock >= (item.quantity ?? 1)),
+    }));
     const previousDraft = currentConversation?.orderDraft;
     const effectiveOrderItems = previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
@@ -648,9 +690,18 @@ export class AgentRuntime {
       ?? resolvePaymentMethod(collected.paymentMethod, paymentMethods);
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
-      if (item.product) removeResolvedProductMissingFields(missingFields, item);
+      if (item.product) {
+        removeResolvedProductMissingFields(missingFields, item);
+        if (item.lineId) removeMissingField(missingFields, `selection:${item.lineId}`);
+      }
       if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
-      if (!item.product) missingFields.push(`product:${item.catalogQuery}`);
+      if (!item.product && item.selectionStatus === 'pending' && item.catalogCandidates?.length) {
+        missingFields.push(`selection:${item.lineId}`);
+      } else if (!item.product && item.selectionStatus === 'handoff') {
+        missingFields.push(`product:${item.catalogQuery}`);
+      } else if (!item.product) {
+        missingFields.push(`product:${item.catalogQuery}`);
+      }
       if (item.product && !isPositiveAmount(item.product.price)) missingFields.push(`price:${item.catalogQuery}`);
       if (!isPositiveAmount(item.quantity) && !isPositiveAmount(item.budgetAmount)) missingFields.push(`quantity:${item.catalogQuery}`);
       if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
@@ -685,6 +736,9 @@ export class AgentRuntime {
     const checkoutOffer = !requiresHumanResolution
       ? await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout })
       : null;
+    const catalogSelectionOffer = !requiresHumanResolution
+      ? await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout, items: effectiveOrderItems })
+      : null;
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -697,8 +751,9 @@ export class AgentRuntime {
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
-    const checkoutInteractive = checkoutOffer?.interactive
-      ? { ...checkoutOffer.interactive, body: customerReply }
+    const interactiveOffer = catalogSelectionOffer ?? checkoutOffer;
+    const checkoutInteractive = interactiveOffer?.interactive
+      ? { ...interactiveOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -726,6 +781,7 @@ export class AgentRuntime {
         paymentMethodLabel: selectedPaymentMethod?.label ?? null,
         driveRefs: drive.source_refs ?? [],
         driveStatus: drive.status,
+        catalogResolution: resolution.status,
         checkout,
       },
     });
@@ -912,7 +968,7 @@ export class AgentRuntime {
     return { summary: 'Confirmed order registered and handed off', plan };
   }
 
-  async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile, preserveProductAmbiguity = false }) {
+  async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile, preserveProductAmbiguity = false, preserveExistingCatalogSelections = false }) {
     const conversation = await this.getConversation(conversationId);
     const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: draft.items });
@@ -946,7 +1002,7 @@ export class AgentRuntime {
 
     // New/replaced products must pass through the catalog resolver. Existing
     // products keep their verified price even when the LLM returns only SKUs.
-    if (draft.items.some((item) => !item.product || !isPositiveAmount(item.product.price)
+    if (!preserveExistingCatalogSelections && draft.items.some((item) => !item.product || !isPositiveAmount(item.product.price)
       || (item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)))) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
         plan: { ...plan, order: draft, missingFields: draft.missingFields ?? [] },
@@ -972,12 +1028,24 @@ export class AgentRuntime {
       return true;
     });
     draft.missingFields = [...new Set(missingFields)];
+    for (const item of draft.items ?? []) {
+      if (item.product) {
+        // A selection callback can arrive after the previous turn stored
+        // quantity/stock/selection gaps for the same line. Reconcile those
+        // stale gaps before building the next offer; otherwise the selected
+        // product is displayed as still unresolved and the conversation loops.
+        removeResolvedProductMissingFields(draft.missingFields, item);
+        removeResolvedBudgetMissingFields(draft.missingFields, item);
+        removeResolvedStockMissingFields(draft.missingFields, item);
+        if (item.lineId) removeMissingField(draft.missingFields, `selection:${item.lineId}`);
+      }
+    }
     if (!draft.items.length) draft.missingFields.push('order_items');
     for (const item of draft.items) {
       if (item.lineTotal === null) draft.missingFields.push(`quantity:${item.catalogQuery}`);
       if (!item.available) draft.missingFields.push(`stock:${item.catalogQuery}`);
     }
-    if (needsHumanProductResolution(draft.missingFields)) {
+    if (needsHumanProductResolution(draft.missingFields) && !preserveExistingCatalogSelections) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
         plan: { ...plan, order: draft, missingFields: draft.missingFields },
       });
@@ -998,6 +1066,7 @@ export class AgentRuntime {
       checkout: draft.checkout,
     });
     const checkoutOffer = await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout: draft.checkout });
+    const catalogSelectionOffer = await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout: draft.checkout, items: draft.items ?? [] });
     const customerReply = await this.composeCustomerReply({
       tenantId,
       conversationId,
@@ -1010,8 +1079,9 @@ export class AgentRuntime {
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
-    const checkoutInteractive = checkoutOffer?.interactive
-      ? { ...checkoutOffer.interactive, body: customerReply }
+    const interactiveOffer = catalogSelectionOffer ?? checkoutOffer;
+    const checkoutInteractive = interactiveOffer?.interactive
+      ? { ...interactiveOffer.interactive, body: customerReply }
       : undefined;
 
     await this.patchConversation(conversationId, {
@@ -1553,6 +1623,36 @@ export class AgentRuntime {
     };
   }
 
+  async createCatalogSelectionOffer({ tenantId, conversationId, checkout, items }) {
+    if (!this.store.createInteractionOffer || checkout?.phase !== 'collecting') return null;
+    const item = (items ?? []).find((candidate) => (
+      candidate.selectionStatus === 'pending' && (candidate.catalogCandidates?.length ?? 0) > 0
+    ));
+    if (!item) return null;
+    const candidates = item.catalogCandidates.slice(0, 3);
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const options = candidates.map((candidate, index) => ({
+      id: `vi:${offerId}:${index + 1}`,
+      title: shortProductOptionTitle(candidate),
+      action: 'select_catalog_product',
+      value: JSON.stringify({ basketKey: checkout.basketKey, lineId: item.lineId, sku: candidate.sku }),
+    }));
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      purpose: 'catalog_selection',
+      options,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+    return {
+      offer,
+      interactive: options.length <= 3
+        ? { kind: 'button', body: item.selectionQuestion ?? '¿Cuál de estas opciones prefieres?', buttons: options.map(({ id, title }) => ({ id, title })) }
+        : null,
+    };
+  }
+
   async createOrderConfirmationOffer({ tenantId, conversationId, basket }) {
     if (!this.store.createInteractionOffer) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
@@ -1604,6 +1704,28 @@ export class AgentRuntime {
     if (commerceResult) return commerceResult;
     if (current?.commercePolicy?.awaitingContinuation) return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
       reason: 'El pedido cambió. Usa «Continuar sin ellos» para revisar únicamente los productos permitidos.' });
+    if (result.option?.action === 'select_catalog_product') {
+      const selection = parseCatalogSelectionValue(result.option.value);
+      const currentBasket = basketKey(current?.orderDraft);
+      const selectedItem = current?.orderDraft?.items?.find((item) => item.lineId === selection?.lineId);
+      const selectedProduct = selectedItem?.catalogCandidates?.find((candidate) => String(candidate.sku) === String(selection?.sku));
+      if (!selection || selection.basketKey !== currentBasket || !selectedItem || !selectedProduct) {
+        return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+          reason: 'El catálogo cambió desde esas opciones. Te muestro nuevamente las alternativas disponibles.' });
+      }
+      const updatedDraft = {
+        ...current.orderDraft,
+        items: current.orderDraft.items.map((item) => item.lineId === selection.lineId
+          ? { ...item, product: selectedProduct, selectionStatus: 'selected', selectionQuestion: null, lineTotal: quotedLineTotal({ ...item, product: selectedProduct }), available: selectedProduct.stock >= (item.quantity ?? 1) }
+          : item),
+      };
+      const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+        wa_id: normalized.waId, profile_name: normalized.profileName,
+      });
+      return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
+        preserveExistingCatalogSelections: true,
+        plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] } });
+    }
     if (['continue_checkout', 'confirm_order'].includes(result.option?.action)
       && result.option.value !== basketKey(current?.orderDraft)) {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
@@ -1794,11 +1916,19 @@ function containsAny(text, words) {
 function catalogSearchesFromPlan(plan, catalogItems, text) {
   const plannedSearches = (plan.toolPlan ?? [])
     .filter((step) => step.tool === 'google_sheets_read_table')
-    .map((step, index) => ({
-      query: step.candidate ?? step.query ?? step.filters?.query ?? step.filters?.category ?? text,
-      filters: step.filters,
-      candidateIndex: step.candidateIndex ?? index,
-    }))
+    .map((step, index) => {
+      const query = step.query
+        ?? step.filters?.query
+        ?? (step.filters?.sku || step.filters?.category
+          ? ''
+          : step.candidate ?? step.filters?.category ?? text);
+      return {
+        query,
+        filters: step.filters,
+        categoryQuery: Boolean(step.filters?.category && !query),
+        candidateIndex: step.candidateIndex ?? index,
+      };
+    })
     .filter((step) => step.filters && Object.keys(step.filters).length);
   if (plannedSearches.length) return plannedSearches;
   const fallbackItems = catalogItems.length ? catalogItems : [{ catalogQuery: text, rawName: text }];
@@ -1812,17 +1942,36 @@ function catalogSearchesFromPlan(plan, catalogItems, text) {
   });
 }
 
-function deliveryItemFiltersFromPlan(plan, item, index) {
-  // The order item is already bound to this catalog SKU. It is more reliable
-  // than a planner tool step that may accidentally be reused for another line.
+function deliveryItemFiltersFromPlan(plan, item, index, requestText = '') {
+  // A planner SKU is only authoritative when the customer explicitly supplied
+  // it. Generic aliases such as "coca" or "chocorramo" are hypotheses; using
+  // them as an exact filter suppresses the alternatives the customer still has
+  // to choose from.
   const planned = (plan.toolPlan ?? []).find((step) =>
     step.tool === 'google_sheets_read_table' &&
     (step.candidateIndex === index || step.candidate === item.catalogQuery || step.candidate === item.rawName)
   );
   const attributes = item.requestedAttributes ?? planned?.filters?.attributes;
-  const filters = item.skuHint ? { sku: item.skuHint }
-    : planned?.filters && Object.keys(planned.filters).length ? planned.filters
-    : inferCatalogFilter(item.catalogQuery ?? item.rawName);
+  const explicitSku = item.explicitSku === true
+    || item.skuHintSource === 'explicit'
+    || (item.skuHint && normalizeText(requestText).includes(normalizeText(item.skuHint)));
+  if (explicitSku && item.skuHint) {
+    return attributes ? { sku: item.skuHint, attributes } : { sku: item.skuHint };
+  }
+
+  const requestedPresentation = item.requestedPresentation ?? item.presentationHint ?? null;
+  const query = [item.catalogQuery ?? item.rawName, requestedPresentation]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  const plannedFilters = planned?.filters && typeof planned.filters === 'object'
+    ? { ...planned.filters }
+    : {};
+  delete plannedFilters.sku;
+  const filters = {
+    ...plannedFilters,
+    ...(query ? { query } : inferCatalogFilter(item.catalogQuery ?? item.rawName)),
+  };
   return attributes ? { ...filters, attributes } : filters;
 }
 
@@ -1957,10 +2106,50 @@ function removeResolvedBudgetMissingFields(missingFields, item) {
   }
 }
 
+function removeResolvedStockMissingFields(missingFields, item) {
+  const candidates = [
+    item.rawName,
+    item.catalogQuery,
+    item.product?.name,
+    ...(item.product?.aliases ?? []),
+  ].map(normalizeText).filter(Boolean);
+  for (let index = missingFields.length - 1; index >= 0; index -= 1) {
+    const field = missingFields[index];
+    if (!field.startsWith('stock:')) continue;
+    const missing = normalizeText(field.replace('stock:', ''));
+    if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
+      missingFields.splice(index, 1);
+    }
+  }
+}
+
 function selectAcceptableOrderProduct(rows = [], item = {}) {
   const eligible = rows.filter((row) => isAcceptableOrderProduct(row, item));
   if (!item.requestedPresentation) return eligible[0];
-  return eligible.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? eligible[0];
+  return eligible.find((row) => productMatchesRequestedPresentation(row, item.requestedPresentation)) ?? null;
+}
+
+function selectUniqueAcceptableOrderProduct(rows = [], item = {}) {
+  const eligible = rows.filter((row) => isAcceptableOrderProduct(row, item));
+  if (item.requestedPresentation) {
+    const matches = eligible.filter((row) => productMatchesRequestedPresentation(row, item.requestedPresentation));
+    return matches.length === 1 ? matches[0] : null;
+  }
+  return eligible.length === 1 ? eligible[0] : null;
+}
+
+function catalogEvidenceForItem(rows = [], item = {}, selectedProduct = null) {
+  const eligible = rows.filter((row) => isAcceptableOrderProduct(row, item));
+  // Never reintroduce incompatible rows as evidence. That fallback made a
+  // failed constrained search look like a valid alternative and could result
+  // in a product with a different presentation reaching the basket.
+  const candidates = eligible;
+  const unique = new Map();
+  for (const row of [selectedProduct, ...candidates].filter(Boolean)) {
+    const key = String(row.sku ?? `${row.name ?? 'product'}:${row.presentation ?? ''}`);
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  return [...unique.values()].slice(0, 8);
 }
 
 function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null) {
@@ -1968,7 +2157,16 @@ function presentationOptionsForItem(rows = [], item = {}, selectedProduct = null
   const candidates = rows.filter((row) => {
     if (!row) return false;
     if (!familyTokens.length) return row.sku === selectedProduct?.sku;
-    const productText = normalizeText([row.name, row.brand, ...(row.aliases ?? [])].filter(Boolean).join(' '));
+    const productText = normalizeText([
+      row.name,
+      row.brand,
+      row.presentation,
+      row.description,
+      row.productFamily,
+      ...(row.aliases ?? []),
+      ...(row.tags ?? []),
+      typeof row.attributes === 'object' ? JSON.stringify(row.attributes) : row.attributes,
+    ].filter(Boolean).join(' '));
     return familyTokens.every((token) => productText.includes(token));
   });
   const unique = new Map();
@@ -1989,6 +2187,8 @@ function isAcceptableOrderProduct(product, item = {}) {
   if (!product) return false;
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
   const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  if (item.requestedPresentation && !productMatchesRequestedPresentation(product, item.requestedPresentation)) return false;
+  if (item.requestedAttributes && !matchesRequestedCatalogAttributes(product, item.requestedAttributes)) return false;
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
   if (containsAny(query, ['salchichon', 'salchicha']) && !containsAny(productText, ['salchicha', 'salchichon', 'carnes frias'])) return false;
@@ -2000,9 +2200,28 @@ function isAcceptableOrderProduct(product, item = {}) {
   return true;
 }
 
-function buildCatalogReply({ selected, alternatives, drive, delivery, query }) {
+function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
+  if (!requestedAttributes || typeof requestedAttributes !== 'object') return true;
+  const actual = normalizeText([
+    product.brand,
+    product.category,
+    product.presentation,
+    product.productFamily,
+    product.description,
+    ...(product.aliases ?? []),
+    ...(product.tags ?? []),
+    typeof product.attributes === 'object' ? JSON.stringify(product.attributes) : product.attributes,
+  ].filter(Boolean).join(' '));
+  return Object.entries(requestedAttributes).every(([key, value]) => {
+    if (value === null || value === undefined || value === '') return true;
+    const expected = normalizeText(`${key} ${value}`);
+    return actual.includes(normalizeText(value)) || actual.includes(expected);
+  });
+}
+
+function buildCatalogReply({ selected, alternatives, drive, delivery, query, categoryQuery = false }) {
   const categoryOptions = [selected, ...alternatives];
-  if (categoryOptions.length > 1 && isCategoryQuery(query)) {
+  if (categoryOptions.length > 1 && (categoryQuery || isCategoryQuery(query))) {
     const options = categoryOptions
       .map((item) => `${item.name} (${formatCurrency(item.price)}, stock ${item.stock})`)
       .join('; ');
@@ -2131,10 +2350,16 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
         : [candidate.catalogQuery, candidate.rawName, candidate.product?.name].filter(Boolean)
           .some((name) => [item.catalogQuery, item.rawName].filter(Boolean).some((query) => normalizeText(name) === normalizeText(query))));
       const known = matches.length === 1 ? matches[0] : null;
+      const plannedProduct = item.product ?? null;
+      const knownProduct = known?.product ?? null;
+      const plannedSku = item.skuHint ?? plannedProduct?.sku ?? null;
+      const product = knownProduct && (!plannedSku || String(knownProduct.sku) === String(plannedSku))
+        ? knownProduct
+        : plannedProduct;
       return { ...known, ...item,
         quantity: item.quantity ?? known?.quantity,
         budgetAmount: item.budgetAmount ?? known?.budgetAmount,
-        product: known?.product ?? null,
+        product,
         lineTotal: null,
       };
     }),
@@ -2180,6 +2405,14 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
         asks.push(`confirmar la presentacion de ${query}`);
       }
     }
+    for (const missing of uniqueMissing.filter((item) => item.startsWith('selection:'))) {
+      const lineId = missing.replace('selection:', '');
+      const item = orderItems.find((candidate) => candidate.lineId === lineId);
+      const options = item?.catalogCandidates?.map(describeProductOption).filter(Boolean) ?? [];
+      const question = item?.selectionQuestion || `Para ${requestedProductName(item, item?.catalogQuery)}, ¿cuál opción prefieres?`;
+      if (options.length) presentationNotes.push(`${question} Opciones: ${joinSpanish(options)}.`);
+      else asks.push(`aclarar el producto ${item?.catalogQuery ?? lineId}`);
+    }
     for (const missing of uniqueMissing.filter((item) => item.startsWith('product:'))) {
       asks.push(`una referencia mas clara para ${missing.replace('product:', '')}`);
     }
@@ -2193,10 +2426,35 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
   }
   const address = customerProfile?.defaultAddress ? ` a tu direccion guardada (${customerProfile.defaultAddress})` : '';
   const payment = paymentMethodLabel(paymentMethod, paymentMethods);
-  if (checkout?.phase === 'review') {
-    return `Tengo en tu pedido: ${foundLines.join(', ')}. Subtotal de productos: ${formatCurrency(subtotal)}.${payment ? ` Tengo anotado ${payment} como preferencia de pago.` : ''} ¿Quieres agregar algo más o continuar con este pedido?`;
+  return buildStructuredOrderSummary({
+    orderItems,
+    customerProfile,
+    subtotal,
+    payment,
+    checkout,
+    address,
+  });
+}
+
+function buildStructuredOrderSummary({ orderItems, customerProfile, subtotal, payment, checkout, address }) {
+  const lines = [checkout?.phase === 'review' ? 'Resumen del pedido' : 'Resumen final del pedido'];
+  if (customerProfile?.name) lines.push(`Cliente: ${customerProfile.name}`);
+  if (customerProfile?.defaultAddress) lines.push(`Dirección: ${customerProfile.defaultAddress}`);
+  lines.push('', 'Productos:');
+  for (const item of orderItems.filter((candidate) => candidate.product)) {
+    const quantity = item.budgetAmount ? formatCurrency(item.budgetAmount) : `${item.quantity ?? 0} x`;
+    const unitPrice = item.budgetAmount ? '' : ` x ${formatCurrency(item.product.price)}`;
+    const lineTotal = item.lineTotal !== null && item.lineTotal !== undefined ? ` = ${formatCurrency(item.lineTotal)}` : '';
+    lines.push(`- ${quantity} ${item.product.name}${unitPrice}${lineTotal}`.replace(/\s+/g, ' ').trim());
   }
-  return `Listo. Te puedo preparar ${foundLines.join(', ')}${address}. Subtotal de productos: ${formatCurrency(subtotal)}.${payment ? ` Pago: ${payment}.` : ''} ¿Confirmas el pedido?`;
+  lines.push(`Subtotal de productos: ${formatCurrency(subtotal)}`);
+  if (payment) lines.push(`Pago: ${payment}`);
+  if (checkout?.phase === 'review') {
+    lines.push('', '¿Quieres agregar algo más o continuar con este pedido?');
+  } else {
+    lines.push('', `¿Confirmas el pedido?${address ? '' : ' Necesito confirmar la dirección si aún no está registrada.'}`);
+  }
+  return lines.join('\n');
 }
 
 function needsHumanProductResolution(missingFields) {
@@ -2263,6 +2521,21 @@ function describeProductOption(product) {
     ? ` ${product.presentation}`
     : '';
   return `${product.name}${presentation} (${formatCurrency(product.price)})`;
+}
+
+function shortProductOptionTitle(product) {
+  const text = describeProductOption(product) ?? 'Elegir producto';
+  return text.length <= 20 ? text : `${text.slice(0, 17).trim()}...`;
+}
+
+function parseCatalogSelectionValue(value) {
+  try {
+    const parsed = JSON.parse(String(value ?? '{}'));
+    if (!parsed?.basketKey || !parsed?.lineId || !parsed?.sku) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 function requestedProductName(item, fallback) {

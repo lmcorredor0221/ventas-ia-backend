@@ -1,0 +1,231 @@
+/**
+ * Reconciles catalog evidence after the existing parallel searches.
+ *
+ * This is intentionally a bounded, single adjudication step. It does not
+ * search the catalog, calculate prices, or apply business policy; those
+ * responsibilities remain in ToolRegistry, AgentRuntime and checkout.
+ */
+export class CatalogResolutionService {
+  constructor({ getPlanner, events = null, telemetry = null, enabled = false }) {
+    this.getPlanner = getPlanner;
+    this.events = events;
+    this.telemetry = telemetry;
+    this.enabled = enabled;
+  }
+
+  isEnabled() {
+    return typeof this.enabled === 'function' ? Boolean(this.enabled()) : Boolean(this.enabled);
+  }
+
+  canAdjudicate() {
+    return this.isEnabled() && typeof this.getPlanner?.()?.adjudicateCatalogCandidates === 'function';
+  }
+
+  async resolve({ tenantId, conversationId, normalized, conversation, items = [] }) {
+    const prepared = items.map((item, index) => prepareItem(item, index));
+    const ambiguous = prepared.filter((item) => item.catalogCandidates.length > 1 && !item.product);
+    if (!ambiguous.length) {
+      return { items: prepared, status: 'not_needed', decisions: [] };
+    }
+
+    if (!this.canAdjudicate()) {
+      return { items, status: 'legacy_fallback', decisions: [] };
+    }
+
+    const startedAt = performance.now();
+    const planner = this.getPlanner();
+    try {
+      const adjudication = await planner.adjudicateCatalogCandidates({
+        tenantId,
+        conversationId,
+        context: {
+          traceId: normalized?.traceId ?? conversation?.traceId ?? null,
+          latestMessage: normalized?.text ?? '',
+          conversation: compactConversation(conversation),
+          orderDraft: compactDraft(conversation?.orderDraft),
+          items: prepared.map(compactItem),
+        },
+      });
+      const decisions = Array.isArray(adjudication?.decisions) ? adjudication.decisions : [];
+      const resolved = prepared.map((item) => applyDecision(item, decisions.find((decision) => decision.lineId === item.lineId)));
+      const metadata = {
+        status: adjudication?.executionMode ?? 'provider_api',
+        durationMs: Math.round(performance.now() - startedAt),
+        decisionCount: decisions.length,
+        pendingCount: resolved.filter((item) => item.selectionStatus === 'pending').length,
+      };
+      this.telemetry?.record('catalog', 'reconciliation', {
+        durationMs: metadata.durationMs,
+        status: 'ok',
+        tenantId,
+        traceId: normalized?.traceId ?? conversation?.traceId ?? null,
+        metadata,
+      });
+      this.events?.emit?.({
+        type: 'catalog.reconciliation.completed',
+        tenantId,
+        conversationId,
+        detail: 'Catalog candidates reconciled with bounded contextual adjudication',
+        metadata,
+      });
+      return { items: resolved, status: 'adjudicated', decisions, metadata };
+    } catch (error) {
+      const durationMs = Math.round(performance.now() - startedAt);
+      this.telemetry?.record('catalog', 'reconciliation', {
+        durationMs,
+        status: 'fallback',
+        tenantId,
+        traceId: normalized?.traceId ?? conversation?.traceId ?? null,
+        metadata: { errorCode: error.code ?? null },
+      });
+      this.events?.emit?.({
+        type: 'catalog.reconciliation.fallback',
+        tenantId,
+        conversationId,
+        detail: error.message,
+        metadata: { durationMs, errorCode: error.code ?? null },
+      });
+      // A failed adjudication must never invent a SKU. Keep the evidence so
+      // the conversation can ask for a selection or escalate safely.
+      return {
+        items: prepared.map((item) => item.product ? item : { ...item, product: null, selectionStatus: item.catalogCandidates.length ? 'pending' : 'not_found' }),
+        status: 'error_fallback',
+        decisions: [],
+      };
+    }
+  }
+}
+
+function prepareItem(item = {}, index = 0) {
+  const candidates = uniqueCandidates(item.catalogCandidates ?? item.presentationOptions ?? []);
+  const lineId = String(item.lineId ?? `${lineKey(item.catalogQuery ?? item.rawName ?? 'item')}:${index + 1}`);
+  const product = item.product ?? null;
+  return {
+    ...item,
+    lineId,
+    catalogCandidates: candidates,
+    selectionStatus: product ? 'selected' : candidates.length ? 'pending' : 'not_found',
+    presentationOptions: item.presentationOptions?.length ? item.presentationOptions : candidates,
+  };
+}
+
+function applyDecision(item, decision) {
+  if (!decision) return item;
+  const requestedAction = ['select', 'ask', 'preserve', 'remove', 'handoff'].includes(decision.action) ? decision.action : 'ask';
+  const selected = candidateForDecision(item.catalogCandidates, decision);
+  // The model may rank one candidate higher, but ranking is not customer
+  // confirmation. A multi-variant line remains pending until the latest
+  // customer message explicitly selects one of those variants. This keeps
+  // the LLM in charge of contextual interpretation without allowing an
+  // adjudication call to silently change the basket.
+  const action = requestedAction === 'select'
+    && item.catalogCandidates.length > 1
+    && decision.customerSelected !== true
+    ? 'ask'
+    : requestedAction;
+  const evidence = {
+    action,
+    confidence: Number.isFinite(Number(decision.confidence)) ? Number(decision.confidence) : null,
+    reason: String(decision.reason ?? '').trim().slice(0, 500) || null,
+    question: String(decision.question ?? '').trim().slice(0, 500) || null,
+    source: 'llm_catalog_adjudication',
+  };
+
+  if (action === 'select' && selected) {
+    return {
+      ...item,
+      product: selected,
+      selectionStatus: 'selected',
+      selectionQuestion: null,
+      selectionEvidence: evidence,
+      presentationOptions: [selected, ...item.catalogCandidates.filter((candidate) => candidate.sku !== selected.sku)],
+    };
+  }
+  if (action === 'preserve' && item.product) {
+    return { ...item, selectionStatus: 'selected', selectionEvidence: evidence };
+  }
+  if (action === 'remove') {
+    return { ...item, removedByCustomer: true, product: null, selectionStatus: 'removed', selectionEvidence: evidence };
+  }
+  return {
+    ...item,
+    product: null,
+    selectionStatus: action === 'handoff' ? 'handoff' : 'pending',
+    selectionQuestion: evidence.question,
+    selectionEvidence: evidence,
+  };
+}
+
+function candidateForDecision(candidates, decision = {}) {
+  if (decision.selectedSku) return candidates.find((candidate) => String(candidate.sku) === String(decision.selectedSku)) ?? null;
+  if (Number.isInteger(Number(decision.candidateIndex))) return candidates[Number(decision.candidateIndex)] ?? null;
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function uniqueCandidates(candidates = []) {
+  const bySku = new Map();
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const key = String(candidate.sku ?? `${candidate.name ?? 'product'}:${candidate.presentation ?? ''}`);
+    if (!bySku.has(key)) bySku.set(key, compactProduct(candidate));
+  }
+  return [...bySku.values()].slice(0, 8);
+}
+
+function compactProduct(product = {}) {
+  return {
+    sku: product.sku ?? null,
+    name: product.name ?? null,
+    price: product.price ?? null,
+    stock: product.stock ?? null,
+    category: product.category ?? null,
+    brand: product.brand ?? null,
+    presentation: product.presentation ?? null,
+    normalizedPresentation: product.normalizedPresentation ?? null,
+    description: product.description ?? null,
+    aliases: Array.isArray(product.aliases) ? product.aliases.slice(0, 8) : [],
+    tags: Array.isArray(product.tags) ? product.tags.slice(0, 8) : [],
+    productFamily: product.productFamily ?? null,
+    attributes: product.attributes ?? null,
+    matchScore: product.matchScore ?? null,
+    matchType: product.matchType ?? null,
+  };
+}
+
+function compactItem(item = {}) {
+  return {
+    lineId: item.lineId,
+    rawName: item.rawName ?? null,
+    catalogQuery: item.catalogQuery ?? null,
+    quantity: item.quantity ?? null,
+    budgetAmount: item.budgetAmount ?? null,
+    requestedPresentation: item.requestedPresentation ?? null,
+    requestedAttributes: item.requestedAttributes ?? null,
+    selectionStatus: item.selectionStatus,
+    currentProduct: item.product ? compactProduct(item.product) : null,
+    candidates: item.catalogCandidates.map(compactProduct),
+  };
+}
+
+function compactDraft(draft) {
+  if (!draft) return null;
+  return {
+    delivery: Boolean(draft.delivery),
+    paymentMethod: draft.paymentMethod ?? null,
+    subtotal: draft.subtotal ?? null,
+    missingFields: Array.isArray(draft.missingFields) ? draft.missingFields.slice(0, 30) : [],
+    items: Array.isArray(draft.items) ? draft.items.map(compactItem) : [],
+  };
+}
+
+function compactConversation(conversation) {
+  return (conversation?.messages ?? []).slice(-12).map((message) => ({
+    role: message.role,
+    text: String(message.text ?? '').slice(0, 600),
+  }));
+}
+
+function lineKey(value) {
+  return String(value ?? 'item').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'item';
+}

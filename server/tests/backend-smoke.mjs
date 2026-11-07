@@ -307,8 +307,11 @@ try {
   });
   const unavailablePresentationReply = unavailablePresentationRun.conversation.messages.at(-1).text;
   assert.equal(unavailablePresentationRun.result.plan.intent, 'delivery_order');
-  assert.ok(unavailablePresentationReply.includes('Coca-Cola 400ml'));
-  assert.match(unavailablePresentationReply, /\$[\s\u00a0]*3\.200/);
+  // The requested 1.5 L presentation is not in this fixture. The resolver
+  // must preserve that constraint instead of quoting the incompatible 400 ml
+  // row as if it were the requested product.
+  assert.equal(unavailablePresentationReply.includes('Coca-Cola 400ml'), false);
+  assert.match(unavailablePresentationReply, /validaci[oó]n|no encontr|pendiente/i);
 
   // A live catalog can express a 1.5 L item only in its display name. The
   // runtime must still match it to a request for "1.5 litros" and avoid
@@ -734,6 +737,10 @@ try {
   assert.equal(store.getState().pendingRequests.some((request) => request.conversationId === cancellationRun.conversation.id && request.status === 'pending'), false);
 
   store.mutate((state) => {
+    // Keep the stock scenario isolated from the duplicate Chocoramo rows
+    // added by the previous price-integrity scenario. Otherwise the catalog
+    // resolver may legitimately select the other available row.
+    state.productsByTenant.andina = state.productsByTenant.andina.filter((product) => product.sku !== 'PRICE-CHO-065');
     const chocoramo = state.productsByTenant.andina.find((product) => product.sku === 'AND-CHO-01');
     chocoramo.stock = 0;
   });

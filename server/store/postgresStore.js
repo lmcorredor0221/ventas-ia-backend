@@ -206,6 +206,61 @@ export class PostgresStore {
     return result.rows.map((row) => row.payload);
   }
 
+  async persistCatalogKnowledgeIndex(index) {
+    if (!index?.tenantId || !index?.catalogVersion) return;
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE catalog_knowledge_indexes
+           SET status = 'superseded'
+           WHERE tenant_id = $1 AND status = 'published' AND catalog_version <> $2`,
+          [index.tenantId, index.catalogVersion],
+        );
+        await client.query(
+          `INSERT INTO catalog_knowledge_indexes
+            (tenant_id, catalog_version, source_hash, source_ref, source_range, status,
+             row_count, node_count, relation_count, vector_count, vector_provider,
+             document, created_at, published_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now(), now())
+           ON CONFLICT (tenant_id, catalog_version) DO UPDATE SET
+             status = EXCLUDED.status,
+             source_hash = EXCLUDED.source_hash,
+             source_ref = EXCLUDED.source_ref,
+             source_range = EXCLUDED.source_range,
+             row_count = EXCLUDED.row_count,
+             node_count = EXCLUDED.node_count,
+             relation_count = EXCLUDED.relation_count,
+             vector_count = EXCLUDED.vector_count,
+             vector_provider = EXCLUDED.vector_provider,
+             document = EXCLUDED.document,
+             published_at = EXCLUDED.published_at`,
+          [
+            index.tenantId,
+            index.catalogVersion,
+            index.sourceHash,
+            index.sourceRef,
+            index.range,
+            index.status ?? 'published',
+            index.rowCount ?? 0,
+            index.nodeCount ?? 0,
+            index.relationCount ?? 0,
+            index.vectorCount ?? 0,
+            index.vectorProvider ?? null,
+            JSON.stringify(index),
+          ],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'catalog knowledge index');
+  }
+
   persistCatalogProjection(tenantId, products = [], driveFiles = []) {
     if (!tenantId) return Promise.resolve();
     return this.queueWrite(async () => {

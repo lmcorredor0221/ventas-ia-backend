@@ -21,6 +21,7 @@ const events = [];
 const reports = [];
 let testCase;
 let capturedPrompt;
+let turnPrompts = [];
 const planner = new LLMPlanner({ store, events: { emit: e => events.push(e) },
   config: { llmRequestTimeoutMs: 8000, llmMaxTokens: 600, llmResponseComposerEnabled: true } });
 const cart = { delivery: true, items: [{ rawName: 'Coca-Cola', catalogQuery: 'Coca-Cola original', quantity: 1 }],
@@ -57,25 +58,34 @@ try {
   });
   globalThis.fetch = async (url, options) => {
     assert.equal(String(url), 'https://api.deepseek.com/chat/completions', 'Only DeepSeek may receive test requests');
-    capturedPrompt = JSON.parse(options.body).messages.map(m => m.content).join('\n');
+    const requestMessages = JSON.parse(options.body).messages;
+    capturedPrompt = requestMessages.map(m => m.content).join('\n');
+    turnPrompts.push(capturedPrompt);
     if (real) return previousFetch(url, options);
     const name = testCase.name ?? 'Rocío';
-    const content = { intent: testCase.intent, greetingReply: testCase.introduction
-      ? `Hola, soy ${name}, tu asistente virtual. ¿Qué necesitas?` : 'Hola, aquí estoy. ¿En qué te ayudo?',
-      customerDetails: { name: null, deliveryAddress: null }, order: testCase.items ? cart : { items: [] } };
+    const isProductStage = capturedPrompt.includes('intérprete de productos');
+    const content = isProductStage
+      ? { items: cart.items, customerDetails: { name: null, deliveryAddress: null }, orderSignals: {}, missingInfo: [], confidence: 0.9 }
+      : { intent: testCase.intent, greetingReply: testCase.introduction
+        ? `Hola, soy ${name}, tu asistente virtual. ¿Qué necesitas?` : 'Hola, aquí estoy. ¿En qué te ayudo?',
+        customerDetails: { name: null, deliveryAddress: null }, order: testCase.items ? cart : { items: [] } };
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }],
       usage: { prompt_tokens: 100, completion_tokens: 100 } }), { status: 200 });
   };
   for (const [i, scenario] of cases.entries()) {
     testCase = scenario;
+    turnPrompts = [];
     const result = await planner.plan({ tenantId: scenario.tenantId ?? 'andina', conversationId: `context-${i}`,
       normalized: { text: scenario.text, waId: 'synthetic-buyer' }, conversation: scenario.conversation ?? null });
     const event = events.findLast(e => e.type === 'llm.plan.created');
-    assert.equal(result.executionMode, 'provider_api', `${scenario.text}: ${events.findLast(e => e.type === 'llm.plan.fallback')?.detail}`);
+    const expectedMode = ['greeting', 'human_handoff'].includes(scenario.intent)
+      ? 'provider_api_context_only'
+      : 'provider_api_two_stage';
+    assert.equal(result.executionMode, expectedMode, `${scenario.text}: ${events.findLast(e => e.type === 'llm.plan.fallback')?.detail}`);
     assert.equal(result.intent, scenario.intent, scenario.text);
-    assert.ok(capturedPrompt.includes(JSON.stringify({ name: scenario.name ?? 'Rocío' })));
-    assert.ok(capturedPrompt.includes('recentMessages'));
-    if (scenario.conversation?.messages?.length) assert.ok(capturedPrompt.includes(scenario.conversation.messages[0].text));
+    assert.ok(turnPrompts.some(prompt => prompt.includes(`"name":"${scenario.name ?? 'Rocío'}"`)));
+    assert.ok(turnPrompts.some(prompt => prompt.includes('recentMessages')));
+    if (scenario.conversation?.messages?.length) assert.ok(turnPrompts.some(prompt => prompt.includes(scenario.conversation.messages[0].text)));
     if (scenario.intent === 'greeting') {
       assert.equal(result.order.items.length, 0, 'Vocatives/greetings must not become products');
       assert.equal(result.customerDetails.name, null, 'Agent/vocative is not the buyer name');

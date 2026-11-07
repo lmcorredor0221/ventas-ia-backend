@@ -5,6 +5,7 @@ import { appendAuditEvent } from './authService.js';
 import { assertCommerceOrderAllowed, catalogCommerceCategory } from '../domain/whatsappCommercePolicy.js';
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 import { findOpenPendingRequest } from './pendingRequestPolicy.js';
+import { CatalogSearchService } from './catalogSearchService.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
@@ -29,7 +30,7 @@ function googleConnectionRequiredResult(message) {
 }
 
 export class ToolRegistry {
-  constructor({ store, events, usage, config, googleWorkspace, secretVault, telemetry }) {
+  constructor({ store, events, usage, config, googleWorkspace, secretVault, telemetry, catalogSearch = null }) {
     this.store = store;
     this.events = events;
     this.usage = usage;
@@ -37,6 +38,7 @@ export class ToolRegistry {
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
     this.telemetry = telemetry;
+    this.catalogSearch = catalogSearch ?? new CatalogSearchService({ store, events, telemetry });
     this.outbox = null;
     this.googleAccessTokenCache = new Map();
     this.liveCatalogCache = new Map();
@@ -118,14 +120,46 @@ export class ToolRegistry {
     const rows = live
       ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: payload.range ?? tenant?.config?.googleSheets?.catalogRange })
       : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
-    const matchingRows = filterRows(rows, payload.filters);
+    const index = this.config.catalogKnowledgeIndexEnabled === false
+      ? null
+      : await this.catalogSearch?.sync({
+        tenantId,
+        rows,
+        sourceRef: live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'local_catalog',
+        range: payload.range ?? tenant?.config?.googleSheets?.catalogRange ?? null,
+      });
+    const indexed = index && this.config.catalogKnowledgeIndexEnabled !== false
+      ? this.catalogSearch?.search(tenantId, {
+        // The planner may provide a category/attribute filter together with
+        // the candidate query. Keeping both preserves the LLM's decomposition
+        // of a broad request such as "arroz, aceite o huevos".
+        query: payload.query ?? payload.filters?.query ?? '',
+        filters: payload.filters ?? {},
+        limit: Math.max(Number(payload.limit ?? 25), 25),
+      })
+      : null;
+    const matchingRows = (indexed
+      ? indexed.rows.map((row) => {
+        const sourceRow = rows.find((candidate) => candidate.sku === row.sku);
+        // Preserve the live/source row shape while carrying index evidence
+        // into the existing resolver contract.
+        return sourceRow
+          ? { ...sourceRow, matchScore: row.matchScore, matchType: row.matchType, family: row.family, nodeId: row.nodeId }
+          : row;
+      })
+      : filterRows(rows, payload.filters));
     return {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'catalogOrigin', 'driveFileId'],
       rows: matchingRows.filter(row => !catalogCommerceCategory(row)),
       restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
       source: live ? 'google_sheets_live' : 'local_test_fixture',
-      source_revision: `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:${Date.now()}`,
+      source_revision: index?.catalogVersion ?? `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:unindexed`,
+      catalog_version: index?.catalogVersion ?? null,
+      catalog_index: index
+        ? { status: index.status, node_count: index.nodeCount, relation_count: index.relationCount, vector_count: index.vectorCount, provider: index.vectorProvider }
+        : { status: 'unavailable' },
+      relation_evidence: indexed?.relations ?? [],
       fetched_at: new Date().toISOString(),
     };
   }

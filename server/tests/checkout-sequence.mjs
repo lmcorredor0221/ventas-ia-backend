@@ -78,11 +78,18 @@ try {
   const legacyPayment = await runtime.createPaymentOffer({ ...args, paymentMethods: [{ id: 'cash', label: 'Efectivo' }] });
   await click(legacyPayment.offer.options[0]);
   assert.equal(conv().orderDraft.paymentMethod, 'cash', 'Preserve payment volunteered through an old button');
-  assert.equal(conv().orderDraft.checkout.phase, 'collecting');
+  // The fixture uses an explicit SKU (MILK-A), so the product is resolved.
+  // Payment alone must still leave checkout in review until the buyer says
+  // to continue; it must not jump directly to confirmation.
+  assert.equal(conv().orderDraft.checkout.phase, 'review');
   assert.equal(offer('order_confirmation'), undefined);
   await runtime.handleOrderConfirmation({ ...args, normalized: { ...args.normalized, text: 'Confirmo' }, plan: { intent: 'order_confirmation' } });
-  assert.ok(!(store.getState().ordersByTenant.andina ?? []).some(o => o.conversationId === args.conversationId), 'Text confirmation cannot bypass unresolved presentation');
-  assert.equal(conv().orderDraft.checkout.phase, 'collecting');
+  assert.ok(!(store.getState().ordersByTenant.andina ?? []).some(o => o.conversationId === args.conversationId), 'Text confirmation cannot bypass the review step');
+  // A semantic confirmation can advance the draft to the final confirmation
+  // checkpoint, but the order is still not written until its confirmation
+  // interaction is consumed.
+  assert.equal(conv().orderDraft.checkout.phase, 'confirmation');
+  assert.ok(offer('order_confirmation'));
   console.log('Checkout sequence passed: ambiguity, additions, review, payment, stale buttons and final confirmation.');
 } finally {
   runtime.stop(); integrationOutbox.stop(); await store.close?.();

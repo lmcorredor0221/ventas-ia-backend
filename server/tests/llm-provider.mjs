@@ -33,46 +33,71 @@ try {
 
   let capturedUrl;
   let capturedOptions;
+  const requests = [];
   let commerceDecision;
   globalThis.fetch = async (url, options) => {
     capturedUrl = url;
     capturedOptions = options;
+    const requestBody = JSON.parse(options.body);
+    requests.push({ url, options, body: requestBody });
+    const prompt = requestBody.messages.map((message) => String(message.content ?? '')).join('\n');
+    const isContext = prompt.includes('intérprete contextual');
+    const isProductInference = prompt.includes('intérprete de productos');
+    const isAdjudication = prompt.includes('adjudicador contextual');
+    const content = isAdjudication ? {
+      decisions: [{ lineId: 'line-1', action: 'select', selectedSku: 'SKU-A', confidence: 0.92, reason: 'La evidencia coincide.', question: '' }],
+      collectionStatus: 'ready',
+    } : isContext ? {
+      intent: 'delivery_order',
+      dialogueAct: 'request',
+      productRequestDetected: true,
+      respondsToPendingQuestion: false,
+      addsToExistingCart: false,
+      modifiesExistingCart: false,
+      customerDetails: { name: 'Laura Gomez', deliveryAddress: 'Calle 10 # 20-30, Bogotá' },
+      customerUnderstanding: { rawNeed: 'tienes cafe tostado premium?', delivery: true },
+      pendingAction: null,
+      confidence: 0.86,
+      commercePolicy: commerceDecision,
+    } : isProductInference ? {
+      items: [{
+        lineId: 'line-1',
+        rawText: 'cafe tostado premium',
+        familyHypothesis: 'cafe',
+        productHypothesis: 'cafe tostado premium',
+        category: 'cafe',
+        brand: null,
+        quantity: 1,
+        budgetAmount: null,
+        explicitAttributes: { presentation: '500 g' },
+        inferredAttributes: { origen: 'Huila' },
+        uncertainties: [],
+        searchQuery: 'cafe tostado premium',
+        confidence: 0.84,
+        skuHint: null,
+        skuHintSource: 'inferred',
+      }],
+      customerDetails: { name: 'Laura Gomez', deliveryAddress: 'Calle 10 # 20-30, Bogotá' },
+      orderSignals: { collectionComplete: false, paymentMethod: null },
+      missingInfo: [],
+      confidence: 0.84,
+    } : {
+      intent: 'catalog_query',
+      productRequestDetected: true,
+      customerUnderstanding: { rawNeed: 'tienes cafe tostado premium?', delivery: true },
+      customerDetails: { name: 'Laura Gomez', deliveryAddress: 'Calle 10 # 20-30, Bogotá' },
+      candidateItems: [{ rawName: 'cafe tostado premium', catalogQuery: 'cafe tostado premium', quantity: 1, skuHint: null }],
+      order: { delivery: true, items: [{ rawName: 'cafe tostado premium', catalogQuery: 'cafe tostado premium', quantity: 1 }] },
+      confidence: 0.86,
+      commercePolicy: commerceDecision,
+    };
     return new Response(JSON.stringify({
       id: 'chatcmpl-test',
       choices: [
         {
           message: {
             role: 'assistant',
-            content: JSON.stringify({
-              intent: 'catalog_query',
-              reasoningMode: 'shopkeeper_guided_sale',
-              customerUnderstanding: {
-                rawNeed: 'tienes cafe tostado premium?',
-                certainty: 'medium',
-                occasion: 'desayuno',
-                delivery: true,
-              },
-              customerDetails: {
-                name: 'Laura Gomez',
-                deliveryAddress: 'Calle 10 # 20-30, Bogotá',
-              },
-              candidateItems: [
-                { rawName: 'cafe tostado premium', catalogQuery: 'cafe tostado premium', quantity: null, skuHint: null },
-              ],
-              toolPlan: [
-                { tool: 'google_sheets_read_table', purpose: 'catalog_search', filters: { query: 'cafe tostado premium' } },
-              ],
-              missingInfo: [],
-              responseStrategy: 'guide',
-              order: {
-                delivery: true,
-                items: [{ rawName: 'cafe tostado premium', catalogQuery: 'cafe tostado premium', quantity: null }],
-              },
-              recommendedTools: ['google_sheets_read_table', 'whatsapp_business_messaging'],
-              missingFields: [],
-              confidence: 0.86,
-              commercePolicy: commerceDecision,
-            }),
+            content: JSON.stringify(content),
           },
         },
       ],
@@ -104,14 +129,17 @@ try {
   assert.equal(capturedOptions.headers['content-type'], 'application/json');
 
   const body = JSON.parse(capturedOptions.body);
-  assert.ok(body.messages.some(message => message.content.includes('Tostado artesanal exclusivo') && message.content.includes('Huila') && message.content.includes('500 g')), 'The real provider request must include description, presentation and structured attributes');
+  assert.equal(requests.length, 2, 'The provider path must make one context call and one product-inference call');
+  assert.ok(requests[0].body.messages[1].content.includes('intérprete contextual'));
+  assert.ok(requests[1].body.messages[1].content.includes('intérprete de productos'));
+  assert.ok(requests.every((request) => !request.body.messages.some((message) => message.content.includes('Tostado artesanal exclusivo'))), 'The staged provider path must not serialize the full catalog into the LLM prompt');
   assert.equal(body.model, 'deepseek-chat');
   assert.equal(body.temperature, 0);
-  assert.equal(body.max_tokens, 900);
+  assert.equal(body.max_tokens, 650);
   assert.deepEqual(body.response_format, { type: 'json_object' });
-  assert.ok(body.messages[1].content.includes('ventas-ia-llm-plan.v2') || body.messages[1].content.includes('toolPlan'));
+  assert.ok(body.messages[1].content.includes('searchQuery') || body.messages[1].content.includes('familyHypothesis'));
 
-  assert.equal(plan.executionMode, 'provider_api');
+  assert.equal(plan.executionMode, 'provider_api_two_stage');
   assert.equal(plan.provider, 'deepseek');
   assert.equal(plan.intent, 'catalog_query');
   assert.equal(plan.reasoningMode, 'shopkeeper_guided_sale');
@@ -122,8 +150,29 @@ try {
 
   const createdEvent = events.find((event) => event.type === 'llm.plan.created');
   assert.ok(createdEvent);
-  assert.equal(createdEvent.metadata.providerMetadata.usage.total_tokens, 200);
+  assert.equal(createdEvent.metadata.providerMetadata.usage.total_tokens, 400);
   assert.equal(createdEvent.metadata.providerMetadata.endpoint, 'https://api.deepseek.com/chat/completions');
+
+  const adjudication = await planner.adjudicateCatalogCandidates({
+    tenantId: 'andina',
+    conversationId: 'conv-llm-adjudication',
+    context: {
+      traceId: 'trace-adjudication',
+      latestMessage: 'una bebida',
+      conversation: [],
+      orderDraft: null,
+      items: [{
+        lineId: 'line-1',
+        rawName: 'bebida',
+        catalogQuery: 'bebida',
+        quantity: 1,
+        candidates: [{ sku: 'SKU-A', name: 'Bebida A', price: 1000, stock: 3 }],
+      }],
+    },
+  });
+  assert.equal(adjudication.executionMode, 'provider_api');
+  assert.equal(adjudication.decisions[0].selectedSku, 'SKU-A');
+  assert.ok(JSON.parse(capturedOptions.body).messages[1].content.includes('candidatos reales del catálogo'));
 
   commerceDecision = {
     restrictedItems: [{ rawName: 'marca con error', category: 'tobacco' }],
@@ -137,9 +186,8 @@ try {
     conversation: { commercePolicy: { awaitingContinuation: true } },
   });
   assert.deepEqual(policyPlan.commercePolicy, commerceDecision, 'Provider policy evidence must survive normalization and enrichment');
-  const policyPrompt = JSON.parse(capturedOptions.body).messages.map(message => message.content).join('\n');
-  assert.match(policyPrompt, /commercePolicy/);
-  assert.match(policyPrompt, /alcohol de limpieza/);
+  const policyRequests = requests.slice(-2);
+  const policyPrompt = policyRequests.map(request => request.body.messages.map(message => message.content).join('\n')).join('\n');
   assert.match(policyPrompt, /existingCommercePolicy/);
   assert.match(policyPrompt, /"awaitingContinuation":true/);
 

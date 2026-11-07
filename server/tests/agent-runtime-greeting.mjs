@@ -53,10 +53,11 @@ async function run(text, expectedIntent, extra = {}) {
   const result = await runtime.processInbound({ tenantId: 'andina', waId,
     text, messageId: `greeting-${seq}`, messageType: 'text', provider: 'whatsapp' });
   const c = result.conversation;
-  if (result.result.plan.executionMode !== 'provider_api') {
+  const expectedMode = expectedIntent === 'greeting' ? 'provider_api_context_only' : 'provider_api_two_stage';
+  if (result.result.plan.executionMode !== expectedMode) {
     console.log(store.getState().events.filter(e => e.type === 'llm.plan.fallback').map(e => e.detail));
   }
-  assert.equal(result.result.plan.executionMode, 'provider_api', text);
+  assert.equal(result.result.plan.executionMode, expectedMode, text);
   assert.equal(result.result.plan.intent, expectedIntent, text);
   const reply = c.messages.filter(m => m.role === 'agent').at(-1)?.text;
   assert.ok(reply, 'Every scenario must receive a reply');
@@ -108,8 +109,11 @@ try {
     await run('Buenas', 'greeting', { greetingReply: 'Promoción por $ 50.000' });
     // An inconsistent provider label must never silently discard product candidates.
     providerPlan = { intent: 'greeting', order: { delivery: true, items: [{ catalogQuery: 'Coca-Cola', quantity: 1 }] } };
+    const stagedMode = runtime.planner.config.llmTwoStageInterpretationEnabled;
+    runtime.planner.config.llmTwoStageInterpretationEnabled = false;
     const guarded = await runtime.planner.plan({ tenantId: 'andina', conversationId: 'guard',
       normalized: { text: 'Hola, quiero una Coca-Cola', waId: '573991111110' } });
+    runtime.planner.config.llmTwoStageInterpretationEnabled = stagedMode;
     assert.notEqual(guarded.intent, 'greeting');
     assert.equal(guarded.order.items.length, 1);
     // Real composer path must accept valid wording and reject invented amounts.

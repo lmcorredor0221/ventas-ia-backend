@@ -22,6 +22,10 @@ export const RUNTIME_CONFIG = {
   llmRequestTimeoutMs: Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 8000),
   llmMaxTokens: Number(process.env.LLM_MAX_TOKENS ?? 600),
   llmJsonRetryMaxTokens: Number(process.env.LLM_JSON_RETRY_MAX_TOKENS ?? 1800),
+  // The contextual catalog adjudication is opt-in until the local contracts
+  // validate the new evidence/selection state. The legacy resolver remains
+  // the safe fallback when this flag is false.
+  contextualProductSelectionV2: process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true',
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The simulated payment endpoint exists for local contracts only. A pending
@@ -49,6 +53,10 @@ export const RUNTIME_CONFIG = {
     : true,
   integrationOutboxMaxAttempts: Number(process.env.INTEGRATION_OUTBOX_MAX_ATTEMPTS ?? 8),
   llmResponseComposerEnabled: process.env.LLM_RESPONSE_COMPOSER_ENABLED !== 'false',
+  // Context and product inference are separate provider calls. Keep an
+  // explicit rollback switch while the new contracts are validated locally.
+  llmTwoStageInterpretationEnabled: process.env.LLM_TWO_STAGE_INTERPRETATION_ENABLED !== 'false',
+  catalogKnowledgeIndexEnabled: process.env.CATALOG_KNOWLEDGE_INDEX_ENABLED !== 'false',
   telemetryMaxSamples: Number(process.env.TELEMETRY_MAX_SAMPLES ?? 4000),
   telemetryMaxTraces: Number(process.env.TELEMETRY_MAX_TRACES ?? 1000),
   telemetrySlowThresholdMs: Number(process.env.TELEMETRY_SLOW_THRESHOLD_MS ?? 1000),
