@@ -71,7 +71,7 @@ export function recordWebhookEvent(store, event = {}) {
     ensurePlatformState(state);
     state.webhookEvents.unshift(record);
     state.webhookEvents = state.webhookEvents.slice(0, 2000);
-  });
+  }, { snapshot: false, domain: 'webhook_events', operation: 'append' });
   store.persistWebhookEvent?.(record);
   return record;
 }

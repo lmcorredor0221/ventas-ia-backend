@@ -193,7 +193,7 @@ export class ToolRegistry {
         updatedAt: now,
       };
       state.customerProfilesByTenant[tenantId][payload.wa_id] = profile;
-    });
+    }, { snapshot: false, domain: 'customer_profiles', operation: 'upsert' });
     await this.store.persistCustomerProfile?.(tenantId, payload.wa_id);
     this.audit(tenantId, 'tool.google_sheets_customer_profile_upsert', 'customer_profile', {
       waId: payload.wa_id,
@@ -229,7 +229,7 @@ export class ToolRegistry {
       state.ordersByTenant ??= {};
       state.ordersByTenant[tenantId] ??= [];
       state.ordersByTenant[tenantId].unshift(order);
-    });
+    }, { snapshot: false, domain: 'orders', operation: 'create' });
     const projectionEntry = this.outbox?.createEntry({
       tenantId,
       kind: 'order.sheet_create',
@@ -281,7 +281,7 @@ export class ToolRegistry {
         const tenant = next.tenants.find((item) => item.id === tenantId);
         if (tenant?.config?.googleOAuth) tenant.config.googleOAuth.status = 'reconnect_required';
         if (tenant?.lifecycle) tenant.lifecycle.googleStatus = 'reconnect_required';
-      });
+      }, { snapshot: false, domain: 'tenants', operation: 'google_reconnect_required' });
       await this.store.persistTenantCritical?.(tenantId);
       this.events.emit({ type: 'integration.reconnect_required', tenantId,
         detail: 'Reconecta Google desde Poner en marcha para consultar el catálogo y sincronizar pedidos.',
@@ -329,25 +329,27 @@ export class ToolRegistry {
       accessToken: live.accessToken,
       spreadsheetId: live.spreadsheetId,
       range: sheetRange,
-    }).then((values) => {
+    }).then(async (values) => {
       const rows = parseCatalogRows(values);
+      const driveFiles = rows
+        .filter((row) => row.driveFileId)
+        .map((row) => ({
+          fileId: row.driveFileId,
+          name: `${row.name} - ficha comercial`,
+          mimeType: 'application/vnd.google-apps.document',
+          summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
+        }));
       this.store.mutate((state) => {
         state.productsByTenant ??= {};
         state.driveFilesByTenant ??= {};
         state.productsByTenant[tenantId] = rows;
         state.driveFilesByTenant[tenantId] = mergeByKey(
           state.driveFilesByTenant[tenantId] ?? [],
-          rows
-            .filter((row) => row.driveFileId)
-            .map((row) => ({
-              fileId: row.driveFileId,
-              name: `${row.name} - ficha comercial`,
-              mimeType: 'application/vnd.google-apps.document',
-              summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
-            })),
+          driveFiles,
           'fileId',
         );
-      });
+      }, { snapshot: false, domain: 'catalog', operation: 'refresh_live_projection' });
+      await this.store.persistCatalogProjection?.(tenantId, rows, driveFiles);
       this.liveCatalogCache.set(key, {
         rows,
         expiresAt: Date.now() + LIVE_CATALOG_CACHE_TTL_MS,
@@ -374,7 +376,7 @@ export class ToolRegistry {
         state.customerProfilesByTenant ??= {};
         state.customerProfilesByTenant[tenantId] ??= {};
         state.customerProfilesByTenant[tenantId][waId] = profile;
-      });
+      }, { snapshot: false, domain: 'customer_profiles', operation: 'lookup' });
       await this.store.persistCustomerProfile?.(tenantId, waId);
     }
     return profile;
@@ -532,7 +534,7 @@ export class ToolRegistry {
         humanReason: request.context,
         nextStep: request.consequence,
       });
-    });
+    }, { snapshot: false, domain: 'pending_requests', operation: 'approval_create' });
     await this.store.persistPendingRequest?.(request.id);
     await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'approval.requested', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
@@ -585,7 +587,7 @@ export class ToolRegistry {
         humanReason: request.context,
         nextStep: request.consequence,
       });
-    });
+    }, { snapshot: false, domain: 'pending_requests', operation: 'handoff_create' });
     await this.store.persistPendingRequest?.(request.id);
     await this.store.persistConversation?.(conversationId);
     this.events.emit({ type: 'fallback.activated', tenantId, conversationId, detail: request.title, metadata: { requestId: request.id } });
@@ -613,7 +615,7 @@ export class ToolRegistry {
     };
     this.store.mutate((state) => {
       state.transactions.unshift(transaction);
-    });
+    }, { snapshot: false, domain: 'transactions', operation: 'create' });
     await this.store.persistTransaction?.(transaction.id);
     this.audit(tenantId, 'tool.transactional_write.committed', 'transaction', {
       transactionId: transaction.id,
@@ -645,7 +647,7 @@ export class ToolRegistry {
         });
         conversation.updatedAt = new Date().toISOString();
       }
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'append_outbound_message' });
     await this.store.persistConversation?.(conversationId);
     this.audit(tenantId, 'tool.whatsapp_business_messaging.sent', 'whatsapp_message', {
       conversationId,
@@ -702,14 +704,16 @@ export class ToolRegistry {
   }
 
   audit(tenantId, action, resource, metadata = {}) {
+    let record;
     this.store.mutate((state) => {
-      appendAuditEvent(state, {
+      record = appendAuditEvent(state, {
         tenantId,
         action,
         resource,
         metadata,
       });
-    });
+    }, { snapshot: false, domain: 'audit_events', operation: action });
+    if (this.store.incrementalPersistenceEnabled) this.store.persistAuditEvent?.(record);
   }
 }
 

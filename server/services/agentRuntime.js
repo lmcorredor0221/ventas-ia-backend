@@ -418,7 +418,7 @@ export class AgentRuntime {
         request.resolutionNote = 'Cancelado por el cliente desde WhatsApp.';
         cancelledRequestIds.push(request.id);
       }
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'cancel' });
     await this.store.persistConversation?.(conversationId);
     await Promise.all(cancelledRequestIds.map((requestId) => this.store.persistPendingRequest?.(requestId)));
     this.events.emit({
@@ -1137,7 +1137,7 @@ export class AgentRuntime {
         }
         conversation.updatedAt = now;
       }
-    });
+    }, { snapshot: false, domain: 'pending_requests', operation: 'resolve' });
     await this.store.persistPendingRequest?.(requestId);
     await this.store.persistConversation?.(request.conversationId);
     if (currentOrder && !orderTransition) await this.store.persistOrder?.(request.tenantId, currentOrder.id);
@@ -1163,7 +1163,7 @@ export class AgentRuntime {
             providerMessageId: responseDelivery.provider_message_id,
           };
         }
-      });
+      }, { snapshot: false, domain: 'pending_requests', operation: 'customer_reply' });
       await this.store.persistPendingRequest?.(requestId);
     }
     this.store.mutate((state) => {
@@ -1293,6 +1293,10 @@ export class AgentRuntime {
       next.integrationOutbox = (next.integrationOutbox ?? []).filter((item) => item.tenantId !== tenantId);
       next.usageCountersByTenant ??= {};
       delete next.usageCountersByTenant[tenantId];
+      next.usageBudgetAlertsByTenant ??= {};
+      delete next.usageBudgetAlertsByTenant[tenantId];
+      next.billingUsageCyclesByTenant ??= {};
+      delete next.billingUsageCyclesByTenant[tenantId];
       next.processedMessages = (next.processedMessages ?? []).filter((messageId) => !removedMessageIds.has(messageId));
       for (const messageId of removedMessageIds) delete next.processedMessagePayloads?.[messageId];
     });
@@ -1357,7 +1361,7 @@ export class AgentRuntime {
           nextStep: 'Caso anterior reanudado por solicitud explicita del cliente.',
           updatedAt: now,
         });
-      });
+      }, { snapshot: false, domain: 'conversations', operation: 'reopen' });
       await this.store.persistConversation?.(previous.id);
       return this.getConversation(previous.id);
     }
@@ -1392,7 +1396,7 @@ export class AgentRuntime {
     };
     this.store.mutate((state) => {
       state.conversations.unshift(created);
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'create' });
       await this.store.persistConversation?.(created.id);
     return created;
   }
@@ -1406,7 +1410,7 @@ export class AgentRuntime {
       conversation.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...message });
       conversation.need = message.text ?? conversation.need;
       conversation.updatedAt = new Date().toISOString();
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'append_message' });
     await this.store.persistConversation?.(conversationId);
   }
 
@@ -1414,7 +1418,7 @@ export class AgentRuntime {
     this.store.mutate((state) => {
       const conversation = state.conversations.find((item) => item.id === conversationId);
       if (conversation) Object.assign(conversation, patch, { updatedAt: new Date().toISOString() });
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'patch' });
     await this.store.persistConversation?.(conversationId);
   }
 
@@ -1442,7 +1446,7 @@ export class AgentRuntime {
         createdAt: now,
       });
       conversation.updatedAt = now;
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'activate_manual' });
     if (!conversation) return null;
     await this.store.persistConversation?.(conversationId);
     return this.getConversation(conversationId);
@@ -1484,7 +1488,7 @@ export class AgentRuntime {
         conversation.updatedAt = closedAt;
         expired.push(conversation.id);
       }
-    });
+    }, { snapshot: false, domain: 'conversations', operation: 'close_expired_manual' });
     for (const conversationId of expired) {
       await this.store.persistConversation?.(conversationId);
       this.events.emit({
@@ -1729,7 +1733,7 @@ export class AgentRuntime {
     this.store.mutate((state) => {
       state.processedMessages.unshift(messageId);
       state.processedMessages = [...new Set(state.processedMessages)].slice(0, 1000);
-    });
+    }, { snapshot: false, domain: 'processed_messages', operation: 'mark_processed' });
     await this.store.persistProcessedMessage?.(messageId, payload);
   }
 

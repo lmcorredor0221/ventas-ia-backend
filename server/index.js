@@ -54,6 +54,7 @@ function createStore(config) {
     return new PostgresStore({
       databaseUrl: config.databaseUrl,
       ssl: config.databaseSsl,
+      incrementalPersistenceEnabled: config.postgresIncrementalPersistenceEnabled,
     });
   }
   return new JsonStore(config.dataFile);

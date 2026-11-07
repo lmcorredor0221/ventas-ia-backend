@@ -20,7 +20,7 @@ export class EventService {
     this.store.mutate((state) => {
       state.events.unshift(event);
       state.events = state.events.slice(0, 500);
-    });
+    }, { snapshot: false, domain: 'events', operation: 'append' });
     this.store.persistEvent?.(event);
     return event;
   }
@@ -70,7 +70,7 @@ function ensureHumanRequestForEvent(store, event) {
       conversation.nextStep = request.consequence;
     }
     linkedRequest = { id: request.id, created: true, conversationId: request.conversationId };
-  });
+  }, { snapshot: false, domain: 'pending_requests', operation: 'link_event' });
 
   if (linkedRequest?.created) {
     store.persistPendingRequest?.(linkedRequest.id);

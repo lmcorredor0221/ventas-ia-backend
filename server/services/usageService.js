@@ -121,7 +121,9 @@ export class UsageService {
     const period = metadata.period ?? billingPeriodForTenant(this.store.getState(), tenantId);
     let nextValue = 0;
     let emittedThreshold = null;
+    let emittedAlertKey = null;
     let thresholdLimit = null;
+    let usageCycle = null;
     this.store.mutate((state) => {
       ensureUsageState(state);
       state.usageCountersByTenant[tenantId] ??= {};
@@ -129,7 +131,7 @@ export class UsageService {
       const current = Number(state.usageCountersByTenant[tenantId][period][metric] ?? 0);
       nextValue = current + Number(amount);
       state.usageCountersByTenant[tenantId][period][metric] = nextValue;
-      syncBillingUsageCycleMetric(state, tenantId, metric, Number(amount));
+      usageCycle = syncBillingUsageCycleMetric(state, tenantId, metric, Number(amount));
 
       const tenant = state.tenants?.find((item) => item.id === tenantId);
       const limit = limitForMetric(metric, limitsForTenant(tenant));
@@ -145,9 +147,14 @@ export class UsageService {
       if (reached > previous) {
         state.usageBudgetAlertsByTenant[tenantId][period][alertKey] = reached;
         emittedThreshold = reached;
+        emittedAlertKey = alertKey;
       }
-    });
+    }, { snapshot: false, domain: 'usage', operation: 'increment_metric' });
     this.store.persistUsageCounter?.(tenantId, period, metric);
+    if (usageCycle) this.store.persistBillingUsageCycle?.(tenantId, usageCycle);
+    if (emittedThreshold && emittedAlertKey) {
+      this.store.persistUsageBudgetAlert?.({ tenantId, period, alertKey: emittedAlertKey, threshold: emittedThreshold });
+    }
     if (emittedThreshold) {
       this.events.emit({
         type: 'budget.threshold_reached',
@@ -259,10 +266,11 @@ function syncBillingUsageCycleMetric(state, tenantId, metric, amount) {
   const subscription = state.subscriptionsByTenant?.[tenantId];
   const cycles = state.billingUsageCyclesByTenant?.[tenantId] ?? [];
   const cycle = cycles.find((item) => item.periodStart === subscription?.currentPeriodStart) ?? cycles[0];
-  if (!cycle) return;
+  if (!cycle) return null;
   if (metric === 'agent_interactions') cycle.interactionsUsed = Number(cycle.interactionsUsed ?? 0) + amount;
   if (metric === 'deliveries_confirmed') cycle.deliveriesUsed = Number(cycle.deliveriesUsed ?? 0) + amount;
   if (metric === 'llm_total_tokens') cycle.llmTokensUsed = Number(cycle.llmTokensUsed ?? 0) + amount;
   if (metric === 'tool_calls') cycle.toolCallsUsed = Number(cycle.toolCallsUsed ?? 0) + amount;
   cycle.updatedAt = new Date().toISOString();
+  return cycle;
 }

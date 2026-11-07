@@ -255,7 +255,7 @@ export class OrderService {
         conversationChanged = true;
         dispatchRecipient = updatedOrder.waId ?? conversation.waId ?? null;
       }
-    });
+    }, { snapshot: false, domain: 'orders', operation: 'transition' });
     if (this.store.persistOrderWithOutbox) {
       await this.store.persistOrderWithOutbox(order.tenantId, order.id, sheetProjectionEntry ? [sheetProjectionEntry] : []);
     } else {

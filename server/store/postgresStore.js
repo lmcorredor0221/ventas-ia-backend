@@ -22,13 +22,14 @@ const MIGRATIONS_DIR = path.resolve(__dirname, '../db/migrations');
 const SNAPSHOT_IDLE_DELAY_MS = 10_000;
 
 export class PostgresStore {
-  constructor({ databaseUrl, ssl = 'auto', max = 5 }) {
+  constructor({ databaseUrl, ssl = 'auto', max = 5, incrementalPersistenceEnabled = false }) {
     if (!databaseUrl) throw new Error('DATABASE_URL is required when STORAGE_DRIVER=postgres');
     this.pool = new Pool({
       connectionString: databaseUrl,
       max,
       ssl: resolveSsl(databaseUrl, ssl),
     });
+    this.incrementalPersistenceEnabled = incrementalPersistenceEnabled === true;
     this.state = null;
     this.saveQueue = Promise.resolve();
     // Tenant configuration must not wait behind unrelated operational writes.
@@ -74,6 +75,10 @@ export class PostgresStore {
         const conversations = await client.query('SELECT id, tenant_id, wa_id, status, payload FROM conversations ORDER BY updated_at DESC, id');
         const requests = await client.query('SELECT id, tenant_id, conversation_id, type, status, resolved_at, payload FROM pending_requests ORDER BY created_at DESC, id');
         const orders = await client.query('SELECT id, tenant_id, conversation_id, wa_id, status, version, payload FROM orders ORDER BY created_at DESC, id');
+        const events = await client.query('SELECT payload FROM events ORDER BY created_at DESC, id LIMIT 500');
+        const customerProfiles = await client.query('SELECT tenant_id, wa_id, payload FROM customer_profiles ORDER BY updated_at DESC, wa_id');
+        const usageAlerts = await client.query('SELECT tenant_id, period, alert_key, threshold FROM usage_budget_alerts');
+        const usageCycles = await client.query('SELECT tenant_id, payload FROM billing_usage_cycles ORDER BY period_start DESC, id');
         // Replace these projections, including empty tables: merging with the
         // snapshot would resurrect deleted rows or pending versions of resolved tasks.
         document.conversations = conversations.rows.map(row => ({ ...row.payload,
@@ -88,6 +93,32 @@ export class PostgresStore {
             conversationId: row.conversation_id, waId: row.wa_id, status: row.status, version: Number(row.version) });
         }
         document.ordersByTenant = Object.fromEntries(ordersByTenant);
+        // Events already have a canonical repository. Prefer it when present;
+        // retain an old snapshot only for a pre-migration database whose table
+        // has not been populated yet.
+        if (events.rows.length || !(document.events ?? []).length) {
+          document.events = events.rows.map(row => row.payload);
+        }
+        if (customerProfiles.rows.length) {
+          document.customerProfilesByTenant = {};
+          for (const row of customerProfiles.rows) {
+            document.customerProfilesByTenant[row.tenant_id] ??= {};
+            document.customerProfilesByTenant[row.tenant_id][row.wa_id] = row.payload ?? {};
+          }
+        }
+        document.usageBudgetAlertsByTenant = {};
+        for (const row of usageAlerts.rows) {
+          document.usageBudgetAlertsByTenant[row.tenant_id] ??= {};
+          document.usageBudgetAlertsByTenant[row.tenant_id][row.period] ??= {};
+          document.usageBudgetAlertsByTenant[row.tenant_id][row.period][row.alert_key] = Number(row.threshold);
+        }
+        if (usageCycles.rows.length) {
+          document.billingUsageCyclesByTenant = {};
+          for (const row of usageCycles.rows) {
+            document.billingUsageCyclesByTenant[row.tenant_id] ??= [];
+            document.billingUsageCyclesByTenant[row.tenant_id].push(row.payload ?? {});
+          }
+        }
         // Critical order commits also persist quota before the deferred snapshot.
         // Replaying older snapshot counters would undercount after a restart.
         const usage = await client.query('SELECT tenant_id, period, metric, value FROM usage_counters');
@@ -173,6 +204,26 @@ export class PostgresStore {
   async listProducts(tenantId) {
     const result = await this.pool.query('SELECT payload FROM products WHERE tenant_id = $1 ORDER BY name ASC', [tenantId]);
     return result.rows.map((row) => row.payload);
+  }
+
+  persistCatalogProjection(tenantId, products = [], driveFiles = []) {
+    if (!tenantId) return Promise.resolve();
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
+        await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
+        for (const product of products) await upsertProduct(client, tenantId, product);
+        for (const file of driveFiles) await upsertDriveFile(client, tenantId, file);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'catalog projection write');
   }
 
   async listDriveFiles(tenantId) {
@@ -270,10 +321,17 @@ export class PostgresStore {
     }, 'processed message claim');
   }
 
-  mutate(mutator) {
+  mutate(mutator, { snapshot = true, domain = 'runtime', operation = 'mutate' } = {}) {
     const state = this.getState();
     const result = mutator(state);
-    this.queueSave();
+    const useIncrementalPersistence = this.incrementalPersistenceEnabled && snapshot === false;
+    if (useIncrementalPersistence) {
+      this.telemetry?.record('postgres', 'incremental_mutation', {
+        metadata: { domain, operation, snapshotScheduled: false },
+      });
+    } else {
+      this.queueSave();
+    }
     return result;
   }
 
@@ -391,6 +449,17 @@ export class PostgresStore {
         client.release();
       }
     }, 'event write');
+  }
+
+  persistAuditEvent(event) {
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await upsertAuditEvent(client, event);
+      } finally {
+        client.release();
+      }
+    }, 'audit event write');
   }
 
   persistConversation(conversationId) {
@@ -636,6 +705,29 @@ export class PostgresStore {
         client.release();
       }
     }, 'usage counter write');
+  }
+
+  persistBillingUsageCycle(tenantId, cycle) {
+    if (!tenantId || !cycle?.id) return Promise.resolve();
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await upsertBillingUsageCycle(client, tenantId, cycle);
+      } finally {
+        client.release();
+      }
+    }, 'billing usage cycle write');
+  }
+
+  persistUsageBudgetAlert({ tenantId, period, alertKey, threshold }) {
+    if (!tenantId || !period || !alertKey) return Promise.resolve();
+    return this.queueWrite(() => this.pool.query(
+      `INSERT INTO usage_budget_alerts (tenant_id, period, alert_key, threshold, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (tenant_id, period, alert_key) DO UPDATE
+       SET threshold = EXCLUDED.threshold, updated_at = now()`,
+      [tenantId, period, alertKey, Number(threshold) || 0],
+    ), 'usage budget alert write');
   }
 
   persistWebhookEvent(event) {
@@ -885,6 +977,8 @@ export class PostgresStore {
           'conversations',
           'events',
           'usage_counters',
+          'billing_usage_cycles',
+          'usage_budget_alerts',
         ]) {
           await client.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]);
         }
