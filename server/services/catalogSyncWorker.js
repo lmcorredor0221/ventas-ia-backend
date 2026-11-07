@@ -6,15 +6,24 @@ export class CatalogSyncWorker {
     this.timer = null;
     this.running = false;
     this.locks = new Map();
+    this.lastResults = new Map();
   }
 
-  async syncTenant(tenantId, reason = 'scheduled') {
+  async syncTenant(tenantId, reason = 'manual') {
     if (this.locks.has(tenantId)) return this.locks.get(tenantId);
-    const operation = this.syncTenantUnlocked(tenantId, reason).finally(() => {
-      if (this.locks.get(tenantId) === operation) this.locks.delete(tenantId);
+    const operation = this.syncTenantUnlocked(tenantId, reason);
+    const tracked = operation.then((result) => {
+      this.lastResults.set(tenantId, result);
+      return result;
+    }, (error) => {
+      const result = { status: 'failed', tenantId, reason, error: error.message };
+      this.lastResults.set(tenantId, result);
+      throw error;
+    }).finally(() => {
+      if (this.locks.get(tenantId) === tracked) this.locks.delete(tenantId);
     });
-    this.locks.set(tenantId, operation);
-    return operation;
+    this.locks.set(tenantId, tracked);
+    return tracked;
   }
 
   async syncTenantUnlocked(tenantId, reason) {
@@ -82,8 +91,25 @@ export class CatalogSyncWorker {
     return Promise.all(tenants.map((tenant) => this.syncTenant(tenant.id, reason)));
   }
 
+  getStatus(tenantId) {
+    const state = this.store?.getState?.() ?? {};
+    const published = state.catalogIndexStatusByTenant?.[tenantId] ?? null;
+    return {
+      tenantId,
+      mode: this.config.catalogSyncMode ?? 'on_demand',
+      scheduled: Boolean(this.timer),
+      inProgress: this.locks.has(tenantId),
+      lastResult: this.lastResults.get(tenantId) ?? null,
+      published,
+    };
+  }
+
   start() {
-    if (this.timer || this.config.catalogSyncWorkerEnabled !== true) return;
+    if (
+      this.timer
+      || this.config.catalogSyncMode !== 'scheduled'
+      || this.config.catalogSyncWorkerEnabled !== true
+    ) return;
     const interval = Math.max(Number(this.config.catalogSyncIntervalMs ?? 300_000), 60_000);
     this.timer = setInterval(() => {
       if (this.running) return;

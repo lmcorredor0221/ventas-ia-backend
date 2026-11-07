@@ -208,7 +208,32 @@ export function createSaasRouter({ controlPlane, auth, catalogSyncWorker }) {
         throw error;
       }
       const result = await catalogSyncWorker.syncTenant(req.params.tenantId, 'manual');
+      auth.recordTenantAction(req, {
+        tenantId: req.params.tenantId,
+        action: 'google.catalog.sync_requested',
+        resource: 'google_catalog',
+        metadata: {
+          status: result.status,
+          catalogVersion: result.catalogVersion ?? null,
+          rowCount: result.rowCount ?? null,
+        },
+      });
       res.status(result.status === 'failed' ? 502 : 200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/tenants/:tenantId/google/catalog/sync/status', (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId);
+      if (!catalogSyncWorker) {
+        const error = new Error('El estado de sincronización del catálogo no está disponible.');
+        error.statusCode = 503;
+        error.code = 'catalog_sync_unavailable';
+        throw error;
+      }
+      res.json(catalogSyncWorker.getStatus(req.params.tenantId));
     } catch (error) {
       next(error);
     }

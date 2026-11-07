@@ -43,9 +43,12 @@ const tools = {
 const worker = new CatalogSyncWorker({
   store,
   tools,
-  config: { catalogSyncWorkerEnabled: false },
+  config: { catalogSyncMode: 'on_demand', catalogSyncWorkerEnabled: true },
   events: { emit: () => {} },
 });
+
+worker.start();
+assert.equal(worker.timer, null, 'on-demand mode must not start a periodic timer');
 const result = await worker.syncTenant('demo', 'test');
 
 assert.equal(result.status, 'published');
@@ -56,5 +59,10 @@ assert.equal(calls[1][1].persist, false);
 assert.equal(calls[2][0], 'snapshot');
 assert.equal(calls[2][1].index.catalogVersion, index.catalogVersion);
 assert.equal(calls[2][1].products.length, 1);
+assert.equal(worker.getStatus('demo').mode, 'on_demand');
+assert.equal(worker.getStatus('demo').scheduled, false);
+assert.equal(worker.getStatus('demo').lastResult.status, 'published');
+
+await worker.stop();
 
 console.log('catalog-sync-worker: ok');

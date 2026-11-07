@@ -12,10 +12,18 @@ export const RUNTIME_CONFIG = {
   // Local JSON fixtures keep the desktop simulator usable; production must use live Google data.
   allowLocalCatalogFallback: process.env.ALLOW_LOCAL_CATALOG_FALLBACK === 'true'
     || (process.env.NODE_ENV !== 'production' && (process.env.STORAGE_DRIVER ?? 'json') === 'json'),
-  // Keep Google as the safe default. PostgreSQL becomes operational only after
-  // a tenant has a published catalog version and has passed shadow validation.
+  // Keep Google as the safe default for local compatibility. PostgreSQL becomes
+  // operational only after a tenant has a published catalog version and has
+  // passed shadow validation.
   catalogReadSource: process.env.CATALOG_READ_SOURCE ?? 'google',
+  // Catalog publication is an explicit tenant action. The scheduled worker is
+  // opt-in only for controlled maintenance jobs and must never be enabled by
+  // an old CATALOG_SYNC_WORKER_ENABLED variable alone.
+  catalogSyncMode: process.env.CATALOG_SYNC_MODE === 'scheduled' ? 'scheduled' : 'on_demand',
   catalogSyncWorkerEnabled: process.env.CATALOG_SYNC_WORKER_ENABLED === 'true',
+  // A catalog read must not publish or rebuild an index as a side effect.
+  // Legacy/local callers may opt in explicitly for compatibility tests.
+  catalogAutoSyncOnRead: process.env.CATALOG_AUTO_SYNC_ON_READ === 'true',
   catalogSyncIntervalMs: Number(process.env.CATALOG_SYNC_INTERVAL_MS ?? 300000),
   defaultTenantId: process.env.DEFAULT_TENANT_ID ?? 'andina',
   timezone: process.env.AGENT_TIMEZONE ?? 'America/Bogota',

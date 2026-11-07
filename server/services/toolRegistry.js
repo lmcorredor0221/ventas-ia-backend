@@ -155,7 +155,11 @@ export class ToolRegistry {
         ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: effectiveRange })
         : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
     }
-    if (!index && this.config.catalogKnowledgeIndexEnabled !== false) {
+    if (
+      !index
+      && this.config.catalogKnowledgeIndexEnabled !== false
+      && this.config.catalogAutoSyncOnRead !== false
+    ) {
       index = await this.catalogSearch?.sync({
         tenantId,
         rows,
