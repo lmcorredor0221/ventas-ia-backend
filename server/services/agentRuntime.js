@@ -524,6 +524,8 @@ export class AgentRuntime {
         const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
           range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
           query: search.query,
+          semanticQuery: search.semanticQuery,
+          recommendation: search.recommendation === true,
           filters: search.filters,
           cache_policy: 'short_ttl',
         });
@@ -568,6 +570,8 @@ export class AgentRuntime {
     const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
       range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
       query,
+      semanticQuery: search.semanticQuery,
+      recommendation: search.recommendation === true,
       filters: search.filters,
       cache_policy: 'short_ttl',
     });
@@ -1913,33 +1917,88 @@ function containsAny(text, words) {
   return words.some((word) => normalized.includes(normalizeText(word)));
 }
 
-function catalogSearchesFromPlan(plan, catalogItems, text) {
+export function catalogSearchesFromPlan(plan, catalogItems, text) {
   const plannedSearches = (plan.toolPlan ?? [])
     .filter((step) => step.tool === 'google_sheets_read_table')
     .map((step, index) => {
-      const query = step.query
-        ?? step.filters?.query
-        ?? (step.filters?.sku || step.filters?.category
+      const item = {
+        ...(plan.candidateItems?.[step.candidateIndex ?? index] ?? {}),
+        ...(catalogItems[step.candidateIndex ?? index] ?? {}),
+      };
+      const itemQuery = catalogQueryWithPresentation(
+        item.catalogQuery ?? item.rawName,
+        item.requestedPresentation ?? item.presentationHint,
+      );
+      const stepQuery = step.query && step.query !== step.filters?.query ? step.query : null;
+      const concreteItem = Boolean(itemQuery && (
+        item.requestedPresentation
+        || item.presentationHint
+        || item.requestedAttributes
+        || item.catalogQuery
+      ));
+      const query = concreteItem
+        ? (stepQuery ?? itemQuery)
+        : (stepQuery ?? (step.filters?.sku || step.filters?.category
           ? ''
-          : step.candidate ?? step.filters?.category ?? text);
+          : step.candidate ?? step.filters?.category ?? text));
+      const filters = step.filters && typeof step.filters === 'object' ? { ...step.filters } : {};
+      // `query` is an input to retrieval, not a second exact filter. Keeping a
+      // stale generic value such as "gaseosa" here can discard a concrete
+      // candidate such as "Coca-Cola 1.5 L" before graph expansion runs.
+      delete filters.query;
+      const explicitSku = item.explicitSku === true
+        || item.skuHintSource === 'explicit'
+        || (item.skuHint && normalizeText(text).includes(normalizeText(item.skuHint)));
+      if (!explicitSku) delete filters.sku;
+      if (item.requestedPresentation && !filters.presentation) filters.presentation = item.requestedPresentation;
+      if (item.requestedAttributes && !filters.attributes) filters.attributes = item.requestedAttributes;
+      const semanticQuery = step.semanticQuery ?? item.semanticQuery ?? item.recommendationNeed ?? null;
+      const recommendation = step.recommendation === true
+        || item.recommendation === true
+        || item.recommendationIntent === 'recommendation';
       return {
         query,
-        filters: step.filters,
-        categoryQuery: Boolean(step.filters?.category && !query),
+        ...(semanticQuery ? { semanticQuery } : {}),
+        ...(recommendation ? { recommendation: true } : {}),
+        filters,
+        categoryQuery: Boolean(filters.category && (!query || recommendation)),
         candidateIndex: step.candidateIndex ?? index,
       };
     })
-    .filter((step) => step.filters && Object.keys(step.filters).length);
+    .filter((step) => Boolean(step.query || Object.keys(step.filters).length));
   if (plannedSearches.length) return plannedSearches;
   const fallbackItems = catalogItems.length ? catalogItems : [{ catalogQuery: text, rawName: text }];
   return fallbackItems.map((item, index) => {
-    const query = item.catalogQuery ?? item.rawName ?? text;
+    const query = catalogQueryWithPresentation(
+      item.catalogQuery ?? item.rawName ?? text,
+      item.requestedPresentation ?? item.presentationHint,
+    );
+    const explicitSku = item.explicitSku === true || item.skuHintSource === 'explicit';
+    const filters = item.skuHint && explicitSku
+      ? { sku: item.skuHint }
+      : {
+        ...inferCatalogFilter(query),
+        ...(item.requestedPresentation ? { presentation: item.requestedPresentation } : {}),
+        ...(item.requestedAttributes ? { attributes: item.requestedAttributes } : {}),
+      };
+    delete filters.query;
     return {
       query,
-      filters: item.skuHint ? { sku: item.skuHint } : inferCatalogFilter(query),
+      ...(item.semanticQuery || item.recommendationNeed ? { semanticQuery: item.semanticQuery ?? item.recommendationNeed } : {}),
+      ...((item.recommendation === true || item.recommendationIntent === 'recommendation') ? { recommendation: true } : {}),
+      filters,
+      categoryQuery: Boolean(filters.category && (item.recommendation === true || item.recommendationIntent === 'recommendation') && !item.requestedPresentation),
       candidateIndex: index,
     };
   });
+}
+
+function catalogQueryWithPresentation(base, presentation) {
+  const normalizedBase = normalizeText(base);
+  const normalizedPresentation = normalizeText(presentation);
+  if (!normalizedBase) return presentation ?? '';
+  if (!normalizedPresentation || normalizedBase.includes(normalizedPresentation)) return String(base).trim();
+  return `${String(base).trim()} ${String(presentation).trim()}`.trim();
 }
 
 function deliveryItemFiltersFromPlan(plan, item, index, requestText = '') {
@@ -1960,10 +2019,7 @@ function deliveryItemFiltersFromPlan(plan, item, index, requestText = '') {
   }
 
   const requestedPresentation = item.requestedPresentation ?? item.presentationHint ?? null;
-  const query = [item.catalogQuery ?? item.rawName, requestedPresentation]
-    .filter(Boolean)
-    .join(' ')
-    .trim();
+  const query = catalogQueryWithPresentation(item.catalogQuery ?? item.rawName, requestedPresentation);
   const plannedFilters = planned?.filters && typeof planned.filters === 'object'
     ? { ...planned.filters }
     : {};

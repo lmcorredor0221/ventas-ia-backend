@@ -26,6 +26,31 @@ assert.ok(exactPresentation.rows.every((row) => row.normalizedPresentation === '
 const family = searchCatalogKnowledgeIndex(index, { query: 'chocorramo' });
 assert.ok(family.rows.some((row) => row.sku === 'CHOC-REG'));
 
+const graphExpanded = searchCatalogKnowledgeIndex(index, {
+  query: 'Coca-Cola litro y medio',
+  filters: { presentation: '1.5 L' },
+  limit: 10,
+});
+assert.ok(graphExpanded.retrieval.graphCandidateCount >= 2);
+assert.ok(graphExpanded.retrieval.graphPaths.some((path) => path.relationTypes.includes('PRODUCT_HAS_PRESENTATION')));
+
+const multiValueAttributes = buildCatalogKnowledgeIndex({
+  tenantId: 'tenant-attributes',
+  rows: [{
+    sku: 'ATTR-1',
+    name: 'Producto con atributos',
+    category: 'pruebas',
+    presentation: 'unidad',
+    productFamily: 'Producto con atributos',
+    attributes: { formato: ['familiar', 'botella'] },
+    active: true,
+  }],
+});
+assert.equal(searchCatalogKnowledgeIndex(multiValueAttributes, {
+  query: 'producto atributos',
+  filters: { attributes: { formato: ['familiar'] } },
+}).rows[0].sku, 'ATTR-1');
+
 const changed = buildCatalogKnowledgeIndex({ tenantId: 'tenant-a', rows: [...rows, { ...rows[0], sku: 'NEW-1' }], sourceRef: 'sheet-a', range: 'Catalogo!A1:P1000', previousVersion: index.catalogVersion });
 assert.notEqual(changed.catalogVersion, index.catalogVersion);
 assert.equal(changed.previousVersion, index.catalogVersion);

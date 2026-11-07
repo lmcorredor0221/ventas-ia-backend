@@ -51,7 +51,24 @@ export class CatalogSearchService {
   search(tenantId, payload = {}) {
     const startedAt = performance.now();
     const result = searchCatalogKnowledgeIndex(this.getIndex(tenantId), payload);
-    this.telemetry?.record('catalog', 'search', { durationMs: performance.now() - startedAt, status: 'ok', tenantId, metadata: { catalogVersion: result.catalogVersion, query: payload.query ?? '', candidateCount: result.rows.length } });
+    this.telemetry?.record('catalog', 'search', {
+      durationMs: performance.now() - startedAt,
+      status: 'ok',
+      tenantId,
+      metadata: {
+        catalogVersion: result.catalogVersion,
+        query: payload.query ?? '',
+        semanticQuery: payload.semanticQuery ?? '',
+        filterKeys: Object.keys(payload.filters ?? {}).sort(),
+        candidateCount: result.rows.length,
+        directCandidateCount: result.retrieval?.directCandidateCount ?? 0,
+        graphCandidateCount: result.retrieval?.graphCandidateCount ?? 0,
+        semanticCandidateCount: result.retrieval?.semanticCandidateCount ?? 0,
+        recommendation: result.retrieval?.recommendation ?? false,
+        diversityApplied: result.retrieval?.diversityApplied ?? false,
+        graphPathCount: result.retrieval?.graphPaths?.length ?? 0,
+      },
+    });
     return result;
   }
 }

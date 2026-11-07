@@ -566,9 +566,23 @@ export class LLMPlanner {
       const catalogItems = candidates.length
         ? candidates
         : [{ rawName: extractCatalogQuery(text), quantity: null, catalogQuery: extractCatalogQuery(text) }];
+      const occasion = inferOccasion(text);
+      const recommendationContext = occasion && (
+        containsAny(normalized, ['recomienda', 'recomendaria', 'algo', 'que tiene', 'que hay', 'que ofrece', 'para'])
+      ) && catalogItems.length === 1 ? [occasion, text].filter(Boolean).join(' ') : null;
       return {
         intent: 'catalog_query',
-        order: { delivery, items: catalogItems },
+        order: {
+          delivery,
+          items: recommendationContext
+            ? catalogItems.map((item) => ({
+              ...item,
+              recommendationIntent: 'recommendation',
+              semanticQuery: recommendationContext,
+              recommendationNeed: recommendationContext,
+            }))
+            : catalogItems,
+        },
         recommendedTools: ['google_sheets_read_table', 'google_drive_file_picker', 'whatsapp_business_messaging'],
         missingFields: [],
         confidence: 0.78,
@@ -995,6 +1009,8 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products, pay
     'Personal, grande y familiar dependen del contexto y de las presentaciones disponibles, nunca de un umbral fijo. Si falta evidencia o hay ambiguedad, conserva la duda y solicita aclaracion o intervencion humana.',
     'Los filtros de catalogo se combinan: query, sku, category y attributes (objeto con claves y valores existentes en el catalogo). Para condiciones explicitas conserva requestedAttributes en el item y en filters.attributes; no conviertas preferencias inferidas en requisitos obligatorios.',
     'candidateItems conserva cada producto, ingrediente o categoria candidata con rawName, catalogQuery, quantity, budgetAmount, requestedPresentation, requestedAttributes, confidence, ambiguityReason, skuHint y skuHintSource.',
+    'Cuando la solicitud sea una recomendacion por necesidad o categoria (por ejemplo "algo para la sed", "algo para la lonchera" o "algo para picar"), agrega recommendationIntent:"recommendation" y semanticQuery con conceptos observables del contexto (ocasion, necesidad, tipo de producto, atributos y preferencias). semanticQuery es evidencia blanda para buscar y ordenar; no es un filtro obligatorio ni una licencia para inventar productos.',
+    'Cuando la solicitud sea un producto concreto, usa recommendationIntent:"product_lookup" y deja semanticQuery vacio salvo que aporte contexto adicional. No reemplaces una marca, presentacion, sabor, tamano o atributo expresado por el cliente con una recomendacion generica.',
     'skuHint solo puede tener valor si el cliente escribio explicitamente el SKU o codigo. Para coincidencias por nombre, alias, ortografia o inferencia usa skuHint null y skuHintSource inferred; nunca conviertas la primera coincidencia en seleccion confirmada.',
     'toolPlan debe declarar las herramientas que quieres usar y sus filtros. Para catalogo usa google_sheets_read_table con filters {sku} solo para un SKU escrito por el cliente; en los demas casos usa {query} y conserva presentation/attributes.',
     'responseStrategy permitidos: guide, quote, ask_clarification, partial_availability, approval, handoff, transactional_write.',
@@ -1682,9 +1698,10 @@ function enrichPlannerOutput(plan, text) {
   };
   const missingFields = Array.isArray(plan.missingFields) ? plan.missingFields : [];
   const responseStrategy = plan.responseStrategy ?? inferResponseStrategy({ intent: plan.intent, items, missingFields });
-  const enrichedCandidateItems = candidateItems.length
+  const baseCandidateItems = candidateItems.length
     ? candidateItems
     : items.map((item) => ({
+      ...item,
       rawName: item.rawName ?? item.catalogQuery,
       catalogQuery: item.catalogQuery ?? item.rawName,
       quantity: item.quantity ?? null,
@@ -1699,6 +1716,20 @@ function enrichPlannerOutput(plan, text) {
     delivery: Boolean(order.delivery),
     ...(plan.customerUnderstanding && typeof plan.customerUnderstanding === 'object' ? plan.customerUnderstanding : {}),
   };
+  const enrichedCandidateItems = baseCandidateItems.map((item) => {
+    const isRecommendation = item.recommendationIntent === 'recommendation';
+    if (!isRecommendation || item.semanticQuery || item.recommendationNeed) return item;
+    const semanticQuery = [
+      customerUnderstanding.occasion,
+      customerUnderstanding.rawNeed,
+    ].filter(Boolean).join(' ');
+    return semanticQuery ? {
+      ...item,
+      recommendationIntent: 'recommendation',
+      semanticQuery,
+      recommendationNeed: semanticQuery,
+    } : item;
+  });
   return {
     ...plan,
     reasoningMode: normalizeReasoningMode(plan.reasoningMode),
@@ -1753,6 +1784,9 @@ function normalizeCandidateItems(value) {
     requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
     requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
     inferredAttributes: item.inferredAttributes ?? {},
+    recommendationIntent: item.recommendationIntent ?? item.categoryIntent ?? null,
+    semanticQuery: item.semanticQuery ?? item.recommendationNeed ?? null,
+    recommendationNeed: item.recommendationNeed ?? item.semanticQuery ?? null,
     uncertainties: Array.isArray(item.uncertainties) ? item.uncertainties : [],
     confidence: item.confidence ?? null,
     ambiguityReason: item.ambiguityReason ?? item.reason ?? null,
@@ -1800,15 +1834,28 @@ function buildToolPlan({ intent, items, order, responseStrategy }) {
   if (intent === 'catalog_query' || intent === 'delivery_order') {
     for (const [index, item] of items.entries()) {
       const candidate = item.catalogQuery ?? item.rawName;
-      const filters = item.skuHint ? { sku: item.skuHint } : inferPlannerFilters(candidate);
+      const explicitSku = item.explicitSku === true || item.skuHintSource === 'explicit';
+      const inferred = inferPlannerFilters(candidate);
+      const requestedAttributes = item.requestedAttributes && typeof item.requestedAttributes === 'object'
+        ? item.requestedAttributes
+        : null;
+      const hasRequestedAttributes = Boolean(requestedAttributes && Object.keys(requestedAttributes).length);
+      const filters = explicitSku && item.skuHint
+        ? { sku: item.skuHint }
+        : {
+          ...(inferred.category ? { category: inferred.category } : {}),
+          ...(item.requestedPresentation ? { presentation: item.requestedPresentation } : {}),
+          ...(hasRequestedAttributes ? { attributes: requestedAttributes } : {}),
+        };
       // A category-only request (for example, "algo para la sed") must not
       // be narrowed by its whole natural-language sentence. Concrete
       // candidates keep their inferred catalog query so the search tool can
       // resolve each product independently.
       const concreteCandidate = Boolean(
-        item.skuHint
+        (explicitSku && item.skuHint)
+        || inferred.query
         || item.requestedPresentation
-        || item.requestedAttributes
+        || hasRequestedAttributes
         || normalize(item.catalogQuery) !== normalize(item.rawName),
       );
       plan.push({
@@ -1816,7 +1863,12 @@ function buildToolPlan({ intent, items, order, responseStrategy }) {
         purpose: intent === 'delivery_order' ? 'validate_order_item' : 'catalog_search',
         candidateIndex: index,
         candidate,
-        ...(concreteCandidate ? { query: candidate } : {}),
+        // A non-explicit SKU is only a hypothesis from the interpreter. Keep
+        // the natural-language candidate so the search index can retrieve
+        // compatible variants instead of collapsing the request to one row.
+        ...(concreteCandidate && !inferred.category ? { query: candidate } : {}),
+        ...(item.semanticQuery || item.recommendationNeed ? { semanticQuery: item.semanticQuery ?? item.recommendationNeed } : {}),
+        ...(item.recommendationIntent === 'recommendation' ? { recommendation: true } : {}),
         filters,
       });
     }

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { attributesSearchText } from '../domain/catalogMetadata.js';
+import { attributesSearchText, matchesCatalogAttributes } from '../domain/catalogMetadata.js';
 import {
   CATALOG_NODE_TYPES,
   CATALOG_RELATION_TYPES,
@@ -124,32 +124,221 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
   };
 }
 
-export function searchCatalogKnowledgeIndex(index, { query = '', filters = {}, limit = 25 } = {}) {
-  if (!index?.products) return { catalogVersion: null, rows: [], relations: [] };
+export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery = '', recommendation = false, filters = {}, limit = 25 } = {}) {
+  if (!index?.products) {
+    return {
+      catalogVersion: null,
+      rows: [],
+      relations: [],
+      retrieval: { directCandidateCount: 0, graphCandidateCount: 0, candidateCount: 0, graphPaths: [] },
+    };
+  }
   const normalizedQuery = normalizeText(query);
+  const normalizedSemanticQuery = normalizeText(semanticQuery);
   const queryTokens = tokenize(normalizedQuery);
-  const rows = Object.values(index.products)
-    .filter((product) => productMatchesFilters(product, filters))
-    .map((product) => {
-      const text = productSearchText(product);
-      const tokens = tokenize(text);
-      const lexical = weightedTokenScore(queryTokens, product);
-      const vector = cosineSimilarity(hashedVector(normalizedQuery), hashedVector(text));
-      const score = queryTokens.length ? (lexical * 0.75) + (vector * 25 * 0.25) : 0;
-      const lexicalEvidence = hasLexicalEvidence(queryTokens, tokens);
-      return {
-        ...product,
-        matchScore: Number(score.toFixed(2)),
-        matchType: lexicalEvidence ? 'index_lexical' : 'index_semantic',
-        lexicalEvidence,
-      };
-    })
-    // The hashed fingerprint is only an auxiliary signal. Require a real
-    // token/prefix/typo anchor to avoid false positives from hash collisions.
-    .filter((row) => !queryTokens.length || (row.matchScore >= 2.25 && row.lexicalEvidence))
+  const semanticTokens = tokenize(normalizedSemanticQuery);
+  // A semantic query is only additional evidence. It must not silently turn
+  // an exact/product lookup into a recommendation search. The planner marks
+  // recommendation intent explicitly so concrete requests keep their
+  // presentation, attribute constraints and ranking behavior unchanged.
+  const recommendationMode = Boolean(recommendation && semanticTokens.length);
+  const compatibleProducts = Object.values(index.products)
+    .filter((product) => productMatchesFilters(product, filters));
+  const directCandidates = compatibleProducts
+    .map((product) => scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens, recommendationMode))
+    .filter((row) => {
+      if (!queryTokens.length && !semanticTokens.length) return true;
+      if (recommendationMode) return row.lexicalEvidence || row.semanticEvidence || row.semanticScore > 0;
+      return row.matchScore >= 2.25 && row.lexicalEvidence;
+    });
+
+  // The graph is a retrieval expansion layer. It does not decide the intent
+  // or select a product on behalf of the LLM. It follows tenant-local family,
+  // presentation, brand, category and attribute relations, then applies the
+  // same explicit filters before returning candidates.
+  const graphEvidence = graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts);
+  const bySku = new Map(directCandidates.map((row) => [row.sku, row]));
+  for (const [sku, evidence] of graphEvidence.entries()) {
+    const product = index.products[sku];
+    if (!product || bySku.has(sku) || (queryTokens.length && !evidence.anchorEvidence)) continue;
+    bySku.set(sku, {
+      ...product,
+      matchScore: Number((2.25 + Math.min(2, evidence.anchorScore)).toFixed(2)),
+      matchType: 'graph_relation',
+      lexicalEvidence: false,
+      semanticScore: 0,
+      semanticEvidence: false,
+      graphEvidence: evidence,
+    });
+  }
+  for (const [sku, row] of bySku.entries()) {
+    const evidence = graphEvidence.get(sku);
+    if (evidence) row.graphEvidence = evidence;
+  }
+  const rankedRows = [...bySku.values()]
     .sort((a, b) => b.matchScore - a.matchScore || Number(b.stock ?? 0) - Number(a.stock ?? 0))
-    .slice(0, Math.max(1, Number(limit) || 25));
-  return { catalogVersion: index.catalogVersion, rows, relations: relationEvidence(index, rows) };
+  const rows = recommendationMode
+    ? diversifyRecommendationRows(rankedRows, Math.max(1, Number(limit) || 25))
+    : rankedRows.slice(0, Math.max(1, Number(limit) || 25));
+  return {
+    catalogVersion: index.catalogVersion,
+    rows,
+    relations: relationEvidence(index, rows),
+    retrieval: {
+      directCandidateCount: directCandidates.length,
+      graphCandidateCount: graphEvidence.size,
+      candidateCount: bySku.size,
+      semanticCandidateCount: directCandidates.filter((row) => row.semanticEvidence || row.semanticScore > 0).length,
+      recommendation: recommendationMode,
+      diversityApplied: recommendationMode && rows.length > 1,
+      graphPaths: [...graphEvidence.values()].flatMap((evidence) => evidence.paths).slice(0, 100),
+    },
+  };
+}
+
+function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens = [], recommendation = false) {
+  const text = productSearchText(product);
+  const tokens = tokenize(text);
+  const lexical = weightedTokenScore(queryTokens, product);
+  const semantic = weightedTokenScore(semanticTokens, product);
+  const vector = normalizedQuery ? cosineSimilarity(hashedVector(normalizedQuery), hashedVector(text)) : 0;
+  const semanticVector = semanticTokens.length
+    ? cosineSimilarity(hashedVector(semanticTokens.join(' ')), hashedVector(text))
+    : 0;
+  const score = recommendation
+    ? (semantic * 0.65) + (semanticVector * 25 * 0.2) + (lexical * 0.15)
+    : queryTokens.length ? (lexical * 0.75) + (vector * 25 * 0.25) : 0;
+  const lexicalEvidence = hasLexicalEvidence(queryTokens, tokens);
+  const semanticEvidence = hasLexicalEvidence(semanticTokens, tokens);
+  return {
+    ...product,
+    matchScore: Number(score.toFixed(2)),
+    matchType: recommendation ? 'index_semantic_recommendation' : (lexicalEvidence ? 'index_lexical' : 'index_semantic'),
+    lexicalEvidence: lexicalEvidence || semanticEvidence,
+    semanticScore: Number(semantic.toFixed(2)),
+    semanticEvidence,
+  };
+}
+
+function graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts) {
+  const compatibleSkus = new Set(compatibleProducts.map((product) => product.sku));
+  const nodesById = new Map((index.nodes ?? []).map((node) => [node.id, node]));
+  const evidenceTokens = [...queryTokens, ...semanticTokens, ...filterEvidenceTokens(filters)];
+  const anchors = (index.nodes ?? []).filter((node) => (
+    node.type !== CATALOG_NODE_TYPES.product
+    && node.type !== CATALOG_NODE_TYPES.tenant
+    && nodeMatchesEvidence(node, evidenceTokens)
+  ));
+  const reverseRelations = new Map();
+  const alternativesByProduct = new Map();
+  for (const relation of index.relations ?? []) {
+    const list = reverseRelations.get(relation.to) ?? [];
+    list.push(relation);
+    reverseRelations.set(relation.to, list);
+    if (relation.type === CATALOG_RELATION_TYPES.alternativeOf) {
+      alternativesByProduct.set(relation.from, [...(alternativesByProduct.get(relation.from) ?? []), relation]);
+      alternativesByProduct.set(relation.to, [...(alternativesByProduct.get(relation.to) ?? []), relation]);
+    }
+  }
+  const attributeAnchors = anchors.filter((anchor) => anchor.type === CATALOG_NODE_TYPES.attribute);
+  const restrictAlternativeExpansion = attributeAnchors.length > 0;
+  const pathsBySku = new Map();
+  const addPath = (sku, anchor, relations) => {
+    if (!compatibleSkus.has(sku)) return;
+    const entry = pathsBySku.get(sku) ?? { anchorEvidence: true, anchorScore: 0, paths: [] };
+    const anchorText = nodeSearchText(anchor);
+    const anchorScore = evidenceTokens.length ? weightedTextTokenScore(evidenceTokens, tokenize(anchorText)) : 1;
+    entry.anchorScore = Math.max(entry.anchorScore, anchorScore);
+    const path = {
+      sku,
+      anchorType: anchor.type,
+      anchorKey: anchor.key,
+      relationTypes: relations.map((relation) => relation.type),
+    };
+    if (!entry.paths.some((current) => current.sku === path.sku && current.anchorKey === path.anchorKey && current.relationTypes.join('|') === path.relationTypes.join('|'))) {
+      entry.paths.push(path);
+    }
+    pathsBySku.set(sku, entry);
+  };
+
+  for (const anchor of anchors) {
+    for (const relation of reverseRelations.get(anchor.id) ?? []) {
+      const productNode = nodesById.get(relation.from);
+      if (productNode?.type !== CATALOG_NODE_TYPES.product) continue;
+      addPath(productNode.payload?.sku ?? productNode.key, anchor, [relation]);
+      // An explicit attribute match is already a precise anchor (for example
+      // material=algodon or variante=Original). Do not fan it back out to
+      // sibling alternatives that could contradict the customer's constraint.
+      if (restrictAlternativeExpansion) continue;
+      for (const alternative of alternativesByProduct.get(productNode.id) ?? []) {
+        if (alternative.from === productNode.id) {
+          const target = nodesById.get(alternative.to);
+          addPath(target?.payload?.sku ?? target?.key, anchor, [relation, alternative]);
+        }
+        if (alternative.to === productNode.id) {
+          const source = nodesById.get(alternative.from);
+          addPath(source?.payload?.sku ?? source?.key, anchor, [relation, alternative]);
+        }
+      }
+    }
+  }
+  return pathsBySku;
+}
+
+function diversifyRecommendationRows(rows, limit) {
+  const selected = [];
+  const usedFamilies = new Set();
+  for (const row of rows) {
+    const family = normalizedValue(row.family ?? row.productFamily ?? row.category ?? row.name) || row.sku;
+    if (usedFamilies.has(family)) continue;
+    usedFamilies.add(family);
+    selected.push(row);
+    if (selected.length >= limit) return selected;
+  }
+  for (const row of rows) {
+    if (selected.some((candidate) => candidate.sku === row.sku)) continue;
+    selected.push(row);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+function nodeMatchesEvidence(node, evidenceTokens) {
+  if (!evidenceTokens.length) return false;
+  return hasLexicalEvidence(evidenceTokens, tokenize(nodeSearchText(node)));
+}
+
+function nodeSearchText(node) {
+  return [
+    node?.key,
+    node?.payload?.name,
+    node?.payload?.value,
+    node?.payload?.family,
+    node?.payload?.key,
+  ].filter(Boolean).join(' ');
+}
+
+function filterEvidenceTokens(filters = {}) {
+  const values = [];
+  const collect = (value) => {
+    if (value == null || value === '' || typeof value === 'boolean' || typeof value === 'number') return;
+    if (Array.isArray(value)) return value.forEach(collect);
+    if (typeof value === 'object') return Object.entries(value).forEach(([key, item]) => { values.push(key); collect(item); });
+    values.push(String(value));
+  };
+  for (const [key, value] of Object.entries(filters ?? {})) {
+    if (key !== 'query' && key !== 'sku') collect(value);
+  }
+  return tokenize(values.join(' '));
+}
+
+function weightedTextTokenScore(queryTokens, productTokens) {
+  if (!queryTokens.length) return 0;
+  const matched = queryTokens.filter((queryToken) => productTokens.some((token) => (
+    token === queryToken
+    || (token.length >= 4 && queryToken.length >= 4 && (token.startsWith(queryToken) || queryToken.startsWith(token)))
+  ))).length;
+  return matched / queryTokens.length;
 }
 
 export function relationEvidence(index, rows = []) {
@@ -309,7 +498,7 @@ function productMatchesFilters(product, filters = {}) {
     if (key === 'category' && !categoryMatches(product.category, value)) return false;
     if (key === 'brand' && !normalizedValue(product.brand).includes(normalizedValue(value))) return false;
     if (key === 'presentation' && !normalizedValue(`${product.presentation} ${product.normalizedPresentation}`).includes(normalizedValue(value))) return false;
-    if (key === 'attributes' && !attributesMatch(product.attributes, value)) return false;
+    if (key === 'attributes' && !matchesCatalogAttributes(product.attributes, value)) return false;
   }
   return true;
 }
@@ -327,16 +516,6 @@ function categoryMatches(actual, expected) {
     cafe: ['cafe'],
   };
   return (aliases[normalizedExpected] ?? []).some((alias) => normalizedActual.includes(alias));
-}
-
-function attributesMatch(actual, expected) {
-  if (!expected || typeof expected !== 'object') return true;
-  return Object.entries(expected).every(([key, value]) => {
-    const actualEntry = Object.entries(actual ?? {}).find(([actualKey]) => normalizedValue(actualKey) === normalizedValue(key));
-    if (!actualEntry) return false;
-    if (value && typeof value === 'object') return attributesMatch(actualEntry[1], value);
-    return normalizedValue(actualEntry[1]) === normalizedValue(value);
-  });
 }
 
 function stableStringify(value) {

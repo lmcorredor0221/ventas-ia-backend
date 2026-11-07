@@ -134,6 +134,8 @@ export class ToolRegistry {
         // the candidate query. Keeping both preserves the LLM's decomposition
         // of a broad request such as "arroz, aceite o huevos".
         query: payload.query ?? payload.filters?.query ?? '',
+        semanticQuery: payload.semanticQuery ?? '',
+        recommendation: payload.recommendation === true,
         filters: payload.filters ?? {},
         limit: Math.max(Number(payload.limit ?? 25), 25),
       })
@@ -144,7 +146,16 @@ export class ToolRegistry {
         // Preserve the live/source row shape while carrying index evidence
         // into the existing resolver contract.
         return sourceRow
-          ? { ...sourceRow, matchScore: row.matchScore, matchType: row.matchType, family: row.family, nodeId: row.nodeId }
+          ? {
+            ...sourceRow,
+            matchScore: row.matchScore,
+            matchType: row.matchType,
+            semanticScore: row.semanticScore,
+            semanticEvidence: row.semanticEvidence,
+            family: row.family,
+            nodeId: row.nodeId,
+            graphEvidence: row.graphEvidence,
+          }
           : row;
       })
       : filterRows(rows, payload.filters));
@@ -159,6 +170,7 @@ export class ToolRegistry {
       catalog_index: index
         ? { status: index.status, node_count: index.nodeCount, relation_count: index.relationCount, vector_count: index.vectorCount, provider: index.vectorProvider }
         : { status: 'unavailable' },
+      catalog_retrieval: indexed?.retrieval ?? null,
       relation_evidence: indexed?.relations ?? [],
       fetched_at: new Date().toISOString(),
     };

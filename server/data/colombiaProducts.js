@@ -15,6 +15,10 @@ export const colombiaProducts20 = [
     price: 2200,
     stock: 30,
     category: 'jugos',
+    productFamily: 'bebida de fruta',
+    description: 'Bebida de fruta refrescante para calmar la sed.',
+    tags: ['jugo', 'fruta', 'refrescante', 'calmar la sed'],
+    attributes: { ocasion_consumo: ['calmar la sed'], tipo_bebida: 'jugo' },
     driveFileId: 'drv-and-cif-gra',
   },
   {
@@ -24,6 +28,10 @@ export const colombiaProducts20 = [
     price: 2600,
     stock: 24,
     category: 'jugos',
+    productFamily: 'bebida de fruta',
+    description: 'Jugo de fruta refrescante para acompañar la comida.',
+    tags: ['jugo', 'fruta', 'refrescante'],
+    attributes: { tipo_bebida: 'jugo' },
     driveFileId: 'drv-and-hit-man',
   },
   {
@@ -51,6 +59,10 @@ export const colombiaProducts20 = [
     price: 1800,
     stock: 50,
     category: 'bebidas',
+    productFamily: 'agua embotellada',
+    description: 'Agua para hidratarse y calmar la sed.',
+    tags: ['agua', 'hidratacion', 'refrescante', 'calmar la sed'],
+    attributes: { ocasion_consumo: ['calmar la sed'], tipo_bebida: 'agua' },
     driveFileId: 'drv-and-agu-cri-600',
   },
   {
@@ -60,6 +72,10 @@ export const colombiaProducts20 = [
     price: 3200,
     stock: 36,
     category: 'bebidas',
+    productFamily: 'gaseosa',
+    description: 'Gaseosa refrescante para acompañar comidas.',
+    tags: ['gaseosa', 'refrescante'],
+    attributes: { tipo_bebida: 'gaseosa' },
     driveFileId: 'drv-and-coc-400',
   },
   {
