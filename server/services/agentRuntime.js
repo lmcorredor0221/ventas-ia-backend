@@ -1450,13 +1450,18 @@ export class AgentRuntime {
 
   async closeExpiredManualCases(now = Date.now()) {
     const inactivityMs = Number(this.config.manualCaseInactivityMinutes ?? 5) * 60_000;
+    const hasExpiredManualCase = (conversation) => {
+      if (conversation.manualMode !== 'whatsapp_external' || conversation.status !== 'manual_active') return false;
+      if (conversation.orderId) return false;
+      const lastActivity = Date.parse(conversation.manualLastActivityAt ?? conversation.updatedAt ?? conversation.createdAt ?? 0);
+      return Number.isFinite(lastActivity) && now - lastActivity >= inactivityMs;
+    };
+    if (!(this.store.getState().conversations ?? []).some(hasExpiredManualCase)) return [];
+
     const expired = [];
     this.store.mutate((state) => {
       for (const conversation of state.conversations) {
-        if (conversation.manualMode !== 'whatsapp_external' || conversation.status !== 'manual_active') continue;
-        if (conversation.orderId) continue; // Fulfillment ends through the order's dispatch/cancellation flow.
-        const lastActivity = Date.parse(conversation.manualLastActivityAt ?? conversation.updatedAt ?? conversation.createdAt ?? 0);
-        if (!Number.isFinite(lastActivity) || now - lastActivity < inactivityMs) continue;
+        if (!hasExpiredManualCase(conversation)) continue;
         const closedAt = new Date(now).toISOString();
         conversation.status = 'closed_no_confirmation';
         conversation.caseStatus = 'closed_no_confirmation';

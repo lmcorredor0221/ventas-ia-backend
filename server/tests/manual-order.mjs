@@ -53,8 +53,39 @@ try {
   assert.equal(sends, 0, 'Saving an agreed manual order must not send a WhatsApp message');
   const runtime = Object.create(AgentRuntime.prototype);
   Object.assign(runtime, { store, events, config: { manualConversationInactivityMinutes: 5 } });
+  store.state.conversations.push({
+    id: 'manual-noop-sweep',
+    tenantId: 'shop',
+    waId: 'CO.noop-sweep',
+    status: 'manual_active',
+    manualMode: 'whatsapp_external',
+    aiPaused: true,
+    manualLastActivityAt: new Date().toISOString(),
+    messages: [],
+  });
+  let sweepMutations = 0;
+  const originalMutate = store.mutate.bind(store);
+  store.mutate = mutator => {
+    sweepMutations += 1;
+    return originalMutate(mutator);
+  };
   await runtime.closeExpiredManualCases();
+  assert.equal(sweepMutations, 0, 'A no-op manual sweep must not schedule a full state snapshot');
+  store.mutate = originalMutate;
   assert.equal(store.state.conversations[0].status, 'manual_active');
+  store.state.conversations.push({
+    id: 'manual-expiring-sweep',
+    tenantId: 'shop',
+    waId: 'CO.expiring-sweep',
+    status: 'manual_active',
+    manualMode: 'whatsapp_external',
+    aiPaused: true,
+    manualLastActivityAt: '2020-01-01T00:00:00Z',
+    messages: [],
+  });
+  const expiredSweepCases = await runtime.closeExpiredManualCases();
+  assert.ok(expiredSweepCases.includes('manual-expiring-sweep'), 'An expired manual case must still be closed');
+  assert.equal(store.state.conversations.find(item => item.id === 'manual-expiring-sweep').status, 'closed_no_confirmation');
   const orders = new OrderService({ store, tools, events, outbox });
   await orders.transition({ tenantId: 'shop', orderId: results[0].order.id, nextStatus: 'dispatched', actorId: 'owner' });
   assert.equal(sends, 1);
