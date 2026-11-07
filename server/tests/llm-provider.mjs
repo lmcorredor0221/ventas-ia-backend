@@ -265,7 +265,10 @@ try {
   assert.equal(mixedKnownUnknownPlan.intent, 'delivery_order');
   assert.ok(mixedKnownUnknownPlan.order.items.some((item) => item.catalogQuery === 'calchichon' && item.budgetAmount === 5000));
   assert.ok(mixedKnownUnknownPlan.order.items.some((item) => item.catalogQuery.includes('coca') && item.requestedPresentation));
-  assert.ok(mixedKnownUnknownPlan.toolPlan.some((step) => step.filters?.query === 'calchichon'));
+  // The current tool contract keeps the retrieval query at the top level;
+  // filters are reserved for structured constraints such as category,
+  // presentation and attributes.
+  assert.ok(mixedKnownUnknownPlan.toolPlan.some((step) => step.query === 'calchichon'));
 
   store.mutate((state) => {
     state.platformSettings.llm = {

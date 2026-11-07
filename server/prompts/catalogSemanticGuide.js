@@ -9,14 +9,66 @@ export function catalogSemanticGuide() {
   ];
 }
 
+/**
+ * Compact tenant vocabulary used only to ground product interpretation.
+ *
+ * This deliberately contains family/product names and brands only. It is not
+ * a catalog lookup and must never be used to invent SKU, presentation, price,
+ * stock or availability. Keeping this prefix stable for a catalogVersion also
+ * lets providers such as DeepSeek reuse their automatic prompt cache while the
+ * per-message conversation remains in the dynamic suffix below.
+ */
+export function buildTenantProductVocabulary(index) {
+  const combinations = new Map();
+  for (const product of Object.values(index?.products ?? {})) {
+    const productName = String(product?.family ?? product?.productFamily ?? product?.name ?? '').trim();
+    if (!productName) continue;
+    const brand = String(product?.brand ?? '').trim() || null;
+    const key = `${normalizeVocabularyValue(productName)}|${normalizeVocabularyValue(brand ?? '')}`;
+    if (!key.replace('|', '')) continue;
+    combinations.set(key, { product: productName, brand });
+  }
+  return {
+    catalogVersion: index?.catalogVersion ?? null,
+    products: [...combinations.values()].sort((a, b) => (
+      `${a.product}|${a.brand ?? ''}`.localeCompare(`${b.product}|${b.brand ?? ''}`, 'es', { sensitivity: 'base' })
+    )),
+  };
+}
+
+export function tenantVocabularyPrompt(vocabulary) {
+  if (!vocabulary?.products?.length) {
+    return [
+      'No hay un vocabulario publicado disponible para este tenant en este turno. Conserva las hipótesis del mensaje y deja la validación a la herramienta de catálogo.',
+    ];
+  }
+  return [
+    'Vocabulario compacto del catálogo de este tenant (solo evidencia para reconocer producto y marca):',
+    `catalogVersion: ${vocabulary.catalogVersion ?? 'unknown'}`,
+    JSON.stringify(vocabulary.products),
+    'Usa este vocabulario para corregir nombres incompletos, errores ortográficos o modismos. No lo trates como disponibilidad, precio, presentación ni selección de SKU: esos hechos los devuelve la herramienta de catálogo.',
+  ];
+}
+
+function normalizeVocabularyValue(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 export function buildContextInterpreterPrompt({ text, customerProfile, conversation, paymentMethods, config }) {
   return [
     'Eres el intérprete contextual de una tienda colombiana por WhatsApp.',
     'Tu única responsabilidad es comprender el acto conversacional actual. No busques productos, no selecciones SKU y no calcules precios.',
-    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, customerDetails, pendingAction, confidence, greetingReply, customerUnderstanding.',
+    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, explicitHumanRequest, handoffReason, customerDetails, pendingAction, confidence, greetingReply, customerUnderstanding.',
     'Intents permitidos: greeting, delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     ...catalogSemanticGuide(),
     'Usa el historial reciente y el estado de la conversación. Una respuesta breve puede contestar una pregunta previa, seleccionar una variante, indicar pago, confirmar datos o agregar productos.',
+    'Usa human_handoff únicamente cuando el cliente pida explícitamente hablar con una persona/tienda, exista un reclamo operativo que requiera intervención o una política obligatoria lo exija. Una baja confianza, un producto no encontrado o una ambigüedad de catálogo no son por sí solos una intención human_handoff: conserva la intención comercial y deja la duda para que el catálogo y el diálogo la resuelvan.',
+    'Cuando uses human_handoff, marca explicitHumanRequest:true solo si el cliente lo pidió literalmente o por una expresión equivalente; explica handoffReason. Para una escalación obligatoria de política, explicitHumanRequest puede ser false pero handoffReason debe explicar la restricción.',
     'customerDetails solo incluye nombre o dirección expresados en el mensaje actual; no copies el perfil automáticamente.',
     `Identidad y voz: ${JSON.stringify({ name: config.agentName, tone: config.tone, language: config.responseLanguage })}.`,
     JSON.stringify({
@@ -30,7 +82,7 @@ export function buildContextInterpreterPrompt({ text, customerProfile, conversat
   ].join('\n');
 }
 
-export function buildProductInferencePrompt({ text, contextAnalysis, customerProfile, conversation, config }) {
+export function buildProductInferencePrompt({ text, contextAnalysis, customerProfile, conversation, config, tenantCatalogVocabulary }) {
   return [
     'Eres el intérprete de productos de una tienda colombiana por WhatsApp.',
     'Solo ejecuta esta etapa cuando la intención tenga relación con productos o una canasta existente.',
@@ -41,6 +93,7 @@ export function buildProductInferencePrompt({ text, contextAnalysis, customerPro
     'Una presentación, marca, sabor o atributo escrito explícitamente es una restricción de búsqueda; lo inferido es evidencia, no filtro absoluto.',
     'Para un pedido por valor usa budgetAmount y no conviertas el valor en cantidad.',
     'Conserva todas las líneas solicitadas, incluso si la conversación contiene varios mensajes o una modificación de la canasta.',
+    ...tenantVocabularyPrompt(tenantCatalogVocabulary),
     JSON.stringify({
       message: text,
       contextAnalysis,

@@ -7,7 +7,7 @@ import { platformLlmConfig } from './platformService.js';
 import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { normalizeCommercePolicy } from '../domain/whatsappCommercePolicy.js';
 import { agentDisplayNameForTenant, DEFAULT_AGENT_NAME } from '../domain/agentIdentity.js';
-import { buildContextInterpreterPrompt, buildProductInferencePrompt } from '../prompts/catalogSemanticGuide.js';
+import { buildContextInterpreterPrompt, buildProductInferencePrompt, buildTenantProductVocabulary, tenantVocabularyPrompt } from '../prompts/catalogSemanticGuide.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -80,6 +80,7 @@ export class LLMPlanner {
     this.usage = usage;
     this.config = config;
     this.telemetry = telemetry;
+    this.catalogVocabularyCache = new Map();
   }
 
   async plan({ tenantId, conversationId, normalized, customerProfile, conversation }) {
@@ -97,9 +98,11 @@ export class LLMPlanner {
       agentName: agentDisplayNameForTenant(tenant),
     };
     if (process.env.LLM_SIMULATOR) config.simulator = process.env.LLM_SIMULATOR;
-    // The live provider path is intentionally catalog-free. Product evidence
-    // comes from google_sheets_read_table and the tenant-local knowledge index,
-    // while simulators keep their fixture hints for deterministic local tests.
+    const tenantCatalogVocabulary = config.simulator ? null : await this.getTenantCatalogVocabulary(tenantId);
+    // The live provider path receives only the tenant's compact product/brand
+    // vocabulary. Product evidence (SKU, presentation, price, stock and
+    // availability) still comes from the catalog tool and knowledge index;
+    // simulators keep their fixture hints for deterministic local tests.
     const products = config.simulator ? await this.listProducts(tenantId) : [];
     const paymentMethods = paymentMethodsForTenant(tenant);
     const text = normalized.text ?? '';
@@ -126,8 +129,8 @@ export class LLMPlanner {
         executionMode = 'codex_simulated_deepseek';
       } else {
         const apiResult = this.config?.llmTwoStageInterpretationEnabled === false
-          ? await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products, paymentMethods })
-          : await this.apiTwoStageParse({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods });
+          ? await this.apiStructuredParse({ tenantId, text, customerProfile, conversation, config, products, paymentMethods, tenantCatalogVocabulary })
+          : await this.apiTwoStageParse({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods, tenantCatalogVocabulary });
         parsed = apiResult.plan;
         providerMetadata = apiResult.providerMetadata;
         executionMode = apiResult.executionMode
@@ -218,9 +221,9 @@ export class LLMPlanner {
     return { value, providerMetadata: result.providerMetadata };
   }
 
-  async inferProducts({ tenantId, conversationId, text, contextAnalysis, customerProfile, conversation, config }) {
+  async inferProducts({ tenantId, conversationId, text, contextAnalysis, customerProfile, conversation, config, tenantCatalogVocabulary }) {
     const startedAt = performance.now();
-    const prompt = buildProductInferencePrompt({ text, contextAnalysis, customerProfile, conversation, config });
+    const prompt = buildProductInferencePrompt({ text, contextAnalysis, customerProfile, conversation, config, tenantCatalogVocabulary });
     const result = await this.callStageStructured({ config, prompt, stage: 'product_inference' });
     const value = normalizeProductInference(result.value);
     this.telemetry?.record('llm', 'product_inference', {
@@ -233,7 +236,7 @@ export class LLMPlanner {
     return { value, providerMetadata: result.providerMetadata };
   }
 
-  async apiTwoStageParse({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods }) {
+  async apiTwoStageParse({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods, tenantCatalogVocabulary }) {
     const contextResult = await this.interpretContext({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods });
     const context = contextResult.value;
     const productIntent = context.productRequestDetected === true
@@ -250,6 +253,9 @@ export class LLMPlanner {
           commercePolicy: context.commercePolicy,
           missingFields: [],
           candidateItems: [],
+          explicitHumanRequest: context.explicitHumanRequest,
+          handoffRequested: context.handoffRequested,
+          handoffReason: context.handoffReason,
           recommendedTools: ['whatsapp_business_messaging'],
           responseStrategy: context.intent === 'human_handoff' ? 'handoff' : 'guide',
           confidence: context.confidence,
@@ -258,7 +264,7 @@ export class LLMPlanner {
         executionMode: 'provider_api_context_only',
       };
     }
-    const productResult = await this.inferProducts({ tenantId, conversationId, text, contextAnalysis: context, customerProfile, conversation, config });
+    const productResult = await this.inferProducts({ tenantId, conversationId, text, contextAnalysis: context, customerProfile, conversation, config, tenantCatalogVocabulary });
     const products = productResult.value;
     const plan = normalizeProviderPlan({
       intent: context.intent === 'greeting' ? 'delivery_order' : context.intent,
@@ -275,6 +281,9 @@ export class LLMPlanner {
       candidateItems: products.items,
       missingInfo: products.missingInfo,
       missingFields: products.missingInfo,
+      explicitHumanRequest: context.explicitHumanRequest,
+      handoffRequested: context.handoffRequested,
+      handoffReason: context.handoffReason,
       recommendedTools: ['google_sheets_read_table', 'whatsapp_business_messaging'],
       responseStrategy: products.missingInfo?.length ? 'ask_clarification' : 'quote',
       confidence: Math.min(Number(context.confidence ?? 0.7), Number(products.confidence ?? 0.7)),
@@ -299,11 +308,11 @@ export class LLMPlanner {
       : callChatStructuredJson({ config: stageConfig, apiKey, prompt });
   }
 
-  async apiStructuredParse({ text, customerProfile, conversation, config, products, paymentMethods }) {
+  async apiStructuredParse({ text, customerProfile, conversation, config, products, paymentMethods, tenantCatalogVocabulary }) {
     if ((config.provider ?? 'deepseek') === 'mock') throw new Error('mock provider selected');
     const apiKey = resolveSecret(config.apiKeyRef, defaultKeyNames(config.provider));
     if (!apiKey) throw new Error(`missing API key env ${config.apiKeyRef ?? defaultKeyNames(config.provider).join('/')}`);
-    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods, config: { ...config, includeCatalogInPlannerPrompt: false } });
+    const prompt = buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods, tenantCatalogVocabulary, config: { ...config, includeCatalogInPlannerPrompt: false } });
 
     if (config.provider === 'google') return callGemini({ config, apiKey, prompt });
     return callChatCompletions({ config, apiKey, prompt });
@@ -628,6 +637,43 @@ export class LLMPlanner {
       if (tenant) return tenant;
     }
     return this.store.getState().tenants.find((item) => item.id === tenantId);
+  }
+
+  async getTenantCatalogVocabulary(tenantId) {
+    const state = this.store.getState?.() ?? {};
+    const stateIndex = state.catalogKnowledgeIndexesByTenant?.[tenantId] ?? null;
+    const cached = this.catalogVocabularyCache.get(tenantId);
+    if (stateIndex) {
+      if (cached?.catalogVersion === stateIndex.catalogVersion) return cached.value;
+      const value = buildTenantProductVocabulary(stateIndex);
+      this.catalogVocabularyCache.set(tenantId, { catalogVersion: stateIndex.catalogVersion, value });
+      return value;
+    }
+    if (cached && (Date.now() - cached.checkedAt) < 5_000) return cached.value;
+    try {
+      const index = await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
+      const value = buildTenantProductVocabulary(index);
+      this.catalogVocabularyCache.set(tenantId, { catalogVersion: index?.catalogVersion ?? null, checkedAt: Date.now(), value });
+      this.telemetry?.record('catalog', 'vocabulary', {
+        durationMs: 0,
+        status: 'ok',
+        tenantId,
+        metadata: { catalogVersion: value.catalogVersion, productBrandCount: value.products.length, source: index ? 'postgres' : 'empty' },
+      });
+      return value;
+    } catch (error) {
+      // Vocabulary is grounding evidence, not a hard dependency for the LLM.
+      // A transient Postgres read must not turn an otherwise valid message into
+      // a provider fallback or a human handoff.
+      this.catalogVocabularyCache.set(tenantId, { catalogVersion: null, checkedAt: Date.now(), value: null });
+      this.telemetry?.record('catalog', 'vocabulary', {
+        durationMs: 0,
+        status: 'error',
+        tenantId,
+        metadata: { errorCode: error.code ?? null },
+      });
+      return null;
+    }
   }
 
   async listProducts(tenantId) {
@@ -991,7 +1037,7 @@ function looksLikeNewOrder(text) {
   ]);
 }
 
-function buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods, config }) {
+function buildPlannerPrompt({ text, customerProfile, conversation, products, paymentMethods, tenantCatalogVocabulary, config }) {
   const catalog = (products ?? []).map(catalogProductContext);
   return [
     'Eres el planner estructurado de un agente comercial por WhatsApp.',
@@ -1024,6 +1070,8 @@ function buildPlannerPrompt({ text, customerProfile, conversation, products, pay
     'Si el cliente pide "5000 de X", no lo trates como 5000 unidades: usa budgetAmount 5000 y quantity null o 1 segun contexto.',
     'Si el cliente indica forma de pago, registralo como preferencia en order.paymentMethod usando solo uno de los identificadores configurados. No lo clasifiques como pago confirmado sin comprobante.',
     'Si el cliente reclama un faltante, entrega equivocada, demora, producto danado o pregunta por que llego incompleto, usa human_handoff con contexto operativo.',
+    'Usa human_handoff solo para una petición explícita de hablar con la tienda, un reclamo operativo o una restricción obligatoria. Una ambigüedad o producto no encontrado conserva la intención comercial y se resuelve con búsqueda o aclaración.',
+    ...tenantVocabularyPrompt(tenantCatalogVocabulary),
     'El identificador del cliente es wa_id; no inventes nombre ni direccion.',
     'Para pedido confirmado completo recomienda google_sheets_order_write, human_handoff y whatsapp_business_messaging.',
     JSON.stringify({
@@ -1585,6 +1633,9 @@ function normalizeProviderPlan(plan) {
     candidateItems: plan.candidateItems,
     toolPlan: plan.toolPlan,
     responseStrategy: normalizeResponseStrategy(plan.responseStrategy),
+    explicitHumanRequest: plan.explicitHumanRequest === true,
+    handoffRequested: plan.handoffRequested === true || plan.explicitHumanRequest === true,
+    handoffReason: String(plan.handoffReason ?? '').trim() || null,
     confidence: Number(plan.confidence ?? 0.7),
   }, customerUnderstanding.rawNeed ?? '');
 }
@@ -1768,32 +1819,50 @@ function normalizeCustomerDetail(value, maxLength) {
   return normalized ? normalized.slice(0, maxLength) : null;
 }
 
-function normalizeCandidateItems(value) {
+export function normalizeCandidateItems(value) {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => ({
-    ...item,
-    lineId: item.lineId ?? null,
-    rawName: item.rawName ?? item.name ?? item.productHypothesis ?? item.familyHypothesis ?? item.catalogQuery ?? item.searchQuery,
-    catalogQuery: item.catalogQuery ?? item.searchQuery ?? item.productHypothesis ?? item.familyHypothesis ?? item.rawName ?? item.name,
-    familyHypothesis: item.familyHypothesis ?? item.productFamily ?? null,
-    productHypothesis: item.productHypothesis ?? null,
-    category: item.category ?? null,
-    brand: item.brand ?? null,
-    quantity: item.quantity ?? null,
-    budgetAmount: item.budgetAmount ?? null,
-    requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
-    requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
-    inferredAttributes: item.inferredAttributes ?? {},
-    recommendationIntent: item.recommendationIntent ?? item.categoryIntent ?? null,
-    semanticQuery: item.semanticQuery ?? item.recommendationNeed ?? null,
-    recommendationNeed: item.recommendationNeed ?? item.semanticQuery ?? null,
-    uncertainties: Array.isArray(item.uncertainties) ? item.uncertainties : [],
-    confidence: item.confidence ?? null,
-    ambiguityReason: item.ambiguityReason ?? item.reason ?? null,
-    skuHint: item.skuHint ?? null,
-    skuHintSource: item.skuHintSource ?? (item.explicitSku ? 'explicit' : 'inferred'),
-    explicitSku: item.explicitSku === true,
-  })).filter((item) => item.rawName || item.catalogQuery);
+  return value.map((item) => {
+    // Keep the customer's wording as the retrieval anchor. A semantic
+    // hypothesis such as "ponque de chocolate" is evidence, not permission
+    // to replace the requested product "chocorramo" before catalog search.
+    const rawName = item.rawName
+      ?? item.rawText
+      ?? item.name
+      ?? item.searchQuery
+      ?? item.catalogQuery
+      ?? null;
+    const catalogQuery = item.catalogQuery
+      ?? item.searchQuery
+      ?? rawName
+      ?? item.familyHypothesis
+      ?? item.productFamily
+      ?? item.productHypothesis
+      ?? null;
+    return {
+      ...item,
+      lineId: item.lineId ?? null,
+      rawName: rawName ?? item.productHypothesis ?? item.familyHypothesis,
+      catalogQuery,
+      familyHypothesis: item.familyHypothesis ?? item.productFamily ?? null,
+      productHypothesis: item.productHypothesis ?? null,
+      category: item.category ?? null,
+      brand: item.brand ?? null,
+      quantity: item.quantity ?? null,
+      budgetAmount: item.budgetAmount ?? null,
+      requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
+      requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
+      inferredAttributes: item.inferredAttributes ?? {},
+      recommendationIntent: item.recommendationIntent ?? item.categoryIntent ?? null,
+      semanticQuery: item.semanticQuery ?? item.recommendationNeed ?? null,
+      recommendationNeed: item.recommendationNeed ?? item.semanticQuery ?? null,
+      uncertainties: Array.isArray(item.uncertainties) ? item.uncertainties : [],
+      confidence: item.confidence ?? null,
+      ambiguityReason: item.ambiguityReason ?? item.reason ?? null,
+      skuHint: item.skuHint ?? null,
+      skuHintSource: item.skuHintSource ?? (item.explicitSku ? 'explicit' : 'inferred'),
+      explicitSku: item.explicitSku === true,
+    };
+  }).filter((item) => item.rawName || item.catalogQuery);
 }
 
 function normalizeProviderIntent(intent) {
@@ -2006,6 +2075,9 @@ function normalizeContextAnalysis(value = {}) {
     respondsToPendingQuestion: value.respondsToPendingQuestion === true,
     addsToExistingCart: value.addsToExistingCart === true,
     modifiesExistingCart: value.modifiesExistingCart === true,
+    explicitHumanRequest: value.explicitHumanRequest === true,
+    handoffRequested: value.handoffRequested === true || value.explicitHumanRequest === true,
+    handoffReason: String(value.handoffReason ?? '').trim() || null,
     customerDetails: normalizeCustomerDetails(value.customerDetails),
     pendingAction: value.pendingAction ?? null,
     customerUnderstanding: normalizeCustomerUnderstanding(value.customerUnderstanding),

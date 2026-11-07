@@ -113,6 +113,7 @@ export class ToolRegistry {
   async googleSheetsReadTable(tenantId, payload) {
     const startedAt = performance.now();
     await sleep(30);
+    const manualCatalogRead = payload?.purpose === 'manual_order_catalog';
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const readSource = catalogReadSource(this.config, tenant);
@@ -176,7 +177,12 @@ export class ToolRegistry {
         semanticQuery: payload.semanticQuery ?? '',
         recommendation: payload.recommendation === true,
         filters: payload.filters ?? {},
-        limit: Math.max(Number(payload.limit ?? 25), 25),
+        // Manual order workspaces need the complete tenant catalog because
+        // the UI performs its own query filtering. Conversational searches
+        // remain bounded so they return only relevant candidates.
+        limit: manualCatalogRead
+          ? Math.max(rows.length, 1)
+          : Math.max(Number(payload.limit ?? 25), 25),
       })
       : null;
     const matchingRows = (indexed
@@ -213,6 +219,11 @@ export class ToolRegistry {
         directCandidateCount: indexed?.retrieval?.directCandidateCount ?? 0,
         graphCandidateCount: indexed?.retrieval?.graphCandidateCount ?? 0,
         semanticCandidateCount: indexed?.retrieval?.semanticCandidateCount ?? 0,
+        manualCatalogRead,
+        returnedRowCount: acceptedRows.length,
+        truncated: !manualCatalogRead && indexed
+          ? (indexed.retrieval?.candidateCount ?? indexed.rows.length) > indexed.rows.length
+          : false,
       },
     });
     return {

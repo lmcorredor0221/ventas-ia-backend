@@ -25,7 +25,11 @@ export class ManualOrderService {
   }
 
   async catalog(tenantId) {
-    const result = await this.tools.googleSheetsReadTable(tenantId, { filters: {}, cache_policy: 'short_ttl' });
+    const result = await this.tools.googleSheetsReadTable(tenantId, {
+      filters: {},
+      cache_policy: 'short_ttl',
+      purpose: 'manual_order_catalog',
+    });
     if (result.status !== 'success') throw fail('No se pudo leer el catálogo de esta tienda. Revisa la conexión de Google y vuelve a intentar.', 'manual_order_catalog_unavailable', 503);
     return (result.rows ?? []).filter(row => !catalogCommerceCategory(row)).map(row => ({
       sku: String(row.sku), name: row.name, presentation: row.presentation ?? '', description: row.description ?? '',

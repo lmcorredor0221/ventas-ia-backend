@@ -204,7 +204,17 @@ export class AgentRuntime {
     }
 
     const currentConversation = await this.getConversation(conversationId);
-    const plan = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile, conversation: currentConversation });
+    const planned = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile, conversation: currentConversation });
+    const plan = suppressImplicitProductHandoff(planned, currentConversation);
+    if (plan !== planned) {
+      this.events.emit({
+        type: 'llm.handoff.suppressed',
+        tenantId,
+        conversationId,
+        detail: 'La dificultad de catálogo se mantuvo en el flujo comercial para buscar o aclarar.',
+        metadata: { originalIntent: planned.intent, newIntent: plan.intent, traceId: normalized.traceId },
+      });
+    }
     await this.patchConversation(conversationId, {
       reasoningPlan: plan,
       aiExecution: {
@@ -1867,6 +1877,36 @@ export class AgentRuntime {
     await this.markProcessed(messageId, payload);
     return true;
   }
+}
+
+function suppressImplicitProductHandoff(plan, conversation) {
+  if (!plan || plan.intent !== 'human_handoff') return plan;
+  if (plan.executionMode === 'provider_unavailable_handoff') return plan;
+  if (plan.explicitHumanRequest === true || plan.handoffRequested === true) return plan;
+  const hasProductContext = Boolean(
+    plan.productRequestDetected === true
+      || plan.order?.delivery
+      || plan.order?.items?.length
+      || plan.candidateItems?.length
+      || conversation?.orderDraft?.items?.length,
+  );
+  if (!hasProductContext) return plan;
+  const nextIntent = plan.order?.delivery || plan.order?.items?.length
+    ? 'delivery_order'
+    : 'catalog_query';
+  return {
+    ...plan,
+    intent: nextIntent,
+    responseStrategy: 'ask_clarification',
+    explicitHumanRequest: false,
+    handoffRequested: false,
+    handoffSuppressed: true,
+    recommendedTools: [...new Set([
+      ...(plan.recommendedTools ?? []),
+      'google_sheets_read_table',
+      'whatsapp_business_messaging',
+    ])].filter((tool) => tool !== 'human_handoff'),
+  };
 }
 
 function isCancellationRequest(text) {
