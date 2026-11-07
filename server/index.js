@@ -28,6 +28,7 @@ import { resolveCorsOrigins, validateRuntimeConfig } from './configValidation.js
 import { IntegrationOutbox } from './services/integrationOutbox.js';
 import { RuntimeTelemetry } from './services/runtimeTelemetry.js';
 import { createOrderSummaryNotification } from './services/orderSummaryNotification.js';
+import { CatalogSyncWorker } from './services/catalogSyncWorker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -74,6 +75,7 @@ function createExpressRuntime({ config, store }) {
   const secretVault = new SecretVault({ store });
   const googleWorkspace = new GoogleWorkspaceService({ config });
   const tools = new ToolRegistry({ store, events, usage, config, googleWorkspace, secretVault, telemetry });
+  const catalogSyncWorker = new CatalogSyncWorker({ store, tools, config, events, telemetry });
   let runtime;
   const integrationOutbox = new IntegrationOutbox({
     store,
@@ -150,6 +152,7 @@ function createExpressRuntime({ config, store }) {
   if (config.backgroundWorkersEnabled) {
     runtime.start();
     integrationOutbox.start();
+    catalogSyncWorker.start();
   }
   const controlPlane = new SaasControlPlane({ store, events, config, googleWorkspace, secretVault });
   const auth = new AuthService({ store, events, config });
@@ -200,7 +203,7 @@ function createExpressRuntime({ config, store }) {
   });
   app.use('/api/auth', createAuthRouter({ auth }));
   app.use('/api/billing', createBillingRouter({ controlPlane, auth }));
-  app.use('/api/saas', createSaasRouter({ controlPlane, auth }));
+  app.use('/api/saas', createSaasRouter({ controlPlane, auth, catalogSyncWorker }));
   app.use('/api/admin', createAdminRouter({ store, usage, auth, controlPlane }));
   app.use('/api', createApiRouter({ store, events, runtime, tools, orders, manualOrders, controlPlane, usage, auth, telemetry }));
   app.use('/webhooks', createWhatsAppRouter({ store, runtime, controlPlane, config, telemetry }));
@@ -223,7 +226,7 @@ function createExpressRuntime({ config, store }) {
     });
   });
 
-  return { app, store, events, tools, orders, planner, runtime, integrationOutbox, controlPlane, usage, auth, config, googleWorkspace, secretVault };
+  return { app, store, events, tools, orders, planner, runtime, integrationOutbox, catalogSyncWorker, controlPlane, usage, auth, config, googleWorkspace, secretVault };
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
@@ -239,6 +242,7 @@ if (entryPath === modulePath) {
     console.log(`Shutting down after ${signal}`);
     runtime.runtime.stop();
     await runtime.integrationOutbox.stop();
+    await runtime.catalogSyncWorker.stop();
     await runtime.store.close?.();
     process.exit(0);
   };

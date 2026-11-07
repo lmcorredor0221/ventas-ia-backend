@@ -12,6 +12,11 @@ export const RUNTIME_CONFIG = {
   // Local JSON fixtures keep the desktop simulator usable; production must use live Google data.
   allowLocalCatalogFallback: process.env.ALLOW_LOCAL_CATALOG_FALLBACK === 'true'
     || (process.env.NODE_ENV !== 'production' && (process.env.STORAGE_DRIVER ?? 'json') === 'json'),
+  // Keep Google as the safe default. PostgreSQL becomes operational only after
+  // a tenant has a published catalog version and has passed shadow validation.
+  catalogReadSource: process.env.CATALOG_READ_SOURCE ?? 'google',
+  catalogSyncWorkerEnabled: process.env.CATALOG_SYNC_WORKER_ENABLED === 'true',
+  catalogSyncIntervalMs: Number(process.env.CATALOG_SYNC_INTERVAL_MS ?? 300000),
   defaultTenantId: process.env.DEFAULT_TENANT_ID ?? 'andina',
   timezone: process.env.AGENT_TIMEZONE ?? 'America/Bogota',
   // Keep the default aligned with the webhook version configured in Meta.

@@ -6,6 +6,7 @@ import { assertCommerceOrderAllowed, catalogCommerceCategory } from '../domain/w
 import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '../domain/orderStatus.js';
 import { findOpenPendingRequest } from './pendingRequestPolicy.js';
 import { CatalogSearchService } from './catalogSearchService.js';
+import { catalogReadSource, effectiveCatalogRange } from '../domain/catalogSource.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
@@ -110,24 +111,58 @@ export class ToolRegistry {
   }
 
   async googleSheetsReadTable(tenantId, payload) {
+    const startedAt = performance.now();
     await sleep(30);
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
-    const live = await this.liveGoogleContext(tenantId);
-    if (!live && !this.config.allowLocalCatalogFallback) {
+    const readSource = catalogReadSource(this.config, tenant);
+    const effectiveRange = effectiveCatalogRange(tenant);
+    const live = readSource === 'postgres' ? null : await this.liveGoogleContext(tenantId);
+    if (readSource !== 'postgres' && !live && !this.config.allowLocalCatalogFallback) {
       return googleConnectionRequiredResult('No se pudo consultar el catalogo de Google de esta tienda.');
     }
-    const rows = live
-      ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: payload.range ?? tenant?.config?.googleSheets?.catalogRange })
-      : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
-    const index = this.config.catalogKnowledgeIndexEnabled === false
-      ? null
-      : await this.catalogSearch?.sync({
+    let rows;
+    let index = null;
+    let source = live ? 'google_sheets_live' : 'local_test_fixture';
+    if (readSource === 'postgres') {
+      index = await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
+      if (index?.products) {
+        this.catalogSearch?.hydrate(index);
+        rows = Object.values(index.products).map((product) => ({
+          ...product,
+          productFamily: product.productFamily ?? product.family ?? '',
+        }));
+      } else {
+        rows = [];
+      }
+      source = 'postgres_catalog';
+      if (!rows.length) {
+        return {
+          status: 'sync_required',
+          code: 'catalog_sync_required',
+          rows: [],
+          restrictedItems: [],
+          source,
+          source_revision: null,
+          catalog_version: null,
+          source_range: effectiveRange,
+          source_row_count: 0,
+          message: 'Esta tienda aún no tiene una versión publicada del catálogo.',
+        };
+      }
+    } else {
+      rows = live
+        ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: effectiveRange })
+        : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
+    }
+    if (!index && this.config.catalogKnowledgeIndexEnabled !== false) {
+      index = await this.catalogSearch?.sync({
         tenantId,
         rows,
         sourceRef: live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'local_catalog',
-        range: payload.range ?? tenant?.config?.googleSheets?.catalogRange ?? null,
+        range: effectiveRange,
       });
+    }
     const indexed = index && this.config.catalogKnowledgeIndexEnabled !== false
       ? this.catalogSearch?.search(tenantId, {
         // The planner may provide a category/attribute filter together with
@@ -159,14 +194,33 @@ export class ToolRegistry {
           : row;
       })
       : filterRows(rows, payload.filters));
+    const acceptedRows = matchingRows.filter(row => !catalogCommerceCategory(row));
+    this.telemetry?.record('catalog', 'read', {
+      durationMs: performance.now() - startedAt,
+      status: rows.length ? 'ok' : 'empty',
+      tenantId,
+      metadata: {
+        source,
+        sourceRange: effectiveRange,
+        sourceRowCount: rows.length,
+        matchedRowCount: acceptedRows.length,
+        restrictedRowCount: matchingRows.length - acceptedRows.length,
+        catalogVersion: index?.catalogVersion ?? null,
+        directCandidateCount: indexed?.retrieval?.directCandidateCount ?? 0,
+        graphCandidateCount: indexed?.retrieval?.graphCandidateCount ?? 0,
+        semanticCandidateCount: indexed?.retrieval?.semanticCandidateCount ?? 0,
+      },
+    });
     return {
       status: rows.length ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'catalogOrigin', 'driveFileId'],
-      rows: matchingRows.filter(row => !catalogCommerceCategory(row)),
+      rows: acceptedRows,
       restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
-      source: live ? 'google_sheets_live' : 'local_test_fixture',
+      source,
       source_revision: index?.catalogVersion ?? `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:unindexed`,
       catalog_version: index?.catalogVersion ?? null,
+      source_range: effectiveRange,
+      source_row_count: rows.length,
       catalog_index: index
         ? { status: index.status, node_count: index.nodeCount, relation_count: index.relationCount, vector_count: index.vectorCount, provider: index.vectorProvider }
         : { status: 'unavailable' },
@@ -362,8 +416,8 @@ export class ToolRegistry {
     return promise;
   }
 
-  async readLiveCatalogRows({ tenantId, tenant, live, range }) {
-    const sheetRange = enrichedCatalogRange(range);
+  async readLiveCatalogRows({ tenantId, tenant, live, range, persist = true }) {
+    const sheetRange = enrichedCatalogRange(range ?? effectiveCatalogRange(tenant));
     const revision = this.store.getState().catalogImportsByTenant?.[tenantId]?.importedAt ?? '';
     const key = `${tenantId}:${live.spreadsheetId}:${sheetRange}:${revision}`;
     const now = Date.now();
@@ -395,7 +449,7 @@ export class ToolRegistry {
           'fileId',
         );
       }, { snapshot: false, domain: 'catalog', operation: 'refresh_live_projection' });
-      await this.store.persistCatalogProjection?.(tenantId, rows, driveFiles);
+      if (persist) await this.store.persistCatalogProjection?.(tenantId, rows, driveFiles);
       this.liveCatalogCache.set(key, {
         rows,
         expiresAt: Date.now() + LIVE_CATALOG_CACHE_TTL_MS,

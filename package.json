@@ -34,7 +34,7 @@
     "test:whatsapp-postgres": "node server/tests/whatsapp-postgres-ownership.mjs",
     "test:whatsapp-postgres-locks": "node server/tests/whatsapp-postgres-lock-order.mjs",
     "test:google-recovery": "node server/tests/google-recovery-contract.mjs",
-    "test:catalog": "node server/tests/catalog-import.mjs && node server/tests/catalog-enriched-contract.mjs && node server/tests/catalog-enriched-runtime.mjs && node server/tests/catalog-retrieval-contract.mjs && node server/tests/catalog-knowledge-index.mjs && node server/tests/catalog-ambiguity-regression.mjs && node server/tests/catalog-selection-reconciliation.mjs",
+    "test:catalog": "node server/tests/catalog-import.mjs && node server/tests/catalog-enriched-contract.mjs && node server/tests/catalog-enriched-runtime.mjs && node server/tests/catalog-retrieval-contract.mjs && node server/tests/catalog-knowledge-index.mjs && node server/tests/catalog-postgres-source.mjs && node server/tests/catalog-sync-worker.mjs && node server/tests/catalog-ambiguity-regression.mjs && node server/tests/catalog-selection-reconciliation.mjs",
     "test:whatsapp-bsuid": "node server/tests/whatsapp-bsuid-contract.mjs",
     "test:checkout": "node server/tests/checkout-sequence.mjs && node server/tests/checkout-interpretation.mjs",
     "test:telemetry": "node server/tests/runtime-telemetry.mjs"

@@ -12,7 +12,13 @@ export class CatalogSearchService {
     return this.indexes.get(tenantId) ?? this.store?.getState?.().catalogKnowledgeIndexesByTenant?.[tenantId] ?? null;
   }
 
-  async sync({ tenantId, rows, sourceRef, range }) {
+  hydrate(index) {
+    if (!index?.tenantId || !index?.products) return null;
+    this.indexes.set(index.tenantId, index);
+    return index;
+  }
+
+  async sync({ tenantId, rows, sourceRef, range, persist = true }) {
     const startedAt = performance.now();
     const previous = this.getIndex(tenantId);
     this.events?.emit({ type: 'catalog.sync.started', tenantId, detail: 'Catalog knowledge index sync started', metadata: { previousVersion: previous?.catalogVersion ?? null, sourceRef, range } });
@@ -38,7 +44,7 @@ export class CatalogSearchService {
         durationMs: Number((performance.now() - startedAt).toFixed(2)),
       };
     });
-    await this.store?.persistCatalogKnowledgeIndex?.(index);
+    if (persist) await this.store?.persistCatalogKnowledgeIndex?.(index);
     this.events?.emit({ type: 'catalog.sync.source_read', tenantId, detail: 'Catalog source normalized', metadata: { catalogVersion: index.catalogVersion, rowCount: index.rowCount } });
     this.events?.emit({ type: 'catalog.sync.normalized', tenantId, detail: 'Catalog nodes normalized', metadata: { catalogVersion: index.catalogVersion, nodeCount: index.nodeCount } });
     this.events?.emit({ type: 'catalog.sync.graph_updated', tenantId, detail: 'Catalog relations updated', metadata: { catalogVersion: index.catalogVersion, relationCount: index.relationCount } });

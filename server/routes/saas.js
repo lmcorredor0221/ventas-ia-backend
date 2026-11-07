@@ -1,6 +1,6 @@
 import express from 'express';
 
-export function createSaasRouter({ controlPlane, auth }) {
+export function createSaasRouter({ controlPlane, auth, catalogSyncWorker }) {
   const router = express.Router();
 
   router.post('/tenants', (req, res, next) => {
@@ -193,6 +193,22 @@ export function createSaasRouter({ controlPlane, auth }) {
       const result = await controlPlane.importCatalogCsv(req.params.tenantId, req.body?.csvText ?? '', { actor: req.auth?.user });
       auth.recordTenantAction(req, { tenantId: req.params.tenantId, action: 'google.catalog.imported', resource: 'google_catalog' });
       res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tenants/:tenantId/google/catalog/sync', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner'] });
+      if (!catalogSyncWorker) {
+        const error = new Error('La sincronización operativa del catálogo no está disponible.');
+        error.statusCode = 503;
+        error.code = 'catalog_sync_unavailable';
+        throw error;
+      }
+      const result = await catalogSyncWorker.syncTenant(req.params.tenantId, 'manual');
+      res.status(result.status === 'failed' ? 502 : 200).json(result);
     } catch (error) {
       next(error);
     }

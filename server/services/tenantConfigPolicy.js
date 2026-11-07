@@ -18,6 +18,7 @@ const ADMIN_EDITABLE_SECTIONS = new Map([
   ['llm', new Set(['provider', 'model', 'mode', 'simulator', 'apiKeyRef', 'baseUrlRef', 'temperature', 'maxTokens', 'timeoutMs', 'responseLanguage', 'allowedTasks', 'deprecated'])],
   ['agentPolicy', new Set(['displayName', 'tone', 'responseLanguage', 'missingQuantity', 'humanEscalation', 'allowedTasks'])],
   ['orderPolicy', new Set(['customerIdentifier', 'customerRequiredFields', 'missingQuantity', 'customerProfileStore', 'confirmedOrderStore', 'confirmedOrderHandoff', 'paymentMethods'])],
+  ['catalog', new Set(['readSource'])],
   ['secretsPolicy', null],
 ]);
 

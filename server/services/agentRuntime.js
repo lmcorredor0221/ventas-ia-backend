@@ -522,7 +522,6 @@ export class AgentRuntime {
     if (catalogSearches.length > 1) {
       const matches = await Promise.all(catalogSearches.map(async (search) => {
         const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-          range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
           query: search.query,
           semanticQuery: search.semanticQuery,
           recommendation: search.recommendation === true,
@@ -568,7 +567,6 @@ export class AgentRuntime {
     const search = catalogSearches[0] ?? { query: text, filters: inferCatalogFilter(text) };
     const query = search.query;
     const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-      range: (await this.getTenant(tenantId))?.config?.googleSheets?.range,
       query,
       semanticQuery: search.semanticQuery,
       recommendation: search.recommendation === true,
@@ -636,7 +634,6 @@ export class AgentRuntime {
     const currentConversation = await this.getConversation(conversationId);
     const orderItemsFromCatalog = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-        range: tenant?.config?.googleSheets?.range,
         filters: deliveryItemFiltersFromPlan(plan, item, index, normalized.text),
         cache_policy: 'short_ttl',
       });

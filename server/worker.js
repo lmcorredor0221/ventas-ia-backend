@@ -8,6 +8,7 @@ const shutdown = async (signal) => {
   console.log(`Worker shutting down after ${signal}`);
   runtime.runtime.stop();
   await runtime.integrationOutbox.stop();
+  await runtime.catalogSyncWorker.stop();
   await runtime.store.close?.();
   process.exit(0);
 };

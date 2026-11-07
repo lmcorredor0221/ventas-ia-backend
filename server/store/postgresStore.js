@@ -206,6 +206,18 @@ export class PostgresStore {
     return result.rows.map((row) => row.payload);
   }
 
+  async getPublishedCatalogKnowledgeIndex(tenantId) {
+    const result = await this.pool.query(
+      `SELECT document
+         FROM catalog_knowledge_indexes
+        WHERE tenant_id = $1 AND status = 'published'
+        ORDER BY published_at DESC NULLS LAST, created_at DESC
+        LIMIT 1`,
+      [tenantId],
+    );
+    return result.rows[0]?.document ?? null;
+  }
+
   async persistCatalogKnowledgeIndex(index) {
     if (!index?.tenantId || !index?.catalogVersion) return;
     return this.queueWrite(async () => {
@@ -267,8 +279,21 @@ export class PostgresStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
-        await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
+        if (!this.incrementalPersistenceEnabled) {
+          await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
+          await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
+        } else if (products.length > 0) {
+          const skus = products.map((product) => String(product.sku));
+          await client.query(
+            'DELETE FROM products WHERE tenant_id = $1 AND NOT (sku = ANY($2::text[]))',
+            [tenantId, skus],
+          );
+          const fileIds = driveFiles.map((file) => String(file.fileId));
+          await client.query(
+            'DELETE FROM drive_files WHERE tenant_id = $1 AND NOT (file_id = ANY($2::text[]))',
+            [tenantId, fileIds],
+          );
+        }
         for (const product of products) await upsertProduct(client, tenantId, product);
         for (const file of driveFiles) await upsertDriveFile(client, tenantId, file);
         await client.query('COMMIT');
@@ -279,6 +304,86 @@ export class PostgresStore {
         client.release();
       }
     }, 'catalog projection write');
+  }
+
+  persistCatalogSnapshot({ tenantId, products = [], driveFiles = [], index } = {}) {
+    if (!tenantId || !index?.catalogVersion) return Promise.resolve({ status: 'skipped', reason: 'missing_snapshot' });
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        if (!this.incrementalPersistenceEnabled) {
+          await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
+          await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
+        } else {
+          const skus = products.map((product) => String(product.sku));
+          const fileIds = driveFiles.map((file) => String(file.fileId));
+          if (skus.length) {
+            await client.query(
+              'DELETE FROM products WHERE tenant_id = $1 AND NOT (sku = ANY($2::text[]))',
+              [tenantId, skus],
+            );
+          } else {
+            await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
+          }
+          if (fileIds.length) {
+            await client.query(
+              'DELETE FROM drive_files WHERE tenant_id = $1 AND NOT (file_id = ANY($2::text[]))',
+              [tenantId, fileIds],
+            );
+          } else {
+            await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
+          }
+        }
+        for (const product of products) await upsertProduct(client, tenantId, product);
+        for (const file of driveFiles) await upsertDriveFile(client, tenantId, file);
+        await client.query(
+          `UPDATE catalog_knowledge_indexes
+              SET status = 'superseded'
+            WHERE tenant_id = $1 AND status = 'published' AND catalog_version <> $2`,
+          [tenantId, index.catalogVersion],
+        );
+        await client.query(
+          `INSERT INTO catalog_knowledge_indexes
+            (tenant_id, catalog_version, source_hash, source_ref, source_range, status,
+             row_count, node_count, relation_count, vector_count, vector_provider,
+             document, created_at, published_at)
+           VALUES ($1, $2, $3, $4, $5, 'published', $6, $7, $8, $9, $10, $11::jsonb, now(), now())
+           ON CONFLICT (tenant_id, catalog_version) DO UPDATE SET
+             status = 'published',
+             source_hash = EXCLUDED.source_hash,
+             source_ref = EXCLUDED.source_ref,
+             source_range = EXCLUDED.source_range,
+             row_count = EXCLUDED.row_count,
+             node_count = EXCLUDED.node_count,
+             relation_count = EXCLUDED.relation_count,
+             vector_count = EXCLUDED.vector_count,
+             vector_provider = EXCLUDED.vector_provider,
+             document = EXCLUDED.document,
+             published_at = EXCLUDED.published_at`,
+          [
+            tenantId,
+            index.catalogVersion,
+            index.sourceHash,
+            index.sourceRef,
+            index.range,
+            index.rowCount ?? 0,
+            index.nodeCount ?? 0,
+            index.relationCount ?? 0,
+            index.vectorCount ?? 0,
+            index.vectorProvider ?? null,
+            JSON.stringify(index),
+          ],
+        );
+        await client.query('COMMIT');
+        return { status: 'published', tenantId, catalogVersion: index.catalogVersion };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, 'catalog snapshot publish');
   }
 
   async listDriveFiles(tenantId) {
