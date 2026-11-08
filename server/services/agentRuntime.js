@@ -1725,7 +1725,7 @@ export class AgentRuntime {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const options = [
       { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order', value: basket ?? basketKey((await this.getConversation(conversationId))?.orderDraft) },
-      { id: `vi:${offerId}:2`, title: 'Modificar pedido', action: 'adjust_order' },
+      { id: `vi:${offerId}:2`, title: 'Ajustar pedido', action: 'adjust_order' },
       { id: `vi:${offerId}:3`, title: 'Hablar con la tienda', action: 'human_handoff' },
     ];
     const offer = await this.store.createInteractionOffer({
@@ -1785,28 +1785,12 @@ export class AgentRuntime {
           ? { ...item, product: selectedProduct, selectionStatus: 'selected', selectionQuestion: null, lineTotal: quotedLineTotal({ ...item, product: selectedProduct }), available: selectedProduct.stock >= (item.quantity ?? 1) }
           : item),
       };
-      // A catalog choice resolves a question that VIA itself asked. When it
-      // resolves the last pending choice, the basket is ready for its normal
-      // checkout transition; this is workflow state, not a new inference
-      // about whether the buyer wants to add another product.
-      const allCatalogSelectionsResolved = updatedDraft.items.every((item) => (
-        item.product && item.selectionStatus !== 'pending'
-      ));
       const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
         wa_id: normalized.waId, profile_name: normalized.profileName,
       });
       return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
         preserveExistingCatalogSelections: true,
-        // Resolving the last alternative advances the current basket to the
-        // next checkout step. A later free-text message can still add or adjust it.
-        plan: {
-          intent: 'order_clarification',
-          order: {
-            ...updatedDraft,
-            collectionComplete: allCatalogSelectionsResolved,
-          },
-          missingFields: updatedDraft.missingFields ?? [],
-        } });
+        plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] } });
     }
     if (['continue_checkout', 'confirm_order'].includes(result.option?.action)
       && result.option.value !== basketKey(current?.orderDraft)) {
@@ -2446,10 +2430,7 @@ function isAcceptableOrderProduct(product, item = {}) {
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
   const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   if (item.requestedPresentation && !productMatchesRequestedPresentation(product, item.requestedPresentation)) return false;
-  // The interpreter's attributes guide semantic/graph retrieval. They are not
-  // literal database predicates: a buyer can say "litro y medio" while the
-  // catalog truth says "1.5 L". Presentation compatibility and product
-  // identity are evaluated independently below.
+  if (item.requestedAttributes && !matchesRequestedCatalogAttributes(product, item.requestedAttributes)) return false;
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
   if (containsAny(query, ['salchichon', 'salchicha']) && !containsAny(productText, ['salchicha', 'salchichon', 'carnes frias'])) return false;
@@ -2501,6 +2482,25 @@ function requestedProductIdentityTokens(item = {}) {
       'manda', 'mandame', 'necesito', 'una', 'uno', 'unos', 'unas', 'con', 'por',
       'favor', 'del', 'que', 'tiene', 'hay', 'me', 'de', 'la', 'el', 'los', 'las',
     ].includes(token)))];
+}
+
+function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
+  if (!requestedAttributes || typeof requestedAttributes !== 'object') return true;
+  const actual = normalizeText([
+    product.brand,
+    product.category,
+    product.presentation,
+    product.productFamily,
+    product.description,
+    ...(product.aliases ?? []),
+    ...(product.tags ?? []),
+    typeof product.attributes === 'object' ? JSON.stringify(product.attributes) : product.attributes,
+  ].filter(Boolean).join(' '));
+  return Object.entries(requestedAttributes).every(([key, value]) => {
+    if (value === null || value === undefined || value === '') return true;
+    const expected = normalizeText(`${key} ${value}`);
+    return actual.includes(normalizeText(value)) || actual.includes(expected);
+  });
 }
 
 function buildCatalogReply({ selected, alternatives, drive, delivery, query, categoryQuery = false }) {

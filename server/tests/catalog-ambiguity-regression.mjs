@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAppAsync } from '../index.js';
-import { normalizeCandidateItems } from '../services/llmPlanner.js';
 
 // Regression contract: a planner SKU hint inferred from a generic alias must
 // not suppress compatible alternatives. Explicit presentation constraints are
@@ -30,18 +29,6 @@ const products = [
   { sku: 'CHOCORAMO-65', name: 'Ponqué Chocorramo', brand: 'Ramo', presentation: '65 g', description: 'Ponqué cubierto de chocolate', price: 2800, stock: 12, category: 'Panadería', aliases: ['chocorramo', 'chocorramo grande'] },
   { sku: 'CHOCORAMO-35', name: 'Chocorramo mini', brand: 'Ramo', presentation: '35 g', description: 'Ponqué pequeño cubierto de chocolate', price: 1600, stock: 12, category: 'Snacks', aliases: ['chocorramo pequeño', 'chocorramo mini'] },
 ];
-
-assert.deepEqual(
-  normalizeCandidateItems([{
-    rawText: 'Coca-Cola litro y medio',
-    explicitAttributes: [
-      { attribute: 'presentación', value: 'litro y medio', source: 'explicit' },
-      'marca: Coca-Cola',
-    ],
-  }])[0].requestedAttributes,
-  { presentación: 'litro y medio', marca: 'Coca-Cola' },
-  'Debe normalizar el contrato estructurado de atributos de DeepSeek para usarlo como evidencia de recuperación',
-);
 
 store.mutate((state) => {
   state.productsByTenant.andina = structuredClone(products);
@@ -70,10 +57,6 @@ try {
             // must treat it as semantic evidence, not as a literal database
             // predicate that removes the 1.5 L alternatives.
             requestedPresentation: 'litro y medio',
-            // This is the exact structured shape returned by DeepSeek. It is
-            // evidence for retrieval, never a literal eligibility predicate:
-            // catalog rows use "1.5 L", not the buyer's wording.
-            requestedAttributes: [{ attribute: 'presentación', value: 'litro y medio', source: 'explicit' }],
             quantity: 1,
             skuHint: 'COKE-400',
             skuHintSource: 'inferred',
@@ -82,7 +65,6 @@ try {
             lineId: 'chocorramo-1',
             rawName: 'chocorramo',
             catalogQuery: 'chocorramo',
-            requestedAttributes: [{ attribute: 'tipo', value: 'chocorramo', source: 'explicit' }],
             quantity: 1,
             skuHint: 'CHOCORAMO-65',
             skuHintSource: 'inferred',

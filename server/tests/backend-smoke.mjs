@@ -396,7 +396,7 @@ try {
   assert.ok(confirmationOffer, 'Al completar la cotización debe aparecer una confirmación interactiva');
   assert.deepEqual(confirmationOffer.options.map((option) => ({ action: option.action, title: option.title })), [
     { action: 'confirm_order', title: 'Confirmar pedido' },
-    { action: 'adjust_order', title: 'Modificar pedido' },
+    { action: 'adjust_order', title: 'Ajustar pedido' },
     { action: 'human_handoff', title: 'Hablar con la tienda' },
   ]);
 

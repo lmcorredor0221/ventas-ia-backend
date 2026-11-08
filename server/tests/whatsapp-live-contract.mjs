@@ -27,7 +27,7 @@ global.fetch = async (url, options = {}) => {
     assert.equal(body.interactive.body.text, '¿Confirmas el pedido?');
     assert.deepEqual(body.interactive.action.buttons.map((button) => button.reply), [
       { id: 'vi:confirmation:1', title: 'Confirmar pedido' },
-      { id: 'vi:confirmation:2', title: 'Modificar pedido' },
+      { id: 'vi:confirmation:2', title: 'Ajustar pedido' },
       { id: 'vi:confirmation:3', title: 'Hablar con la tienda' },
     ]);
   }
@@ -68,7 +68,7 @@ try {
       body: '¿Confirmas el pedido?',
       buttons: [
         { id: 'vi:confirmation:1', title: 'Confirmar pedido' },
-        { id: 'vi:confirmation:2', title: 'Modificar pedido' },
+        { id: 'vi:confirmation:2', title: 'Ajustar pedido' },
         { id: 'vi:confirmation:3', title: 'Hablar con la tienda' },
       ],
     },

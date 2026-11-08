@@ -188,13 +188,12 @@ try {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-function compactDraft(draft) {
-  const safeDraft = draft ?? {};
+function compactDraft(draft = {}) {
   return {
-    subtotal: safeDraft.subtotal ?? null,
-    missingFields: safeDraft.missingFields ?? [],
-    paymentMethod: safeDraft.paymentMethod ?? null,
-    items: (safeDraft.items ?? []).map((item) => ({
+    subtotal: draft.subtotal ?? null,
+    missingFields: draft.missingFields ?? [],
+    paymentMethod: draft.paymentMethod ?? null,
+    items: (draft.items ?? []).map((item) => ({
       lineId: item.lineId,
       rawName: item.rawName,
       catalogQuery: item.catalogQuery,

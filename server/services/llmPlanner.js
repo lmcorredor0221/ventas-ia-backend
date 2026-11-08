@@ -1854,11 +1854,8 @@ export function normalizeCandidateItems(value) {
       quantity: item.quantity ?? null,
       budgetAmount: item.budgetAmount ?? null,
       requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
-      // The provider schema represents attributes as [{ attribute, value,
-      // source }]. Normalize only their transport shape: the values remain
-      // soft semantic evidence for catalog retrieval, never hard predicates.
-      requestedAttributes: normalizeCatalogAttributes(item.requestedAttributes ?? item.explicitAttributes),
-      inferredAttributes: normalizeCatalogAttributes(item.inferredAttributes) ?? {},
+      requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
+      inferredAttributes: item.inferredAttributes ?? {},
       recommendationIntent: item.recommendationIntent ?? item.categoryIntent ?? null,
       semanticQuery: item.semanticQuery ?? item.recommendationNeed ?? null,
       recommendationNeed: item.recommendationNeed ?? item.semanticQuery ?? null,
@@ -1870,28 +1867,6 @@ export function normalizeCandidateItems(value) {
       explicitSku: item.explicitSku === true,
     };
   }).filter((item) => item.rawName || item.catalogQuery);
-}
-
-function normalizeCatalogAttributes(value) {
-  if (Array.isArray(value)) {
-    const normalized = {};
-    for (const entry of value) {
-      const parsed = typeof entry === 'string'
-        ? entry.match(/^\s*([^:]+?)\s*:\s*(.+?)\s*$/)
-        : null;
-      const key = typeof entry === 'object' && entry !== null
-        ? String(entry.attribute ?? entry.key ?? '').trim()
-        : String(parsed?.[1] ?? '').trim();
-      const attributeValue = typeof entry === 'object' && entry !== null
-        ? entry.value
-        : parsed?.[2];
-      if (!key || attributeValue === null || attributeValue === undefined || attributeValue === '') continue;
-      normalized[key] = attributeValue;
-    }
-    return Object.keys(normalized).length ? normalized : null;
-  }
-  if (!value || typeof value !== 'object') return null;
-  return value;
 }
 
 function normalizeProviderIntent(intent) {
