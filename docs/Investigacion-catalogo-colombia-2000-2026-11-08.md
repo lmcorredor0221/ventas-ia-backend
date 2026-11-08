@@ -75,12 +75,14 @@ No se afirma que una referencia sea “la más vendida” cuando no existe un ra
 ```powershell
 node server/tests/catalog-colombia-2000.mjs
 node server/tests/catalog-enriched-contract.mjs
-node server/tests/catalog-enriched-runtime.mjs
+node server/tests/amount-sale-catalog-contract.mjs
+node server/tests/catalog-sync-worker.mjs
+node server/tests/catalog-sync-failure-contract.mjs
 ```
 
 La validación específica comprueba cantidad total, preservación de los primeros 300 SKU, unicidad, campos canónicos, normalización de presentaciones, enriquecimiento de aliases, que frutas/verduras/charcutería lleven `permite_venta_por_valor=TRUE` y que las filas nuevas permanezcan bloqueadas hasta sincronizar datos reales del tenant.
 
 ## Siguiente paso operativo
 
-Para publicar las nuevas referencias en una tienda, el flujo correcto es importar el archivo al rango enriquecido actual (`A:P`) o sincronizarlo desde el catálogo del tenant, completando precio, stock, activo y `drive_file_id` únicamente con datos reales. El archivo de investigación no cambia por sí solo el catálogo operativo ni la lógica conversacional establecida.
+Para publicar las nuevas referencias en una tienda, el flujo correcto es importar el archivo al rango enriquecido actual (`A:Q`, por ejemplo `Catalogo!A1:Q2200`) o sincronizarlo desde el catálogo del tenant, completando precio, stock, activo y `drive_file_id` únicamente con datos reales. El archivo de investigación no cambia por sí solo el catálogo operativo ni la lógica conversacional establecida.
 
