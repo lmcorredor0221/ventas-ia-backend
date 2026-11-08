@@ -124,7 +124,7 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
   };
 }
 
-export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery = '', recommendation = false, filters = {}, limit = 25 } = {}) {
+export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery = '', recommendation = false, filters = {}, retrievalHints = {}, limit = 25 } = {}) {
   if (!index?.products) {
     return {
       catalogVersion: null,
@@ -145,10 +145,22 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   const compatibleProducts = Object.values(index.products)
     .filter((product) => productMatchesFilters(product, filters));
   const directCandidates = compatibleProducts
-    .map((product) => scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens, recommendationMode))
+    .map((product) => scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens, recommendationMode, retrievalHints))
     .filter((row) => {
       if (!queryTokens.length && !semanticTokens.length) return true;
-      if (recommendationMode) return row.lexicalEvidence || row.semanticEvidence || row.semanticScore > 0;
+      // A recommendation can be grounded by a catalog concept inferred by
+      // the LLM (for example, category=snacks). That is positive retrieval
+      // evidence, not a hard predicate: candidates outside the hint still
+      // remain eligible if their lexical or semantic evidence is stronger.
+      // Without this branch, products such as Chocoramo never enter the
+      // candidate set for "antojo de algo dulce" because their description
+      // need not literally contain the word "antojo".
+      if (recommendationMode) {
+        return row.lexicalEvidence
+          || row.semanticEvidence
+          || row.semanticScore > 0
+          || row.retrievalHintEvidence.length > 0;
+      }
       return row.matchScore >= 2.25 && row.lexicalEvidence;
     });
 
@@ -156,18 +168,27 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   // or select a product on behalf of the LLM. It follows tenant-local family,
   // presentation, brand, category and attribute relations, then applies the
   // same explicit filters before returning candidates.
-  const graphEvidence = graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts);
+  const graphEvidence = graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints);
   const bySku = new Map(directCandidates.map((row) => [row.sku, row]));
+  // When a concrete customer term already retrieved a product directly, a
+  // category-only graph path (for example "arepa" -> panaderia -> pan
+  // tajado) is discovery noise, not a selectable alternative. Keep graph
+  // paths through family, brand, presentation or attributes: those are the
+  // meaningful relationships used to surface real variants. Broad category
+  // requests have no direct lexical anchor and continue to explore normally.
+  const hasConcreteDirectEvidence = directCandidates.some((row) => row.queryLexicalEvidence);
   for (const [sku, evidence] of graphEvidence.entries()) {
     const product = index.products[sku];
+    if (hasConcreteDirectEvidence && graphEvidenceIsCategoryOnly(evidence)) continue;
     if (!product || bySku.has(sku) || (queryTokens.length && !evidence.anchorEvidence)) continue;
     bySku.set(sku, {
       ...product,
-      matchScore: Number((2.25 + Math.min(2, evidence.anchorScore)).toFixed(2)),
+      matchScore: Number((2.25 + Math.min(2, evidence.anchorScore) + softRetrievalHintScore(product, retrievalHints).score).toFixed(2)),
       matchType: 'graph_relation',
       lexicalEvidence: false,
       semanticScore: 0,
       semanticEvidence: false,
+      retrievalHintEvidence: softRetrievalHintScore(product, retrievalHints).evidence,
       graphEvidence: evidence,
     });
   }
@@ -189,6 +210,7 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
       graphCandidateCount: graphEvidence.size,
       candidateCount: bySku.size,
       semanticCandidateCount: directCandidates.filter((row) => row.semanticEvidence || row.semanticScore > 0).length,
+      retrievalHintKeys: Object.keys(retrievalHints ?? {}).filter((key) => retrievalHints[key] !== undefined && retrievalHints[key] !== null && retrievalHints[key] !== ''),
       recommendation: recommendationMode,
       diversityApplied: recommendationMode && rows.length > 1,
       graphPaths: [...graphEvidence.values()].flatMap((evidence) => evidence.paths).slice(0, 100),
@@ -196,7 +218,7 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   };
 }
 
-function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens = [], recommendation = false) {
+function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens = [], recommendation = false, retrievalHints = {}) {
   const text = productSearchText(product);
   const tokens = tokenize(text);
   const lexical = weightedTokenScore(queryTokens, product);
@@ -205,25 +227,40 @@ function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTok
   const semanticVector = semanticTokens.length
     ? cosineSimilarity(hashedVector(semanticTokens.join(' ')), hashedVector(text))
     : 0;
-  const score = recommendation
+  const baseScore = recommendation
     ? (semantic * 0.65) + (semanticVector * 25 * 0.2) + (lexical * 0.15)
     : queryTokens.length ? (lexical * 0.75) + (vector * 25 * 0.25) : 0;
+  const hint = softRetrievalHintScore(product, retrievalHints);
+  // Hints are soft evidence from the interpreter. They help rank compatible
+  // variants but never decide eligibility or suppress graph exploration.
+  // In a recommendation, an LLM-derived concept is a stronger relevance
+  // signal than incidental words from the customer's sentence. It raises
+  // compatible products, but it never excludes the rest of the catalog.
+  const hintWeight = recommendation ? 4 : 1;
+  const score = baseScore + (hint.score * hintWeight) + (!recommendation && semanticTokens.length ? semantic * 0.12 : 0);
   const lexicalEvidence = hasLexicalEvidence(queryTokens, tokens);
   const semanticEvidence = hasLexicalEvidence(semanticTokens, tokens);
   return {
     ...product,
     matchScore: Number(score.toFixed(2)),
     matchType: recommendation ? 'index_semantic_recommendation' : (lexicalEvidence ? 'index_lexical' : 'index_semantic'),
+    queryLexicalEvidence: lexicalEvidence,
     lexicalEvidence: lexicalEvidence || semanticEvidence,
     semanticScore: Number(semantic.toFixed(2)),
     semanticEvidence,
+    retrievalHintEvidence: hint.evidence,
   };
 }
 
-function graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts) {
+function graphEvidenceIsCategoryOnly(evidence = {}) {
+  const paths = Array.isArray(evidence.paths) ? evidence.paths : [];
+  return paths.length > 0 && paths.every((path) => path.anchorType === CATALOG_NODE_TYPES.category);
+}
+
+function graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints = {}) {
   const compatibleSkus = new Set(compatibleProducts.map((product) => product.sku));
   const nodesById = new Map((index.nodes ?? []).map((node) => [node.id, node]));
-  const evidenceTokens = [...queryTokens, ...semanticTokens, ...filterEvidenceTokens(filters)];
+  const evidenceTokens = [...queryTokens, ...semanticTokens, ...filterEvidenceTokens(filters), ...retrievalHintTokens(retrievalHints)];
   const anchors = (index.nodes ?? []).filter((node) => (
     node.type !== CATALOG_NODE_TYPES.product
     && node.type !== CATALOG_NODE_TYPES.tenant
@@ -329,6 +366,18 @@ function filterEvidenceTokens(filters = {}) {
   for (const [key, value] of Object.entries(filters ?? {})) {
     if (key !== 'query' && key !== 'sku') collect(value);
   }
+  return tokenize(values.join(' '));
+}
+
+function retrievalHintTokens(hints = {}) {
+  const values = [];
+  const collect = (value) => {
+    if (value == null || value === '' || typeof value === 'boolean' || typeof value === 'number') return;
+    if (Array.isArray(value)) return value.forEach(collect);
+    if (typeof value === 'object') return Object.entries(value).forEach(([key, item]) => { values.push(key); collect(item); });
+    values.push(String(value));
+  };
+  collect(hints);
   return tokenize(values.join(' '));
 }
 
@@ -489,6 +538,53 @@ function hashedVector(value) {
 function cosineSimilarity(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
   return Math.max(0, Math.min(1, a.reduce((total, value, index) => total + value * (b[index] ?? 0), 0)));
+}
+
+function softRetrievalHintScore(product, hints = {}) {
+  if (!hints || typeof hints !== 'object') return { score: 0, evidence: [] };
+  const text = normalizedValue([
+    product.name,
+    product.brand,
+    product.category,
+    product.presentation,
+    product.normalizedPresentation,
+    product.productFamily ?? product.family,
+    product.description,
+    ...(product.aliases ?? []),
+    ...(product.tags ?? []),
+    typeof product.attributes === 'object' ? JSON.stringify(product.attributes) : product.attributes,
+  ].filter(Boolean).join(' '));
+  const evidence = [];
+  let score = 0;
+  for (const [key, rawValue] of Object.entries(hints)) {
+    if (rawValue === undefined || rawValue === null || rawValue === '') continue;
+    if (key === 'attributes' && typeof rawValue === 'object') {
+      const attributeText = normalizedValue(JSON.stringify(rawValue));
+      if (attributeText && tokenOverlap(attributeText, text) >= 0.5) {
+        score += 0.35;
+        evidence.push('attributes');
+      }
+      continue;
+    }
+    const value = normalizedValue(rawValue);
+    if (!value) continue;
+    if (text.includes(value)) {
+      score += key === 'brand' || key === 'family' ? 1.1 : 0.65;
+      evidence.push(key);
+    } else if (tokenOverlap(value, text) >= 0.6) {
+      score += 0.25;
+      evidence.push(`${key}:partial`);
+    }
+  }
+  return { score: Number(Math.min(score, 2.5).toFixed(2)), evidence };
+}
+
+function tokenOverlap(left, right) {
+  const leftTokens = new Set(String(left).split(/\s+/).filter((token) => token.length >= 2));
+  if (!leftTokens.size) return 0;
+  const rightTokens = new Set(String(right).split(/\s+/));
+  const matches = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return matches / leftTokens.size;
 }
 
 function productMatchesFilters(product, filters = {}) {

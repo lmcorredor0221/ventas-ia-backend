@@ -522,6 +522,26 @@ export class AgentRuntime {
     });
   }
 
+  async handleCatalogIndexRequired({ tenantId, conversationId, normalized, plan }) {
+    const message = 'Estoy actualizando el catálogo de la tienda para consultar productos y precios correctos. En un momento puedes intentar de nuevo.';
+    await this.patchConversation(conversationId, {
+      stage: 'catalog',
+      zone: 'catalog',
+      status: 'waiting',
+      value: 'Actualización de catálogo pendiente',
+      progress: 28,
+      need: normalized.text,
+      nextStep: 'El dueño de la tienda debe publicar la versión actualizada del catálogo.',
+      lastTool: 'google_sheets_read_table',
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: message,
+    });
+    return { summary: 'Catalog index publication required', plan };
+  }
+
   async handleCatalogQuery({ tenantId, conversationId, normalized, plan }) {
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan });
     if (commerceResult) return commerceResult;
@@ -536,15 +556,20 @@ export class AgentRuntime {
           semanticQuery: search.semanticQuery,
           recommendation: search.recommendation === true,
           filters: search.filters,
+          retrievalHints: search.retrievalHints,
           cache_policy: 'short_ttl',
         });
         return {
           query: search.query,
+          code: catalog.code ?? null,
           restrictedItems: !catalog.rows.length ? catalog.restrictedItems ?? [] : [],
           selected: catalog.rows[0] ?? null,
           alternatives: catalog.rows.slice(1, 2),
         };
       }));
+      if (matches.some((match) => match.code === 'catalog_index_required')) {
+        return this.handleCatalogIndexRequired({ tenantId, conversationId, normalized, plan });
+      }
       const restrictedItems = matches.flatMap(match => match.restrictedItems);
       if (restrictedItems.length) return this.enforceCommercePolicy({ tenantId, conversationId, normalized,
         plan: { ...plan, commercePolicy: { restrictedItems: restrictedItems.filter(i => i.category !== 'uncertain'),
@@ -581,8 +606,12 @@ export class AgentRuntime {
       semanticQuery: search.semanticQuery,
       recommendation: search.recommendation === true,
       filters: search.filters,
+      retrievalHints: search.retrievalHints,
       cache_policy: 'short_ttl',
     });
+    if (catalog.code === 'catalog_index_required') {
+      return this.handleCatalogIndexRequired({ tenantId, conversationId, normalized, plan });
+    }
     const selected = catalog.rows[0];
     if (!selected && catalog.restrictedItems?.length) return this.enforceCommercePolicy({ tenantId, conversationId, normalized,
       plan: { ...plan, commercePolicy: { restrictedItems: catalog.restrictedItems.filter(i => i.category !== 'uncertain'),
@@ -642,28 +671,54 @@ export class AgentRuntime {
     const contextualSelection = this.contextualProductSelectionEnabled()
       && typeof this.planner?.adjudicateCatalogCandidates === 'function';
     const currentConversation = await this.getConversation(conversationId);
+    // Delivery orders must use the same retrieval contract as catalog
+    // queries. Keeping a second path here had let natural-language
+    // hypotheses (for example "litro y medio") leak into hard filters.
+    const searchesByCandidateIndex = new Map(
+      catalogSearchesFromPlan(plan, plan.order?.items ?? [], normalized.text)
+        .map((search) => [search.candidateIndex, search]),
+    );
     const orderItemsFromCatalog = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
+      const search = searchesByCandidateIndex.get(index) ?? {
+        query: catalogQueryWithPresentation(item.catalogQuery ?? item.rawName, item.requestedPresentation ?? item.presentationHint),
+        filters: {},
+        retrievalHints: retrievalHintsForCatalogItem(item),
+      };
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
-        filters: deliveryItemFiltersFromPlan(plan, item, index, normalized.text),
+        query: search.query,
+        semanticQuery: search.semanticQuery,
+        recommendation: search.recommendation === true,
+        filters: search.filters,
+        retrievalHints: search.retrievalHints,
         cache_policy: 'short_ttl',
       });
+      // The interpreter can leave a compact numeric presentation (for example
+      // "coca cola 350") in the product phrase.  Use the catalog results to
+      // turn that evidence into a presentation constraint *for resolution
+      // only*.  Retrieval stays broad: this must never discard a possible
+      // product before the resolver has seen it.
+      const itemForResolution = withCatalogPresentationEvidence(item, catalog.rows);
       const product = contextualSelection
-        ? selectUniqueAcceptableOrderProduct(catalog.rows, item)
-        : selectAcceptableOrderProduct(catalog.rows, item);
+        ? selectUniqueAcceptableOrderProduct(catalog.rows, itemForResolution)
+        : selectAcceptableOrderProduct(catalog.rows, itemForResolution);
       const catalogCandidates = contextualSelection
-        ? catalogEvidenceForItem(catalog.rows, item, product)
+        ? catalogEvidenceForItem(catalog.rows, itemForResolution, product)
         : undefined;
       return {
-        ...item,
+        ...itemForResolution,
+        catalogIndexRequired: catalog.code === 'catalog_index_required',
         ...(!catalog.rows.length && catalog.restrictedItems?.length
           ? { commerceCategory: catalog.restrictedItems[0].category } : {}),
         product,
-        presentationOptions: presentationOptionsForItem(catalog.rows, item, product),
+        presentationOptions: presentationOptionsForItem(catalog.rows, itemForResolution, product),
         ...(catalogCandidates ? { catalogCandidates } : {}),
         lineTotal: quotedLineTotal({ ...item, product }),
         available: Boolean(product && product.stock >= (item.quantity ?? 1)),
       };
     }));
+    if (orderItemsFromCatalog.some((item) => item.catalogIndexRequired)) {
+      return this.handleCatalogIndexRequired({ tenantId, conversationId, normalized, plan });
+    }
     const resolution = contextualSelection
       ? await this.catalogResolution.resolve({
         tenantId,
@@ -1978,27 +2033,39 @@ export function catalogSearchesFromPlan(plan, catalogItems, text) {
         : (stepQuery ?? (step.filters?.sku || step.filters?.category
           ? ''
           : step.candidate ?? step.filters?.category ?? text));
-      const filters = step.filters && typeof step.filters === 'object' ? { ...step.filters } : {};
-      // `query` is an input to retrieval, not a second exact filter. Keeping a
-      // stale generic value such as "gaseosa" here can discard a concrete
-      // candidate such as "Coca-Cola 1.5 L" before graph expansion runs.
-      delete filters.query;
-      const explicitSku = item.explicitSku === true
-        || item.skuHintSource === 'explicit'
-        || (item.skuHint && normalizeText(text).includes(normalizeText(item.skuHint)));
-      if (!explicitSku) delete filters.sku;
-      if (item.requestedPresentation && !filters.presentation) filters.presentation = item.requestedPresentation;
-      if (item.requestedAttributes && !filters.attributes) filters.attributes = item.requestedAttributes;
-      const semanticQuery = step.semanticQuery ?? item.semanticQuery ?? item.recommendationNeed ?? null;
+      const plannedFilters = step.filters && typeof step.filters === 'object' ? { ...step.filters } : {};
       const recommendation = step.recommendation === true
         || item.recommendation === true
         || item.recommendationIntent === 'recommendation';
+      const inferredCandidateCategory = plannedFilters.category
+        ?? item.category
+        ?? inferCatalogFilter(item.catalogQuery ?? item.rawName ?? '').category
+        ?? null;
+      const explicitSku = item.explicitSku === true
+        || item.skuHintSource === 'explicit'
+        || (item.skuHint && normalizeText(text).includes(normalizeText(item.skuHint)));
+      // Only an identifier explicitly supplied by the customer is an exact
+      // predicate. Everything inferred by the LLM is retrieval evidence: it
+      // ranks candidates but cannot erase related products before the graph
+      // and semantic retrieval layers inspect them.
+      const filters = explicitSku && (item.skuHint ?? plannedFilters.sku)
+        ? { sku: item.skuHint ?? plannedFilters.sku }
+        : {};
+      const retrievalHints = mergeRetrievalHints(
+        plannedFilters,
+        step.retrievalHints,
+        item.retrievalHints,
+        { category: inferredCandidateCategory },
+        retrievalHintsForCatalogItem(item),
+      );
+      const semanticQuery = step.semanticQuery ?? item.semanticQuery ?? item.recommendationNeed ?? null;
       return {
         query,
         ...(semanticQuery ? { semanticQuery } : {}),
         ...(recommendation ? { recommendation: true } : {}),
         filters,
-        categoryQuery: Boolean(filters.category && (!query || recommendation)),
+        ...(Object.keys(retrievalHints).length ? { retrievalHints } : {}),
+        categoryQuery: Boolean(recommendation),
         candidateIndex: step.candidateIndex ?? index,
       };
     })
@@ -2011,23 +2078,51 @@ export function catalogSearchesFromPlan(plan, catalogItems, text) {
       item.requestedPresentation ?? item.presentationHint,
     );
     const explicitSku = item.explicitSku === true || item.skuHintSource === 'explicit';
-    const filters = item.skuHint && explicitSku
-      ? { sku: item.skuHint }
-      : {
-        ...inferCatalogFilter(query),
-        ...(item.requestedPresentation ? { presentation: item.requestedPresentation } : {}),
-        ...(item.requestedAttributes ? { attributes: item.requestedAttributes } : {}),
-      };
-    delete filters.query;
+    const recommendation = item.recommendation === true || item.recommendationIntent === 'recommendation';
+    const inferredFilters = inferCatalogFilter(query);
+    const filters = item.skuHint && explicitSku ? { sku: item.skuHint } : {};
+    const retrievalHints = mergeRetrievalHints(
+      inferredFilters,
+      item.retrievalHints,
+      retrievalHintsForCatalogItem(item),
+    );
     return {
       query,
       ...(item.semanticQuery || item.recommendationNeed ? { semanticQuery: item.semanticQuery ?? item.recommendationNeed } : {}),
-      ...((item.recommendation === true || item.recommendationIntent === 'recommendation') ? { recommendation: true } : {}),
+      ...(recommendation ? { recommendation: true } : {}),
       filters,
-      categoryQuery: Boolean(filters.category && (item.recommendation === true || item.recommendationIntent === 'recommendation') && !item.requestedPresentation),
+      ...(Object.keys(retrievalHints).length ? { retrievalHints } : {}),
+      categoryQuery: Boolean(recommendation && !item.requestedPresentation),
       candidateIndex: index,
     };
   });
+}
+
+function retrievalHintsForCatalogItem(item = {}) {
+  return {
+    category: item.category ?? null,
+    brand: item.brand ?? null,
+    family: item.familyHypothesis ?? item.productFamily ?? null,
+    product: item.productHypothesis ?? null,
+    presentation: item.requestedPresentation ?? item.presentationHint ?? null,
+    attributes: item.requestedAttributes ?? item.inferredAttributes ?? null,
+  };
+}
+
+function mergeRetrievalHints(...sources) {
+  const result = {};
+  for (const source of sources) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    for (const [key, value] of Object.entries(source)) {
+      if (key === 'query' || key === 'sku' || value === undefined || value === null || value === '') continue;
+      if (key === 'attributes' && typeof value === 'object' && !Array.isArray(value)) {
+        result.attributes = { ...(result.attributes ?? {}), ...value };
+      } else if (['category', 'brand', 'family', 'product', 'presentation'].includes(key)) {
+        result[key] = value;
+      }
+    }
+  }
+  return result;
 }
 
 function catalogQueryWithPresentation(base, presentation) {
@@ -2231,6 +2326,60 @@ function selectUniqueAcceptableOrderProduct(rows = [], item = {}) {
   return eligible.length === 1 ? eligible[0] : null;
 }
 
+function withCatalogPresentationEvidence(item = {}, rows = []) {
+  if (item.requestedPresentation || item.presentationHint) return item;
+  const requestedPresentation = inferPresentationFromCatalogEvidence(item, rows);
+  if (!requestedPresentation) return item;
+  return {
+    ...item,
+    requestedPresentation,
+    // This remains a resolver-level inference. It is deliberately not copied
+    // to catalog-search filters, where it could suppress compatible variants.
+    presentationEvidence: 'catalog_candidate_match',
+  };
+}
+
+function inferPresentationFromCatalogEvidence(item = {}, rows = []) {
+  const source = normalizeText([item.rawName, item.catalogQuery, item.productHypothesis]
+    .filter(Boolean)
+    .join(' '));
+  if (!source || !rows.length) return null;
+
+  const presentationFor = (product) => product?.presentation
+    || [product?.name, ...(product?.aliases ?? [])].filter(Boolean).join(' ');
+  const fieldsFor = (product) => [product?.name, product?.presentation, ...(product?.aliases ?? [])]
+    .filter(Boolean)
+    .map(normalizeText);
+
+  // Prefer quantities accompanied by a unit (including Colombian phrasing
+  // such as "litro y medio"). They are direct evidence of presentation.
+  const volumes = presentationVolumesInMilliliters(source);
+  if (volumes.length) {
+    const matched = rows.filter((product) => {
+      const productVolumes = fieldsFor(product).flatMap(presentationVolumesInMilliliters);
+      return volumes.some((volume) => productVolumes.includes(volume));
+    });
+    if (matched.length) return presentationFor(matched[0]);
+  }
+
+  // Some customers omit the unit but preserve a useful number: "coca 350".
+  // Treat it as presentation evidence only when it can be grounded in a
+  // catalog candidate. Quantity and an amount that the interpreter already
+  // identified as a budget are conversation facts, never presentations.
+  // There is intentionally no fixed list of sizes or product families here.
+  const nonPresentationAmounts = new Set([item.quantity, item.budgetAmount]
+    .map(Number)
+    .filter(Number.isFinite));
+  const numericMentions = presentationNumbers(source)
+    .filter((amount) => !nonPresentationAmounts.has(amount));
+  if (!numericMentions.length) return null;
+  const matched = rows.filter((product) => {
+    const numbers = fieldsFor(product).flatMap(presentationNumbers);
+    return numericMentions.some((amount) => numbers.includes(amount));
+  });
+  return matched.length ? presentationFor(matched[0]) : null;
+}
+
 function catalogEvidenceForItem(rows = [], item = {}, selectedProduct = null) {
   const eligible = rows.filter((row) => isAcceptableOrderProduct(row, item));
   // Never reintroduce incompatible rows as evidence. That fallback made a
@@ -2290,7 +2439,49 @@ function isAcceptableOrderProduct(product, item = {}) {
     const queryTokens = query.split(/\s+/).filter((token) => token.length >= 4);
     return queryTokens.some((token) => productTokens.has(token));
   }
+  // Retrieval intentionally remains broad: a graph or semantic search may
+  // return products which share a presentation, category or occasion. Before
+  // any of those rows becomes a selectable order option, however, it needs
+  // enough evidence that it is the product the LLM interpreted. This is not a
+  // catalog filter and contains no family-specific rules; it simply prevents
+  // a shared unit such as "500 g" from turning Cafe into an alternative for
+  // "Arroz Diana 500 g".
+  const identityTokens = requestedProductIdentityTokens(item);
+  if (identityTokens.length) {
+    const productIdentity = normalizeText([
+      product.name,
+      product.brand,
+      product.productFamily,
+      ...(product.aliases ?? []),
+    ].filter(Boolean).join(' ')).split(/\s+/).filter(Boolean);
+    const matched = identityTokens.filter((token) => productIdentity.some((candidate) => (
+      candidate === token
+      || (candidate.length >= 4 && token.length >= 4 && (candidate.startsWith(token) || token.startsWith(candidate)))
+    ))).length;
+    // A request can include descriptive context (for example, "jabon para
+    // lavar ropa") that is absent from the name. Half of its identity terms
+    // must still be grounded in the product name, brand, family or aliases.
+    if ((matched / identityTokens.length) < 0.5) return false;
+  }
   return true;
+}
+
+function requestedProductIdentityTokens(item = {}) {
+  const source = [item.rawName, item.catalogQuery, item.productHypothesis]
+    .filter(Boolean)
+    .join(' ');
+  return [...new Set(normalizeText(source)
+    // Sizes and units describe a requested variant, not the identity of a
+    // product. Presentation compatibility is validated independently.
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cc|l|lt|litro|litros|g|gr|kg|unidades?)\b/g, ' ')
+    .replace(/\bx\s*\d+\b/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 3)
+    .filter((token) => ![
+      'para', 'domicilio', 'pedido', 'quiero', 'quieres', 'regala', 'regalame',
+      'manda', 'mandame', 'necesito', 'una', 'uno', 'unos', 'unas', 'con', 'por',
+      'favor', 'del', 'que', 'tiene', 'hay', 'me', 'de', 'la', 'el', 'los', 'las',
+    ].includes(token)))];
 }
 
 function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
@@ -2314,7 +2505,10 @@ function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
 
 function buildCatalogReply({ selected, alternatives, drive, delivery, query, categoryQuery = false }) {
   const categoryOptions = [selected, ...alternatives];
-  if (categoryOptions.length > 1 && (categoryQuery || isCategoryQuery(query))) {
+  // Solo el intérprete puede declarar que se trata de una exploración de
+  // categoría. Que una consulta concreta contenga la palabra "café" o
+  // "gaseosa" no la convierte en una recomendación genérica.
+  if (categoryOptions.length > 1 && categoryQuery) {
     const options = categoryOptions
       .map((item) => `${item.name} (${formatCurrency(item.price)}, stock ${item.stock})`)
       .join('; ');

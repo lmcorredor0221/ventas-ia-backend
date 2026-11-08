@@ -66,6 +66,7 @@ export class CatalogSearchService {
         query: payload.query ?? '',
         semanticQuery: payload.semanticQuery ?? '',
         filterKeys: Object.keys(payload.filters ?? {}).sort(),
+        retrievalHintKeys: Object.keys(payload.retrievalHints ?? {}).filter((key) => payload.retrievalHints[key] !== undefined && payload.retrievalHints[key] !== null && payload.retrievalHints[key] !== '').sort(),
         candidateCount: result.rows.length,
         directCandidateCount: result.retrieval?.directCandidateCount ?? 0,
         graphCandidateCount: result.retrieval?.graphCandidateCount ?? 0,

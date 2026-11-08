@@ -145,7 +145,14 @@ try {
   const cocaHasOnlyOnePointFive = cocaPresentations.size > 0 && [...cocaPresentations].every((value) => /1\.5\s*l/i.test(String(value)));
   const responseHasOptions = /1\.5\s*l|1,5\s*l|chocoramo|chocorramo/i.test(finalTurn?.reply ?? '');
   const noIncompatibleCoca = !coca?.product || /1\.5\s*l/i.test(String(coca.product.presentation ?? coca.product.name ?? ''));
-  const plannerApiTurns = turns.filter((turn) => turn.executionMode === 'provider_api').length;
+  // Product interpretation now uses two real provider calls (context plus
+  // product inference), therefore provider_api_two_stage is the expected
+  // execution mode. Keep the assertion about the provider boundary, not the
+  // legacy single-call label.
+  const plannerApiTurns = turns.filter((turn) => (
+    turn.provider === 'deepseek'
+    && ['provider_api', 'provider_api_two_stage', 'provider_api_context_only'].includes(turn.executionMode)
+  )).length;
   const report = {
     generatedAt: new Date().toISOString(),
     status: 'pending_assertions',

@@ -18,7 +18,8 @@ const searches = catalogSearchesFromPlan({
 assert.equal(searches.length, 1);
 assert.equal(searches[0].query, 'Coca-Cola 1.5 L');
 assert.equal(searches[0].filters.query, undefined);
-assert.equal(searches[0].filters.presentation, '1.5 L');
+assert.equal(searches[0].filters.presentation, undefined);
+assert.equal(searches[0].retrievalHints.presentation, '1.5 L');
 
 const staleGenericPlan = catalogSearchesFromPlan({
   toolPlan: [{
@@ -34,7 +35,8 @@ const staleGenericPlan = catalogSearchesFromPlan({
 }], 'una coca cola litro y medio');
 
 assert.equal(staleGenericPlan[0].query, 'Coca-Cola 1.5 L');
-assert.deepEqual(staleGenericPlan[0].filters, { presentation: '1.5 L' });
+assert.deepEqual(staleGenericPlan[0].filters, {});
+assert.equal(staleGenericPlan[0].retrievalHints.presentation, '1.5 L');
 
 const recommendationPlan = catalogSearchesFromPlan({
   candidateItems: [{

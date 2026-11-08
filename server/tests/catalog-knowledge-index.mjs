@@ -26,6 +26,21 @@ assert.ok(exactPresentation.rows.every((row) => row.normalizedPresentation === '
 const family = searchCatalogKnowledgeIndex(index, { query: 'chocorramo' });
 assert.ok(family.rows.some((row) => row.sku === 'CHOC-REG'));
 
+// The interpreter may infer a broad need ("antojo dulce") without naming a
+// SKU. Its catalog concept must bring compatible products into the candidate
+// set and rank them ahead of incidental lexical matches, while remaining a
+// soft signal rather than a filter.
+const sweetRecommendation = searchCatalogKnowledgeIndex(index, {
+  query: 'antojo de algo dulce',
+  semanticQuery: 'antojo dulce recomendacion',
+  recommendation: true,
+  retrievalHints: { category: 'ponqués' },
+  limit: 5,
+});
+assert.ok(sweetRecommendation.rows.some((row) => row.sku === 'CHOC-REG'));
+assert.ok(sweetRecommendation.rows.some((row) => row.sku === 'CHOC-MINI'));
+assert.ok(['CHOC-REG', 'CHOC-MINI'].includes(sweetRecommendation.rows[0].sku));
+
 const graphExpanded = searchCatalogKnowledgeIndex(index, {
   query: 'Coca-Cola litro y medio',
   filters: { presentation: '1.5 L' },

@@ -7,7 +7,22 @@ import { colombiaProducts20 } from '../data/colombiaProducts.js';
 import { colombiaAgentScenarioSet } from './fixtures/colombiaAgentScenarios.js';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ventas-ia-colombia-'));
-const { app, store } = createApp({ dataFile: path.join(tempDir, 'store.json') });
+const { app, store, tools } = createApp({
+  dataFile: path.join(tempDir, 'store.json'),
+  // La suite valida el flujo contextual que se entrega en producción: con
+  // candidatos múltiples, el LLM pregunta antes de fijar una referencia.
+  contextualProductSelectionV2: true,
+});
+// Los escenarios ejercen la ruta operacional: el catálogo administrado ya
+// fue publicado por la acción explícita «Actualizar catálogo». No activamos
+// una reconstrucción implícita durante la lectura conversacional.
+await tools.catalogSearch.sync({
+  tenantId: 'andina',
+  rows: colombiaProducts20,
+  sourceRef: 'local-test-catalog',
+  range: 'Catalogo!A1:Z1000',
+  persist: false,
+});
 const server = app.listen(0, '127.0.0.1');
 
 try {
@@ -22,7 +37,19 @@ try {
   for (const [index, scenario] of colombiaAgentScenarioSet.entries()) {
     const waId = `57310${String(index).padStart(6, '0')}`;
     if (scenario.customer === 'known') seedKnownCustomer(waId, `Cliente ${index + 1}`);
-    if (scenario.extraProducts?.length) seedExtraProducts(scenario.extraProducts);
+    if (scenario.extraProducts?.length) {
+      seedExtraProducts(scenario.extraProducts);
+      // Los productos adicionales representan una edición del catálogo de la
+      // tienda. Publicamos expresamente una versión nueva, igual que la acción
+      // "Actualizar catálogo"; la conversación nunca debe reconstruirla sola.
+      await tools.catalogSearch.sync({
+        tenantId: 'andina',
+        rows: store.getState().productsByTenant?.andina ?? [],
+        sourceRef: 'local-test-catalog',
+        range: 'Catalogo!A1:Z1000',
+        persist: false,
+      });
+    }
 
     const steps = scenario.steps ?? [{ text: scenario.text, expect: scenario.expect }];
     for (const [stepIndex, step] of steps.entries()) {

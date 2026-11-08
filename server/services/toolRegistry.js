@@ -151,11 +151,28 @@ export class ToolRegistry {
           message: 'Esta tienda aún no tiene una versión publicada del catálogo.',
         };
       }
+      if (!index && this.config.catalogKnowledgeIndexEnabled !== false) {
+        return {
+          status: 'sync_required',
+          code: 'catalog_index_required',
+          rows: [],
+          restrictedItems: [],
+          source,
+          source_revision: null,
+          catalog_version: null,
+          source_range: effectiveRange,
+          source_row_count: rows.length,
+          message: 'El catálogo tiene productos, pero aún no tiene una versión de búsqueda publicada. Actualízalo antes de atender pedidos.',
+        };
+      }
     } else {
       rows = live
         ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: effectiveRange })
         : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
     }
+    // A manual catalog refresh publishes its index in this process. Reuse it for
+    // reads instead of rebuilding the graph on each customer message.
+    index ??= this.catalogSearch?.getIndex?.(tenantId) ?? null;
     if (
       !index
       && this.config.catalogKnowledgeIndexEnabled !== false
@@ -177,6 +194,7 @@ export class ToolRegistry {
         semanticQuery: payload.semanticQuery ?? '',
         recommendation: payload.recommendation === true,
         filters: payload.filters ?? {},
+        retrievalHints: payload.retrievalHints ?? {},
         // Manual order workspaces need the complete tenant catalog because
         // the UI performs its own query filtering. Conversational searches
         // remain bounded so they return only relevant candidates.
@@ -203,7 +221,13 @@ export class ToolRegistry {
           }
           : row;
       })
-      : filterRows(rows, payload.filters));
+      // Keep the retrieval contract identical while an index is being built
+      // or temporarily unavailable. `query` belongs to the payload, whereas
+      // the legacy fallback only understands it inside filters.
+      : filterRows(rows, {
+        ...(payload.filters ?? {}),
+        ...(payload.query ? { query: payload.query } : {}),
+      }));
     const acceptedRows = matchingRows.filter(row => !catalogCommerceCategory(row));
     this.telemetry?.record('catalog', 'read', {
       durationMs: performance.now() - startedAt,

@@ -197,7 +197,9 @@ export const colombiaAgentScenarioSet = [
     text: 'Veci, tiene gaseosa pequena?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Coca-Cola 400ml', 'Quieres que te cotice una cantidad'],
+      // Es una consulta abierta: el agente debe mostrar alternativas reales
+      // y pedir elección, no asumir que la primera es el pedido.
+      replyIncludes: ['Coca-Cola 400ml', 'Cual quieres que te cotice'],
     },
   },
   {
@@ -207,7 +209,10 @@ export const colombiaAgentScenarioSet = [
     text: 'Me confirma si hay leche, de pronto la de bolsa?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Leche Alqueria entera 1L', 'Queso campesino 250g'],
+      // La consulta es concreta: mostrar queso como una alternativa no
+      // relacionada sería ruido, no una recomendación contextual.
+      replyIncludes: ['Leche Alqueria entera 1L'],
+      notReplyIncludes: ['Queso campesino 250g'],
     },
   },
   {
@@ -217,7 +222,11 @@ export const colombiaAgentScenarioSet = [
     text: 'Hay papel para el bano?',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Papel higienico Familia x4', 'Shampoo Savital sachet'],
+      // El usuario pidió papel de baño; el shampoo no es una alternativa
+      // compatible y no debe aparecer por el simple hecho de pertenecer a
+      // la misma categoría comercial.
+      replyIncludes: ['Papel higienico Familia x4'],
+      notReplyIncludes: ['Shampoo Savital sachet'],
     },
   },
   {
@@ -227,7 +236,8 @@ export const colombiaAgentScenarioSet = [
     text: 'Me colabora con jabon para lavar ropa',
     expect: {
       intent: 'catalog_query',
-      replyIncludes: ['Jabon Rey barra', 'Papel higienico Familia x4'],
+      replyIncludes: ['Jabon Rey barra'],
+      notReplyIncludes: ['Papel higienico Familia x4'],
     },
   },
   {
@@ -324,9 +334,11 @@ export const colombiaAgentScenarioSet = [
     text: 'Me regala 1 coca cola para domicilio',
     expect: {
       intent: 'delivery_order',
-      missingFields: ['customer_name', 'delivery_address', 'presentation:coca cola'],
+      // Dos referencias concretas permanecen compatibles. La selección
+      // iterativa conserva esa ambigüedad como estado explícito hasta que el
+      // cliente elija una de las opciones.
+      missingFields: ['customer_name', 'delivery_address', 'presentation:coca cola', 'selection:coca-cola:1'],
       replyIncludes: ['tu nombre', 'direccion del domicilio', 'Pediste coca cola', 'Coca-Cola 400ml', 'Coca-Cola 1.5L'],
-      orderItems: ['Coca-Cola 400ml'],
     },
   },
   {
