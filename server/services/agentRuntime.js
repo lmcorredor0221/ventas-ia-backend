@@ -2446,7 +2446,10 @@ function isAcceptableOrderProduct(product, item = {}) {
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
   const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   if (item.requestedPresentation && !productMatchesRequestedPresentation(product, item.requestedPresentation)) return false;
-  if (item.requestedAttributes && !matchesRequestedCatalogAttributes(product, item.requestedAttributes)) return false;
+  // The interpreter's attributes guide semantic/graph retrieval. They are not
+  // literal database predicates: a buyer can say "litro y medio" while the
+  // catalog truth says "1.5 L". Presentation compatibility and product
+  // identity are evaluated independently below.
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
   if (containsAny(query, ['salchichon', 'salchicha']) && !containsAny(productText, ['salchicha', 'salchichon', 'carnes frias'])) return false;
@@ -2498,25 +2501,6 @@ function requestedProductIdentityTokens(item = {}) {
       'manda', 'mandame', 'necesito', 'una', 'uno', 'unos', 'unas', 'con', 'por',
       'favor', 'del', 'que', 'tiene', 'hay', 'me', 'de', 'la', 'el', 'los', 'las',
     ].includes(token)))];
-}
-
-function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
-  if (!requestedAttributes || typeof requestedAttributes !== 'object') return true;
-  const actual = normalizeText([
-    product.brand,
-    product.category,
-    product.presentation,
-    product.productFamily,
-    product.description,
-    ...(product.aliases ?? []),
-    ...(product.tags ?? []),
-    typeof product.attributes === 'object' ? JSON.stringify(product.attributes) : product.attributes,
-  ].filter(Boolean).join(' '));
-  return Object.entries(requestedAttributes).every(([key, value]) => {
-    if (value === null || value === undefined || value === '') return true;
-    const expected = normalizeText(`${key} ${value}`);
-    return actual.includes(normalizeText(value)) || actual.includes(expected);
-  });
 }
 
 function buildCatalogReply({ selected, alternatives, drive, delivery, query, categoryQuery = false }) {
