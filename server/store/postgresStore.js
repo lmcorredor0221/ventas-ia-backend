@@ -29,7 +29,12 @@ export class PostgresStore {
       max,
       ssl: resolveSsl(databaseUrl, ssl),
     });
-    this.incrementalPersistenceEnabled = incrementalPersistenceEnabled === true;
+    // PostgreSQL mutations are incremental by contract.  The old feature flag
+    // only controlled whether some callers were allowed to skip the legacy
+    // full-document snapshot; keeping that fallback made one unannotated
+    // mutation serialize the entire app_state document again.
+    this.incrementalPersistenceEnabled = true;
+    this.legacyIncrementalPersistenceFlag = incrementalPersistenceEnabled === true;
     this.state = null;
     this.saveQueue = Promise.resolve();
     // Tenant configuration must not wait behind unrelated operational writes.
@@ -223,6 +228,17 @@ export class PostgresStore {
     return this.queueWrite(async () => {
       const client = await this.pool.connect();
       try {
+        const current = await client.query(
+          `SELECT catalog_version, source_hash
+             FROM catalog_knowledge_indexes
+            WHERE tenant_id = $1 AND status = 'published'
+            ORDER BY published_at DESC NULLS LAST, created_at DESC
+            LIMIT 1`,
+          [index.tenantId],
+        );
+        if (current.rows[0]?.source_hash === index.sourceHash) {
+          return { status: 'unchanged', tenantId: index.tenantId, catalogVersion: current.rows[0].catalog_version };
+        }
         await client.query('BEGIN');
         await client.query(
           `UPDATE catalog_knowledge_indexes
@@ -279,23 +295,7 @@ export class PostgresStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
-        if (!this.incrementalPersistenceEnabled) {
-          await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
-          await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
-        } else if (products.length > 0) {
-          const skus = products.map((product) => String(product.sku));
-          await client.query(
-            'DELETE FROM products WHERE tenant_id = $1 AND NOT (sku = ANY($2::text[]))',
-            [tenantId, skus],
-          );
-          const fileIds = driveFiles.map((file) => String(file.fileId));
-          await client.query(
-            'DELETE FROM drive_files WHERE tenant_id = $1 AND NOT (file_id = ANY($2::text[]))',
-            [tenantId, fileIds],
-          );
-        }
-        for (const product of products) await upsertProduct(client, tenantId, product);
-        for (const file of driveFiles) await upsertDriveFile(client, tenantId, file);
+        await persistChangedCatalogRows(client, tenantId, products, driveFiles);
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK');
@@ -312,31 +312,20 @@ export class PostgresStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
-        if (!this.incrementalPersistenceEnabled) {
-          await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
-          await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
-        } else {
-          const skus = products.map((product) => String(product.sku));
-          const fileIds = driveFiles.map((file) => String(file.fileId));
-          if (skus.length) {
-            await client.query(
-              'DELETE FROM products WHERE tenant_id = $1 AND NOT (sku = ANY($2::text[]))',
-              [tenantId, skus],
-            );
-          } else {
-            await client.query('DELETE FROM products WHERE tenant_id = $1', [tenantId]);
-          }
-          if (fileIds.length) {
-            await client.query(
-              'DELETE FROM drive_files WHERE tenant_id = $1 AND NOT (file_id = ANY($2::text[]))',
-              [tenantId, fileIds],
-            );
-          } else {
-            await client.query('DELETE FROM drive_files WHERE tenant_id = $1', [tenantId]);
-          }
+        const current = await client.query(
+          `SELECT catalog_version, source_hash
+             FROM catalog_knowledge_indexes
+            WHERE tenant_id = $1 AND status = 'published'
+            ORDER BY published_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            FOR UPDATE`,
+          [tenantId],
+        );
+        if (current.rows[0]?.source_hash === index.sourceHash) {
+          await client.query('COMMIT');
+          return { status: 'unchanged', tenantId, catalogVersion: current.rows[0].catalog_version };
         }
-        for (const product of products) await upsertProduct(client, tenantId, product);
-        for (const file of driveFiles) await upsertDriveFile(client, tenantId, file);
+        await persistChangedCatalogRows(client, tenantId, products, driveFiles);
         await client.query(
           `UPDATE catalog_knowledge_indexes
               SET status = 'superseded'
@@ -483,16 +472,66 @@ export class PostgresStore {
 
   mutate(mutator, { snapshot = true, domain = 'runtime', operation = 'mutate' } = {}) {
     const state = this.getState();
+    const before = snapshot === false ? null : structuredClone(state);
     const result = mutator(state);
-    const useIncrementalPersistence = this.incrementalPersistenceEnabled && snapshot === false;
-    if (useIncrementalPersistence) {
-      this.telemetry?.record('postgres', 'incremental_mutation', {
-        metadata: { domain, operation, snapshotScheduled: false },
-      });
+    if (before) {
+      this.queueIncrementalStatePatch(before, structuredClone(state), { domain, operation, snapshotHint: snapshot });
     } else {
-      this.queueSave();
+      this.telemetry?.record('postgres', 'incremental_mutation', {
+        metadata: { domain, operation, snapshotHint: snapshot, snapshotScheduled: false },
+      });
     }
     return result;
+  }
+
+  queueIncrementalStatePatch(before, after, { domain = 'runtime', operation = 'mutate', snapshotHint = true } = {}) {
+    const patches = buildIncrementalStatePatches(before, after);
+    if (!patches.length) {
+      this.telemetry?.record('postgres', 'incremental_mutation', {
+        metadata: { domain, operation, snapshotHint, changedPaths: 0, deltaBytes: 0 },
+      });
+      return Promise.resolve();
+    }
+    const deltaBytes = patches.reduce((total, patch) => total + (patch.remove ? 0 : Buffer.byteLength(JSON.stringify(patch.value), 'utf8')), 0);
+    return this.queueWrite(async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const patch of patches) {
+          if (patch.remove) {
+            await client.query(
+              `UPDATE app_state
+                  SET document = COALESCE(document, '{}'::jsonb) #- $1::text[], updated_at = now()
+                WHERE id = 'runtime'`,
+              [patch.path],
+            );
+          } else {
+            await client.query(
+              `UPDATE app_state
+                  SET document = jsonb_set(COALESCE(document, '{}'::jsonb), $1::text[], $2::jsonb, true),
+                      updated_at = now()
+                WHERE id = 'runtime'`,
+              [patch.path, JSON.stringify(patch.value)],
+            );
+          }
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      this.telemetry?.record('postgres', 'incremental_write', {
+        metadata: {
+          domain,
+          operation,
+          snapshotHint,
+          changedPaths: patches.length,
+          deltaBytes,
+        },
+      });
+    }, 'incremental state delta');
   }
 
   persistTenantCritical(tenantId) {
@@ -784,7 +823,9 @@ export class PostgresStore {
       // transaction awaited I/O. Its queued persistence must retain both orders.
       usageValue = Math.max(usageValue, Number(this.state.usageCountersByTenant?.[tenantId]?.[period]?.deliveries_confirmed ?? 0) + 1);
       applyManualOrderCommit(this.state, { ...commit, usageValue });
-      this.queueSave();
+      // The operational transaction above already persisted the changed order,
+      // conversation, pending requests, and usage counter.  Never enqueue a
+      // full app_state snapshot as a second write.
       return { order, created: true };
     }, 'manual order transaction');
   }
@@ -1425,6 +1466,38 @@ export class PostgresStore {
 
 function googleConnectionVersion(connection) {
   return Math.max(Date.parse(connection?.connectedAt) || 0, Date.parse(connection?.lastErrorAt) || 0);
+}
+
+function buildIncrementalStatePatches(before, after) {
+  const patches = [];
+  const keys = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})]);
+  for (const key of keys) collectIncrementalPatches([key], before?.[key], after?.[key], patches, 0);
+  return patches;
+}
+
+function collectIncrementalPatches(path, before, after, patches, depth) {
+  if (isDeepStrictEqual(before, after)) return;
+  if (before === undefined && after === undefined) return;
+  if (after === undefined) {
+    patches.push({ path, remove: true });
+    return;
+  }
+
+  // State maps are keyed by tenant, record id, or another stable identifier.
+  // Split only the first object level so a mutation writes the changed record
+  // rather than replacing the complete runtime document. Arrays are kept as a
+  // single value because their order is part of their state contract.
+  if (depth === 0 && isPlainObject(before) && isPlainObject(after)) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    for (const key of keys) collectIncrementalPatches([...path, key], before[key], after[key], patches, depth + 1);
+    return;
+  }
+
+  patches.push({ path, value: after });
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function applyGoogleConnectionToTenant(state, tenantId, connection) {
@@ -2198,6 +2271,54 @@ async function upsertGoogleWorkspace(client, tenantId, workspace) {
       workspace.provisionedAt ?? null,
     ],
   );
+}
+
+async function persistChangedCatalogRows(client, tenantId, products, driveFiles) {
+  const existingProducts = await client.query(
+    'SELECT sku, payload FROM products WHERE tenant_id = $1',
+    [tenantId],
+  );
+  const nextProducts = new Map(products.map((product) => [String(product.sku), product]));
+  const staleSkus = existingProducts.rows
+    .map((row) => String(row.sku))
+    .filter((sku) => !nextProducts.has(sku));
+  if (staleSkus.length) {
+    await client.query(
+      'DELETE FROM products WHERE tenant_id = $1 AND sku = ANY($2::text[])',
+      [tenantId, staleSkus],
+    );
+  }
+  for (const row of existingProducts.rows) {
+    const product = nextProducts.get(String(row.sku));
+    if (product && !isDeepStrictEqual(row.payload, product)) await upsertProduct(client, tenantId, product);
+  }
+  const existingProductSkus = new Set(existingProducts.rows.map((row) => String(row.sku)));
+  for (const product of products) {
+    if (!existingProductSkus.has(String(product.sku))) await upsertProduct(client, tenantId, product);
+  }
+
+  const existingFiles = await client.query(
+    'SELECT file_id, payload FROM drive_files WHERE tenant_id = $1',
+    [tenantId],
+  );
+  const nextFiles = new Map(driveFiles.map((file) => [String(file.fileId), file]));
+  const staleFileIds = existingFiles.rows
+    .map((row) => String(row.file_id))
+    .filter((fileId) => !nextFiles.has(fileId));
+  if (staleFileIds.length) {
+    await client.query(
+      'DELETE FROM drive_files WHERE tenant_id = $1 AND file_id = ANY($2::text[])',
+      [tenantId, staleFileIds],
+    );
+  }
+  for (const row of existingFiles.rows) {
+    const file = nextFiles.get(String(row.file_id));
+    if (file && !isDeepStrictEqual(row.payload, file)) await upsertDriveFile(client, tenantId, file);
+  }
+  const existingFileIds = new Set(existingFiles.rows.map((row) => String(row.file_id)));
+  for (const file of driveFiles) {
+    if (!existingFileIds.has(String(file.fileId))) await upsertDriveFile(client, tenantId, file);
+  }
 }
 
 async function upsertProduct(client, tenantId, product) {

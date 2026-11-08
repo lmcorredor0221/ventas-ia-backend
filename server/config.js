@@ -57,9 +57,10 @@ export const RUNTIME_CONFIG = {
   integrationOutboxEnabled: process.env.INTEGRATION_OUTBOX_ENABLED === 'true',
   integrationOutboxIntervalMs: Number(process.env.INTEGRATION_OUTBOX_INTERVAL_MS ?? 5000),
   integrationOutboxBatchSize: Number(process.env.INTEGRATION_OUTBOX_BATCH_SIZE ?? 10),
-  // Incremental persistence is rolled out by domain. The legacy snapshot
-  // remains the safe default until each mutation path has a durable writer.
-  postgresIncrementalPersistenceEnabled: process.env.POSTGRES_INCREMENTAL_PERSISTENCE_ENABLED === 'true',
+  // Kept only for backwards-compatible configuration introspection. The
+  // PostgreSQL store now enforces incremental persistence regardless of the
+  // old flag, so a normal mutation can never fall back to app_state snapshot.
+  postgresIncrementalPersistenceEnabled: true,
   asyncInboundEnabled: (process.env.WHATSAPP_ASYNC_INBOUND_ENABLED ?? process.env.ASYNC_INBOUND_ENABLED) === 'true',
   backgroundWorkersEnabled: process.env.BACKGROUND_WORKERS_ENABLED
     ? process.env.BACKGROUND_WORKERS_ENABLED === 'true'

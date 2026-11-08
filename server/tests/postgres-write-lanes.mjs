@@ -43,15 +43,41 @@ assert.equal(telemetry[0]?.[1], 'incremental_mutation');
 assert.deepEqual(telemetry[0]?.[2]?.metadata, {
   domain: 'conversation',
   operation: 'test-update',
+  snapshotHint: false,
   snapshotScheduled: false,
 });
 
 const legacy = Object.create(PostgresStore.prototype);
 legacy.state = { revision: 1 };
 legacy.incrementalPersistenceEnabled = false;
-legacy.snapshotCount = 0;
-legacy.queueSave = () => { legacy.snapshotCount += 1; };
-legacy.mutate((state) => { state.revision = 2; }, { snapshot: false, domain: 'conversation' });
-assert.equal(legacy.snapshotCount, 1, 'the feature flag must keep legacy snapshot behavior until enabled');
+legacy.queueSave = () => { throw new Error('mutations must never schedule a full snapshot'); };
+legacy.deltaCount = 0;
+legacy.queueIncrementalStatePatch = (before, after, metadata) => {
+  legacy.deltaCount += 1;
+  assert.equal(before.revision, 1);
+  assert.equal(after.revision, 2);
+  assert.deepEqual(metadata, { domain: 'runtime', operation: 'mutate', snapshotHint: true });
+};
+legacy.mutate((state) => { state.revision = 2; });
+assert.equal(legacy.deltaCount, 1, 'a default mutation must persist an incremental delta');
 
-console.log('Incremental persistence feature flag contract tests passed');
+const deltaWriter = Object.create(PostgresStore.prototype);
+const queries = [];
+const client = {
+  query: async (...args) => { queries.push(args); },
+  release: () => {},
+};
+deltaWriter.pool = { connect: async () => client };
+deltaWriter.queueWrite = (operation) => operation();
+deltaWriter.telemetry = { record: () => {} };
+await deltaWriter.queueIncrementalStatePatch(
+  { catalogKnowledgeIndexesByTenant: { demo: { catalogVersion: 'old' } }, tools: [{ key: 'a' }] },
+  { catalogKnowledgeIndexesByTenant: { demo: { catalogVersion: 'new' } }, tools: [{ key: 'b' }] },
+  { domain: 'catalog', operation: 'publish' },
+);
+const deltaPaths = queries
+  .filter(([sql]) => String(sql).includes('jsonb_set'))
+  .map(([, params]) => params[0]);
+assert.deepEqual(deltaPaths, [['catalogKnowledgeIndexesByTenant', 'demo'], ['tools']]);
+
+console.log('Incremental persistence contract tests passed');
