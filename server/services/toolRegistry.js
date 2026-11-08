@@ -252,7 +252,7 @@ export class ToolRegistry {
     });
     return {
       status: rows.length ? 'success' : 'error',
-      columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'catalogOrigin', 'driveFileId'],
+      columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'catalogOrigin', 'driveFileId', 'allowsSaleByAmount'],
       rows: acceptedRows,
       restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
       source,
@@ -933,6 +933,7 @@ function parseCatalogRows(values = []) {
         normalizedPresentation: cell(row, headerMap, 'presentacion_normalizada', 'presentation_normalized') || normalizePresentation(cell(row, headerMap, 'presentacion', 'presentation')),
         attributes: parseAttributes(cell(row, headerMap, 'atributos_json', 'attributes_json', 'atributos', 'attributes')) ?? {},
         catalogOrigin: cell(row, headerMap, 'origen_catalogo', 'catalog_origin', 'origen'),
+        allowsSaleByAmount: /^(true|si|sí|1)$/iu.test(cell(row, headerMap, 'permite_venta_por_valor', 'allows_sale_by_amount', 'allowsSaleByAmount').trim()),
       };
     })
     .filter((row) => row?.sku && row.name && row.active !== false);

@@ -1,9 +1,9 @@
-export const DEFAULT_CATALOG_RANGE = 'Catalogo!A1:P1000';
+export const DEFAULT_CATALOG_RANGE = 'Catalogo!A1:Q1000';
 
 // Existing tenants still have A:H/A:J saved. Expand columns only; preserve
 // their spreadsheet, tab and row boundaries. Named/custom ranges stay intact.
 export function enrichedCatalogRange(range = DEFAULT_CATALOG_RANGE) {
-  return String(range || DEFAULT_CATALOG_RANGE).replace(/^(.*!|)(\$?A\$?\d*):(\$?)([A-O])(\$?\d*)$/i, '$1$2:$3P$5');
+  return String(range || DEFAULT_CATALOG_RANGE).replace(/^(.*!|)(\$?A\$?\d*):(\$?)([A-P])(\$?\d*)$/i, '$1$2:$3Q$5');
 }
 
 export function catalogImportRanges(range, rowCount, previousCount = 0) {
@@ -14,7 +14,7 @@ export function catalogImportRanges(range, rowCount, previousCount = 0) {
   const start = Number(match[2] || 1);
   const end = Math.max(Number(match[3] || 1000), start + rowCount, start + previousCount);
   const read = match[3] ? effective.replace(/\d+$/, String(end)) : effective;
-  return { read, clear: `${sheet}A${start}:P${end}`, write: `${sheet}A${start}:P${start + rowCount}` };
+  return { read, clear: `${sheet}A${start}:Q${end}`, write: `${sheet}A${start}:Q${start + rowCount}` };
 }
 
 const normalize = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[_\s]+/g, ' ').trim();
