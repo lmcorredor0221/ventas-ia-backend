@@ -57,8 +57,7 @@ const args = {
     customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
     order: {
       delivery: true,
-      paymentMethod: 'cash',
-      collectionComplete: true,
+      collectionComplete: false,
       items: [
         { rawName: 'Coca-Cola', catalogQuery: 'coca cola', quantity: 1 },
         { rawName: 'Chocorramo', catalogQuery: 'chocorramo', quantity: 1 },
@@ -113,6 +112,26 @@ try {
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Resumen del pedido|Resumen final del pedido/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Coca-Cola original/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /7\.200/);
+
+  await runtime.handleInteractiveReply({
+    tenantId: 'andina',
+    conversationId,
+    normalized: { waId, text: 'Continuar pedido', interactive: { optionId: reviewOffer.options[0].id }, traceId: 'trace-catalog-review' },
+  });
+  const paymentOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === conversationId && item.purpose === 'payment_method' && item.status === 'active');
+  assert.ok(paymentOffer, 'Continuing a reviewed basket must proactively offer payment methods');
+  assert.deepEqual(paymentOffer.options.map((item) => item.title), ['Efectivo', 'Tarjeta', 'Bre-B']);
+
+  await runtime.handleInteractiveReply({
+    tenantId: 'andina',
+    conversationId,
+    normalized: { waId, text: 'Efectivo', interactive: { optionId: paymentOffer.options[0].id }, traceId: 'trace-catalog-payment' },
+  });
+  const confirmationOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === conversationId && item.purpose === 'order_confirmation' && item.status === 'active');
+  assert.ok(confirmationOffer, 'Selecting payment must proactively offer final order actions');
+  assert.deepEqual(confirmationOffer.options.map((item) => item.title), ['Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda']);
   console.log('Catalog selection reconciliation passed: contextual ambiguity, offer, selection and structured summary.');
 } finally {
   runtime.stop();

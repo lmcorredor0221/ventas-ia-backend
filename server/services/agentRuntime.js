@@ -754,7 +754,7 @@ export class AgentRuntime {
     // belong in `missingInfo` / the outbound reply. Otherwise a phrase such
     // as "Confirmación de la dirección..." is treated as an unresolved gap
     // forever and prevents the checkout offer from being generated.
-    const missingFields = normalizeOperationalMissingFields([
+    let missingFields = normalizeOperationalMissingFields([
       ...(!replaceDraft && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
       ...(plan.missingFields ?? []),
     ]);
@@ -788,6 +788,7 @@ export class AgentRuntime {
     if (nextProfile?.defaultAddress) removeMissingField(missingFields, 'delivery_address');
     if (selectedPaymentMethod) removeMissingField(missingFields, 'payment_method');
     if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
+    missingFields = normalizeOperationalMissingFields(missingFields);
 
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     const checkout = checkoutProgress({
@@ -1087,7 +1088,7 @@ export class AgentRuntime {
       item.available = Boolean(item.product && item.product.stock >= (item.quantity ?? 1));
     }
 
-    const missingFields = (draft.missingFields ?? []).filter((field) => {
+    let missingFields = normalizeOperationalMissingFields(draft.missingFields ?? []).filter((field) => {
       if (field === 'customer_name') return !(nextProfile?.name || collected.name);
       if (field === 'delivery_address') return !(nextProfile?.defaultAddress || collected.defaultAddress);
       if (field === 'payment_method') return !draft.paymentMethod;
@@ -1101,7 +1102,7 @@ export class AgentRuntime {
       }
       return true;
     });
-    draft.missingFields = [...new Set(missingFields)];
+    draft.missingFields = normalizeOperationalMissingFields(missingFields);
     for (const item of draft.items ?? []) {
       if (item.product) {
         // A selection callback can arrive after the previous turn stored
@@ -1119,6 +1120,7 @@ export class AgentRuntime {
       if (item.lineTotal === null) draft.missingFields.push(`quantity:${item.catalogQuery}`);
       if (!item.available) draft.missingFields.push(`stock:${item.catalogQuery}`);
     }
+    draft.missingFields = normalizeOperationalMissingFields(draft.missingFields);
     if (needsHumanProductResolution(draft.missingFields) && !preserveExistingCatalogSelections) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
         plan: { ...plan, order: draft, missingFields: draft.missingFields },
@@ -2669,17 +2671,6 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
   });
 }
 
-function normalizeOperationalMissingFields(fields = []) {
-  return [...new Set((Array.isArray(fields) ? fields : [])
-    .map((field) => String(field ?? '').trim())
-    .filter(isOperationalMissingField))];
-}
-
-function isOperationalMissingField(field) {
-  if (['customer_name', 'delivery_address', 'payment_method', 'order_items'].includes(field)) return true;
-  return /^(?:product|price|stock|quantity|presentation|selection|commercial_review|budget):\S/u.test(field);
-}
-
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod, checkout }) {
   const uniqueMissing = [...new Set(missingFields)].filter(field => field !== 'payment_method' || checkout?.phase === 'payment');
   const foundLines = orderItems
@@ -2777,6 +2768,25 @@ function needsHumanProductResolution(missingFields) {
     field.startsWith('price:') ||
     field.startsWith('stock:')
   );
+}
+
+// `missingFields` drives checkout sequencing, so it is a typed state
+// boundary—not a transcript of what the model explained in prose. Keeping
+// only these operational keys prevents an otherwise resolved basket from
+// being permanently classified as "collecting" after a catalog selection.
+function normalizeOperationalMissingFields(fields = []) {
+  return [...new Set((Array.isArray(fields) ? fields : [])
+    .map((field) => String(field ?? '').trim())
+    .filter(isOperationalMissingField))];
+}
+
+function isOperationalMissingField(field) {
+  return [
+    'customer_name',
+    'delivery_address',
+    'payment_method',
+    'order_items',
+  ].includes(field) || /^(?:product|price|stock|quantity|presentation|selection|commercial_review|budget):\S+/.test(field);
 }
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {

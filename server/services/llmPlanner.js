@@ -294,7 +294,9 @@ export class LLMPlanner {
       },
       candidateItems: products.items,
       missingInfo: products.missingInfo,
-      missingFields: products.missingInfo,
+      // Keep explanatory product-inference text out of the checkout state.
+      // The runtime owns canonical operational missing-field keys.
+      missingFields: [],
       explicitHumanRequest: context.explicitHumanRequest,
       handoffRequested: context.handoffRequested,
       handoffReason: context.handoffReason,
