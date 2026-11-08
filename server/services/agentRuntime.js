@@ -1725,7 +1725,7 @@ export class AgentRuntime {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const options = [
       { id: `vi:${offerId}:1`, title: 'Confirmar pedido', action: 'confirm_order', value: basket ?? basketKey((await this.getConversation(conversationId))?.orderDraft) },
-      { id: `vi:${offerId}:2`, title: 'Ajustar pedido', action: 'adjust_order' },
+      { id: `vi:${offerId}:2`, title: 'Modificar pedido', action: 'adjust_order' },
       { id: `vi:${offerId}:3`, title: 'Hablar con la tienda', action: 'human_handoff' },
     ];
     const offer = await this.store.createInteractionOffer({
@@ -1785,19 +1785,25 @@ export class AgentRuntime {
           ? { ...item, product: selectedProduct, selectionStatus: 'selected', selectionQuestion: null, lineTotal: quotedLineTotal({ ...item, product: selectedProduct }), available: selectedProduct.stock >= (item.quantity ?? 1) }
           : item),
       };
+      // A catalog choice resolves a question that VIA itself asked. When it
+      // resolves the last pending choice, the basket is ready for its normal
+      // checkout transition; this is workflow state, not a new inference
+      // about whether the buyer wants to add another product.
+      const allCatalogSelectionsResolved = updatedDraft.items.every((item) => (
+        item.product && item.selectionStatus !== 'pending'
+      ));
       const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
         wa_id: normalized.waId, profile_name: normalized.profileName,
       });
       return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
         preserveExistingCatalogSelections: true,
-        // The customer is resolving an alternative requested for the same
-        // already-complete basket. Keep that semantic signal for this single
-        // reconciliation; a later new message still has to establish it again.
+        // Resolving the last alternative advances the current basket to the
+        // next checkout step. A later free-text message can still add or adjust it.
         plan: {
           intent: 'order_clarification',
           order: {
             ...updatedDraft,
-            collectionComplete: current?.orderDraft?.checkout?.collectionComplete === true,
+            collectionComplete: allCatalogSelectionsResolved,
           },
           missingFields: updatedDraft.missingFields ?? [],
         } });

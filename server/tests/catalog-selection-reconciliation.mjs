@@ -64,7 +64,9 @@ const args = {
     order: {
       delivery: true,
       paymentMethod: 'cash',
-      collectionComplete: true,
+      // This mirrors production: choosing a catalog alternative does not make
+      // the interpreter emit collectionComplete:true on the preceding turn.
+      collectionComplete: null,
       items: [
         { rawName: 'Coca-Cola', catalogQuery: 'coca cola', quantity: 1 },
         { rawName: 'Chocorramo', catalogQuery: 'chocorramo', quantity: 1 },
@@ -101,6 +103,7 @@ try {
   assert.equal(resolved.items[0].lineTotal, 7200);
   assert.equal(resolved.items[1].lineTotal, 2800);
   assert.equal(resolved.subtotal, 10000);
+  assert.equal(resolved.checkout.phase, 'confirmation', 'Resolving the final catalog choice must advance to final confirmation');
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Resumen del pedido|Resumen final del pedido/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Coca-Cola original/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /7\.200/);
@@ -110,7 +113,7 @@ try {
   assert.deepEqual(confirmationOffer.options.map((option) => option.action), ['confirm_order', 'adjust_order', 'human_handoff']);
   const confirmationMessage = outboundWhatsAppPayloads.at(-1);
   assert.deepEqual(confirmationMessage.interactive?.buttons?.map((button) => button.title), [
-    'Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda',
+    'Confirmar pedido', 'Modificar pedido', 'Hablar con la tienda',
   ]);
   console.log('Catalog selection reconciliation passed: contextual ambiguity, offer, selection and structured summary.');
 } finally {
