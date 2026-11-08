@@ -24,7 +24,7 @@ const index = buildCatalogKnowledgeIndex({
 });
 const store = {
   getTenant: async () => ({ id: 'demo', config: { googleSheets: { catalogRange: 'Catalogo!A1:P1000' } } }),
-  persistCatalogSnapshot: async (payload) => calls.push(['snapshot', payload]),
+  persistCatalogSnapshot: async (payload) => { calls.push(['snapshot', payload]); return { status: 'published', catalogVersion: payload.index.catalogVersion }; },
 };
 const tools = {
   liveGoogleContext: async () => ({ spreadsheetId: 'sheet-demo', accessToken: 'test' }),
@@ -59,9 +59,23 @@ assert.equal(calls[1][1].persist, false);
 assert.equal(calls[2][0], 'snapshot');
 assert.equal(calls[2][1].index.catalogVersion, index.catalogVersion);
 assert.equal(calls[2][1].products.length, 1);
-assert.equal(worker.getStatus('demo').mode, 'on_demand');
-assert.equal(worker.getStatus('demo').scheduled, false);
-assert.equal(worker.getStatus('demo').lastResult.status, 'published');
+assert.equal((await worker.getStatus('demo')).mode, 'on_demand');
+assert.equal((await worker.getStatus('demo')).scheduled, false);
+assert.equal((await worker.getStatus('demo')).lastResult.status, 'published');
+
+const durableWorker = new CatalogSyncWorker({
+  store: {
+    getState: () => ({}),
+    getPublishedCatalogKnowledgeIndex: async () => ({
+      status: 'published', catalogVersion: 'durable-v1', rowCount: 2000,
+      nodeCount: 2000, relationCount: 4000, vectorCount: 2000, syncedAt: '2026-11-08T20:00:00.000Z',
+    }),
+  },
+  config: { catalogSyncMode: 'on_demand', catalogSyncWorkerEnabled: false },
+});
+const durableStatus = await durableWorker.getStatus('demo');
+assert.equal(durableStatus.published.catalogVersion, 'durable-v1');
+assert.equal(durableStatus.published.rowCount, 2000);
 
 await worker.stop();
 

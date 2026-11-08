@@ -218,13 +218,14 @@ export function createSaasRouter({ controlPlane, auth, catalogSyncWorker }) {
           rowCount: result.rowCount ?? null,
         },
       });
-      res.status(result.status === 'failed' ? 502 : 200).json(result);
+      const failedStatuses = new Set(['failed', 'skipped']);
+      res.status(failedStatuses.has(result.status) ? 502 : result.status === 'not_found' ? 404 : 200).json(result);
     } catch (error) {
       next(error);
     }
   });
 
-  router.get('/tenants/:tenantId/google/catalog/sync/status', (req, res, next) => {
+  router.get('/tenants/:tenantId/google/catalog/sync/status', async (req, res, next) => {
     try {
       auth.authorizeTenant(req, req.params.tenantId);
       if (!catalogSyncWorker) {
@@ -233,7 +234,7 @@ export function createSaasRouter({ controlPlane, auth, catalogSyncWorker }) {
         error.code = 'catalog_sync_unavailable';
         throw error;
       }
-      res.json(catalogSyncWorker.getStatus(req.params.tenantId));
+      res.json(await catalogSyncWorker.getStatus(req.params.tenantId));
     } catch (error) {
       next(error);
     }
