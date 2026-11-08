@@ -239,8 +239,14 @@ export class LLMPlanner {
   async apiTwoStageParse({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods, tenantCatalogVocabulary }) {
     const contextResult = await this.interpretContext({ tenantId, conversationId, text, customerProfile, conversation, config, paymentMethods });
     const context = contextResult.value;
-    const productIntent = context.productRequestDetected === true
-      || ['delivery_order', 'order_clarification', 'catalog_query'].includes(context.intent);
+    // A resolved-basket acceptance is a contextual checkout action, not a
+    // product request. Running product inference for it both adds latency and
+    // can erase the one-turn `continue_checkout` signal before checkout sees
+    // it. The context LLM makes this decision from the history and state.
+    const productIntent = context.pendingAction !== 'continue_checkout' && (
+      context.productRequestDetected === true
+      || ['delivery_order', 'order_clarification', 'catalog_query'].includes(context.intent)
+    );
     if (!productIntent) {
       return {
         plan: normalizeProviderPlan({
@@ -249,7 +255,15 @@ export class LLMPlanner {
           greetingReply: context.greetingReply,
           customerDetails: context.customerDetails,
           customerUnderstanding: context.customerUnderstanding,
-          order: { delivery: Boolean(context.customerUnderstanding?.delivery), items: [] },
+          order: {
+            delivery: Boolean(context.customerUnderstanding?.delivery),
+            items: [],
+            // The context interpreter, rather than a keyword rule, decides
+            // when an acceptance closes the resolved basket. Preserve that
+            // one-turn semantic signal so checkout can move from review to
+            // payment without re-running product inference.
+            collectionComplete: context.pendingAction === 'continue_checkout' ? true : null,
+          },
           commercePolicy: context.commercePolicy,
           missingFields: [],
           candidateItems: [],

@@ -782,6 +782,11 @@ export class ToolRegistry {
           text: payload.text ?? payload.template_name ?? 'Mensaje enviado',
           channel: liveConfig ? 'whatsapp_live' : 'whatsapp_mock',
           action: payload.action ?? payload.template_name ?? 'session_message',
+          // Retain the exact controls sent to WhatsApp with the conversation.
+          // This makes checkout state auditable and lets the platform render
+          // the same continuation, payment or confirmation choices instead
+          // of showing a summary that appears to end abruptly.
+          interactive: payload.interactive ? structuredClone(payload.interactive) : null,
           createdAt: new Date().toISOString(),
         });
         conversation.updatedAt = new Date().toISOString();

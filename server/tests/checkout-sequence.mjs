@@ -27,6 +27,7 @@ store.mutate(state => {
 });
 const conv = () => store.getState().conversations.find(c => c.id === args.conversationId);
 const reply = () => conv().messages.filter(m => m.role === 'agent').at(-1)?.text ?? '';
+const interactiveButtons = () => conv().messages.filter(m => m.role === 'agent').at(-1)?.interactive?.buttons?.map(button => button.title) ?? [];
 const offer = purpose => Object.values(store.getState().interactionOffersById ?? {}).filter(o => o.conversationId === args.conversationId && o.purpose === purpose && o.status === 'active').at(-1);
 const clarify = (text, order = {}) => runtime.handleOrderClarification({ ...args, normalized: { ...args.normalized, text }, plan: { intent: 'order_clarification', order } });
 const click = async option => runtime.handleInteractiveReply({ ...args, normalized: { ...args.normalized, text: option.title, interactive: { optionId: option.id } } });
@@ -46,6 +47,7 @@ try {
   assert.equal(conv().orderDraft.subtotal, 10800);
   assert.equal(offer('payment_method'), undefined, 'Resolved items still require the buyer to finish adding');
   assert.ok(offer('cart_review'));
+  assert.deepEqual(interactiveButtons(), ['Continuar pedido', 'Agregar productos', 'Hablar con la tienda'], 'The review actions must be preserved with the outgoing message');
   assert.match(reply(), /10\.800/);
   const oldReview = offer('cart_review');
   await clarify('mejor dos panes', { items: [item(1), { ...item(2), quantity: 2 }] });
@@ -54,10 +56,12 @@ try {
   assert.equal(offer('payment_method'), undefined);
   await click(offer('cart_review').options[0]);
   assert.ok(offer('payment_method'), 'Payment follows the current basket review');
+  assert.deepEqual(interactiveButtons(), ['Efectivo', 'Tarjeta', 'Bre-B'], 'The payment choices must be preserved with the outgoing message');
   assert.match(reply(), /16\.800/);
   // Payment interaction must retain the profile and quote and issue final buttons.
   await click(offer('payment_method').options.find(o => o.value === 'cash'));
   assert.ok(offer('order_confirmation'));
+  assert.deepEqual(interactiveButtons(), ['Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda'], 'The final actions must be preserved with the outgoing message');
   assert.equal(conv().orderDraft.paymentMethod, 'cash');
   const oldConfirmation = offer('order_confirmation');
   await clarify('agrega otra leche', { items: [{ ...item(1), quantity: 2 }, { ...item(2), quantity: 2 }] });
