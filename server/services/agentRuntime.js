@@ -749,7 +749,15 @@ export class AgentRuntime {
       reason: 'validate_order_product_files',
     });
 
-    const missingFields = [...(!replaceDraft && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []), ...(plan.missingFields ?? [])];
+    // `missingFields` is state-machine data, not an LLM explanation. Keep
+    // only its documented operational keys; natural-language explanations
+    // belong in `missingInfo` / the outbound reply. Otherwise a phrase such
+    // as "Confirmación de la dirección..." is treated as an unresolved gap
+    // forever and prevents the checkout offer from being generated.
+    const missingFields = normalizeOperationalMissingFields([
+      ...(!replaceDraft && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
+      ...(plan.missingFields ?? []),
+    ]);
     const selectedPaymentMethod = resolvePaymentMethod(normalized.text, paymentMethods)
       ?? resolvePaymentMethod(plan.order?.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods)
@@ -2625,11 +2633,19 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
   const previous = saved ?? {};
   const update = planned ?? {};
   const items = update.items?.length ? update.items : previous.items ?? [];
+  // `collectionComplete` is a contextual acceptance of the current basket.
+  // It must not keep narrative gaps produced in an earlier turn, nor let the
+  // interpreter's omitted/default `delivery: false` erase a settled delivery.
+  // The checkout state machine will add its canonical payment requirement.
+  const acceptedCurrentBasket = update.collectionComplete === true;
   return structuredClone({
     ...previous,
     ...update,
+    delivery: update.delivery === true || previous.delivery === true,
     paymentMethod: update.paymentMethod ?? previous.paymentMethod,
-    missingFields: previous.missingFields ?? update.missingFields ?? [],
+    missingFields: normalizeOperationalMissingFields(
+      acceptedCurrentBasket ? (update.missingFields ?? []) : (previous.missingFields ?? update.missingFields ?? []),
+    ),
     items: items.map((item) => {
       const sku = item.skuHint ?? item.product?.sku;
       const matches = (previous.items ?? []).filter((candidate) => sku
@@ -2651,6 +2667,17 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
       };
     }),
   });
+}
+
+function normalizeOperationalMissingFields(fields = []) {
+  return [...new Set((Array.isArray(fields) ? fields : [])
+    .map((field) => String(field ?? '').trim())
+    .filter(isOperationalMissingField))];
+}
+
+function isOperationalMissingField(field) {
+  if (['customer_name', 'delivery_address', 'payment_method', 'order_items'].includes(field)) return true;
+  return /^(?:product|price|stock|quantity|presentation|selection|commercial_review|budget):\S/u.test(field);
 }
 
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod, checkout }) {

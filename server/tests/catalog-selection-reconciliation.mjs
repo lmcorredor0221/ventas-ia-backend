@@ -64,7 +64,14 @@ const args = {
         { rawName: 'Chocorramo', catalogQuery: 'chocorramo', quantity: 1 },
       ],
     },
-    missingFields: [],
+    // A provider can return narrative explanations in its free-form
+    // `missingFields` output. They must never become state-machine gaps.
+    // This reproduces the production selection callback that previously
+    // remained in `collecting` after the final product was selected.
+    missingFields: [
+      "Confirmación de la dirección de entrega (perfil sugiere 'Calle de prueba 10', sin verificar)",
+      'Método de pago',
+    ],
   },
 };
 
@@ -95,6 +102,14 @@ try {
   assert.equal(resolved.items[0].lineTotal, 7200);
   assert.equal(resolved.items[1].lineTotal, 2800);
   assert.equal(resolved.subtotal, 10000);
+  assert.equal(resolved.checkout.phase, 'review', 'Resolved catalog selections must proactively advance to basket review');
+  const reviewOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === conversationId && item.purpose === 'cart_review' && item.status === 'active');
+  assert.ok(reviewOffer, 'The completed basket must offer the next customer actions automatically');
+  assert.deepEqual(reviewOffer.options.map((item) => item.title), ['Continuar pedido', 'Agregar productos', 'Hablar con la tienda']);
+  const outboundReview = conversation().messages.filter((message) => message.role === 'agent').at(-1);
+  assert.match(outboundReview.text, /¿Quieres agregar algo más o continuar con este pedido\?/);
+  assert.deepEqual(outboundReview.interactive?.buttons?.map((button) => button.title), ['Continuar pedido', 'Agregar productos', 'Hablar con la tienda']);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Resumen del pedido|Resumen final del pedido/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Coca-Cola original/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /7\.200/);

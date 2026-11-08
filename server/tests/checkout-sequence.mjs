@@ -94,6 +94,40 @@ try {
   // interaction is consumed.
   assert.equal(conv().orderDraft.checkout.phase, 'confirmation');
   assert.ok(offer('order_confirmation'));
+
+  // Sanitized replay of the production checkpoint: the basket and delivery
+  // were already settled, but a contextual acceptance arrives with the
+  // interpreter's default `delivery: false` and obsolete prose in
+  // `missingFields`. It must advance to payment, not repeat the quote.
+  args.conversationId = 'production-checkout-continuation';
+  store.mutate(state => state.conversations.unshift({
+    id: args.conversationId,
+    tenantId: 'andina',
+    waId: args.normalized.waId,
+    messages: [{ role: 'agent', text: 'Resumen del pedido. ¿Quieres agregar algo más o continuar con este pedido?' }],
+    status: 'live',
+    stage: 'clarification',
+    orderDraft: {
+      delivery: true,
+      subtotal: 10800,
+      paymentMethod: null,
+      missingFields: [
+        "Confirmación de la dirección de entrega (perfil sugiere 'Dirección de prueba', sin verificar)",
+        'Método de pago',
+        'payment_method',
+      ],
+      checkout: { phase: 'review', reviewedKey: null },
+      items: [
+        { ...item(1), product: products[1], lineTotal: 4800, available: true },
+        { ...item(2), product: products[2], lineTotal: 6000, available: true },
+      ],
+    },
+  }));
+  await clarify('Confirmado', { delivery: false, collectionComplete: true });
+  assert.equal(conv().orderDraft.checkout.phase, 'payment', 'A semantic acceptance must retain the settled delivery and advance to payment');
+  assert.deepEqual(conv().orderDraft.missingFields, ['payment_method'], 'Obsolete prose from an earlier turn cannot block checkout');
+  assert.ok(offer('payment_method'), 'Payment options must follow the accepted review');
+  assert.deepEqual(interactiveButtons(), ['Efectivo', 'Tarjeta', 'Bre-B']);
   console.log('Checkout sequence passed: ambiguity, additions, review, payment, stale buttons and final confirmation.');
 } finally {
   runtime.stop(); integrationOutbox.stop(); await store.close?.();
