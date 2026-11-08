@@ -46,6 +46,12 @@ runtime.planner = {
     return { text: fallbackText };
   },
 };
+const outboundWhatsAppPayloads = [];
+const originalToolCall = runtime.tools.call.bind(runtime.tools);
+runtime.tools.call = async (toolName, tenantId, currentConversationId, payload) => {
+  if (toolName === 'whatsapp_business_messaging') outboundWhatsAppPayloads.push(payload);
+  return originalToolCall(toolName, tenantId, currentConversationId, payload);
+};
 
 const args = {
   tenantId: 'andina',
@@ -98,6 +104,14 @@ try {
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Resumen del pedido|Resumen final del pedido/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Coca-Cola original/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /7\.200/);
+  const confirmationOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === conversationId && item.purpose === 'order_confirmation' && item.status === 'active');
+  assert.ok(confirmationOffer, 'A completed basket with a selected payment method must expose final confirmation actions');
+  assert.deepEqual(confirmationOffer.options.map((option) => option.action), ['confirm_order', 'adjust_order', 'human_handoff']);
+  const confirmationMessage = outboundWhatsAppPayloads.at(-1);
+  assert.deepEqual(confirmationMessage.interactive?.buttons?.map((button) => button.title), [
+    'Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda',
+  ]);
   console.log('Catalog selection reconciliation passed: contextual ambiguity, offer, selection and structured summary.');
 } finally {
   runtime.stop();

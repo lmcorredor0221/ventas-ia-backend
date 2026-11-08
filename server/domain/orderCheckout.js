@@ -18,5 +18,12 @@ export function checkoutProgress({ draft, previous, collectionComplete = null })
     : collectionComplete === false ? null : previous?.reviewedKey ?? null;
   const phase = unresolved ? 'collecting' : reviewedKey !== key ? 'review'
     : draft.delivery && !draft.paymentMethod ? 'payment' : 'confirmation';
-  return { phase, basketKey: key, reviewedKey: reviewedKey === key ? reviewedKey : null };
+  return {
+    phase,
+    basketKey: key,
+    reviewedKey: reviewedKey === key ? reviewedKey : null,
+    // Persist only the semantic signal produced for this turn. Callers decide
+    // explicitly when it is valid to carry it into a catalog-choice reply.
+    collectionComplete: collectionComplete === true,
+  };
 }

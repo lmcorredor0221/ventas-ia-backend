@@ -1790,7 +1790,17 @@ export class AgentRuntime {
       });
       return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
         preserveExistingCatalogSelections: true,
-        plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] } });
+        // The customer is resolving an alternative requested for the same
+        // already-complete basket. Keep that semantic signal for this single
+        // reconciliation; a later new message still has to establish it again.
+        plan: {
+          intent: 'order_clarification',
+          order: {
+            ...updatedDraft,
+            collectionComplete: current?.orderDraft?.checkout?.collectionComplete === true,
+          },
+          missingFields: updatedDraft.missingFields ?? [],
+        } });
     }
     if (['continue_checkout', 'confirm_order'].includes(result.option?.action)
       && result.option.value !== basketKey(current?.orderDraft)) {
