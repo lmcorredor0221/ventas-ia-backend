@@ -13,12 +13,12 @@ export class CatalogResolutionService {
     this.enabled = enabled;
   }
 
-  isEnabled() {
-    return typeof this.enabled === 'function' ? Boolean(this.enabled()) : Boolean(this.enabled);
+  isEnabled(tenantId = null) {
+    return typeof this.enabled === 'function' ? Boolean(this.enabled(tenantId)) : Boolean(this.enabled);
   }
 
-  canAdjudicate() {
-    return this.isEnabled() && typeof this.getPlanner?.()?.adjudicateCatalogCandidates === 'function';
+  canAdjudicate(tenantId = null) {
+    return this.isEnabled(tenantId) && typeof this.getPlanner?.()?.adjudicateCatalogCandidates === 'function';
   }
 
   async resolve({ tenantId, conversationId, normalized, conversation, items = [] }) {
@@ -28,7 +28,7 @@ export class CatalogResolutionService {
       return { items: prepared, status: 'not_needed', decisions: [] };
     }
 
-    if (!this.canAdjudicate()) {
+    if (!this.canAdjudicate(tenantId)) {
       return { items, status: 'legacy_fallback', decisions: [] };
     }
 

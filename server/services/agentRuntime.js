@@ -22,13 +22,21 @@ export class AgentRuntime {
       getPlanner: () => this.planner,
       events,
       telemetry,
-      enabled: () => this.contextualProductSelectionEnabled(),
+      enabled: (tenantId) => this.contextualProductSelectionEnabled(tenantId),
     });
     this.manualSweepTimer = null;
     this.conversationEnsureLocks = new Map();
   }
 
-  contextualProductSelectionEnabled() {
+  contextualProductSelectionEnabled(tenantId = null) {
+    const allowlist = Array.isArray(this.config?.contextualProductSelectionTenants)
+      ? this.config.contextualProductSelectionTenants
+      : String(process.env.CONTEXTUAL_PRODUCT_SELECTION_TENANTS ?? '')
+        .split(',').map((value) => value.trim()).filter(Boolean);
+    // Once an explicit pilot list exists it is authoritative. This prevents a
+    // legacy global flag from unintentionally enabling the new route for every
+    // tenant during a controlled rollout.
+    if (allowlist.length) return Boolean(tenantId && allowlist.includes(tenantId));
     return this.config?.contextualProductSelectionV2 === true
       || process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true';
   }
@@ -673,7 +681,7 @@ export class AgentRuntime {
       customerDetails: collected,
       delivery: Boolean(plan.order?.delivery),
     });
-    const contextualSelection = this.contextualProductSelectionEnabled()
+    const contextualSelection = this.contextualProductSelectionEnabled(tenantId)
       && typeof this.planner?.adjudicateCatalogCandidates === 'function';
     const currentConversation = await this.getConversation(conversationId);
     // Delivery orders must use the same retrieval contract as catalog

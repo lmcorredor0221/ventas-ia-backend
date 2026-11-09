@@ -39,6 +39,10 @@ export const RUNTIME_CONFIG = {
   // validate the new evidence/selection state. The legacy resolver remains
   // the safe fallback when this flag is false.
   contextualProductSelectionV2: process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true',
+  // A non-empty allowlist takes precedence over the global switch. It lets us
+  // validate contextual selection with one tenant before any wider rollout.
+  contextualProductSelectionTenants: String(process.env.CONTEXTUAL_PRODUCT_SELECTION_TENANTS ?? '')
+    .split(',').map((value) => value.trim()).filter(Boolean),
   // A vague commercial request remains an autonomous conversation for two
   // contextual clarification turns before it becomes a human case.
   clarificationMaxAttempts: Number(process.env.CLARIFICATION_MAX_ATTEMPTS ?? 2),

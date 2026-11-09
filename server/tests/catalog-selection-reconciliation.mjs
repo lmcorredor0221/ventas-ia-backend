@@ -12,7 +12,8 @@ const { store, runtime, integrationOutbox } = await createAppAsync({
   storageDriver: 'json',
   whatsappMode: 'mock',
   allowLocalCatalogFallback: true,
-  contextualProductSelectionV2: true,
+  contextualProductSelectionV2: false,
+  contextualProductSelectionTenants: ['andina'],
   backgroundWorkersEnabled: false,
   dataFile: path.join(dir, 'store.json'),
 });
@@ -75,6 +76,8 @@ const args = {
 };
 
 try {
+  assert.equal(runtime.contextualProductSelectionEnabled('andina'), true);
+  assert.equal(runtime.contextualProductSelectionEnabled('otro-tenant'), false);
   await runtime.handleDeliveryOrder(args);
   const conversation = () => store.getState().conversations.find((item) => item.id === conversationId);
   const draft = conversation().orderDraft;

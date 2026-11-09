@@ -2,7 +2,7 @@
 
 **Fecha:** 8 de noviembre de 2026
 
-**Estado:** Implementado y validado localmente — pendiente de activación controlada por tenant.
+**Estado:** Implementado y validado localmente — activación controlada por tenant preparada para `demo-de-tienda`.
 
 **Alcance:** continuidad conversacional ante solicitudes vagas, ambiguas o sin coincidencia de catálogo.
 **Línea base que se debe preservar:** `00329e4` (ancestro de la rama actual), especialmente reconocimiento, alternativas, selección y consolidación de productos.
@@ -161,7 +161,7 @@ La condición de pausa sigue siendo determinista porque previene concurrencia hu
 | --- | --- | --- | --- | --- |
 | A4-01 | Pruebas unitarias y de runtime del nuevo ciclo. | Nuevos `server/tests/*clarification*` | Casos críticos aprobados localmente. | Implementado: tres intentos, dos preguntas, escalamiento, y modos de bloqueo. |
 | A4-02 | Regresión de los flujos de `00329e4`. | `catalog-ambiguity-regression.mjs`, `checkout-*`, `backend-smoke.mjs` | Alternativas, selección y consolidación sin cambios funcionales. | Validado localmente: regresión de catálogo, checkout y smoke backend aprobados. |
-| A4-03 | Activar bandera solamente para Demo De Tienda y observar telemetría. | Render/configuración controlada | Sin aumento de handoffs improcedentes ni degradación de latencia. | Pendiente |
+| A4-03 | Activar bandera solamente para Demo De Tienda y observar telemetría. | Render/configuración controlada | Sin aumento de handoffs improcedentes ni degradación de latencia. | En curso: `CONTEXTUAL_PRODUCT_SELECTION_TENANTS` hace que la lista explícita prevalezca sobre la bandera global. |
 | A4-04 | Ampliar por tenant después de resultados acordados. | Configuración | Evidencia de salida de piloto documentada. | Pendiente |
 
 ## 6. Matriz mínima de pruebas
