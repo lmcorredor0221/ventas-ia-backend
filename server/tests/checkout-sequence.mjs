@@ -57,7 +57,8 @@ try {
   await click(offer('cart_review').options[0]);
   assert.ok(offer('payment_method'), 'Payment follows the current basket review');
   assert.deepEqual(interactiveButtons(), ['Efectivo', 'Tarjeta', 'Bre-B'], 'The payment choices must be preserved with the outgoing message');
-  assert.match(reply(), /16\.800/);
+  assert.match(reply(), /c[oó]mo prefieres pagar/i);
+  assert.doesNotMatch(reply(), /16\.800|Leche entera|Pan tajado/i, 'Payment capture must not repeat the reviewed basket');
   // Payment interaction must retain the profile and quote and issue final buttons.
   await click(offer('payment_method').options.find(o => o.value === 'cash'));
   assert.ok(offer('order_confirmation'));
@@ -128,6 +129,56 @@ try {
   assert.deepEqual(conv().orderDraft.missingFields, ['payment_method'], 'Obsolete prose from an earlier turn cannot block checkout');
   assert.ok(offer('payment_method'), 'Payment options must follow the accepted review');
   assert.deepEqual(interactiveButtons(), ['Efectivo', 'Tarjeta', 'Bre-B']);
+
+  // A new customer must not jump from an accepted basket directly to payment
+  // or confirmation. The checkout owns these required facts and asks for one
+  // at a time; the basket stays intact until the final summary.
+  args.conversationId = 'checkout-new-customer-details';
+  args.customerProfile = null;
+  args.normalized = { ...args.normalized, waId: '573000000456', text: 'una leche Colanta' };
+  store.mutate(state => state.conversations.unshift({ id: args.conversationId, tenantId: 'andina', waId: args.normalized.waId, messages: [], status: 'live' }));
+  await runtime.handleDeliveryOrder({ ...args, customerProfile: null, plan: { intent: 'delivery_order',
+    order: { delivery: true, items: [item(1)] }, missingFields: [] } });
+  assert.equal(conv().orderDraft.checkout.phase, 'review');
+  await click(offer('cart_review').options[0]);
+  assert.equal(conv().orderDraft.checkout.phase, 'collecting');
+  assert.deepEqual(new Set(conv().orderDraft.missingFields), new Set(['customer_name', 'delivery_address', 'payment_method']));
+  assert.deepEqual(interactiveButtons(), [], 'Collecting the name must not show checkout actions');
+  assert.match(reply(), /nombre/i);
+  assert.doesNotMatch(reply(), /Leche|4\.800|Confirmar pedido|Efectivo|Tarjeta|Bre-B/i);
+  await clarify('Me llamo Luis');
+  assert.equal(conv().orderDraft.checkout.phase, 'collecting');
+  assert.deepEqual(interactiveButtons(), [], 'Collecting the address must not show checkout actions');
+  assert.match(reply(), /direcci[oó]n/i);
+  assert.doesNotMatch(reply(), /Leche|4\.800|Confirmar pedido|Efectivo|Tarjeta|Bre-B/i);
+  await clarify('Calle 10 # 20-30');
+  assert.equal(conv().orderDraft.checkout.phase, 'payment');
+  assert.deepEqual(interactiveButtons(), ['Efectivo', 'Tarjeta', 'Bre-B']);
+  assert.match(reply(), /c[oó]mo prefieres pagar/i);
+  assert.doesNotMatch(reply(), /Leche|4\.800|Confirmar pedido/i);
+  await click(offer('payment_method').options.find(o => o.value === 'cash'));
+  assert.equal(conv().orderDraft.checkout.phase, 'confirmation');
+  assert.deepEqual(interactiveButtons(), ['Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda']);
+  assert.match(reply(), /Leche entera Colanta/);
+  assert.match(reply(), /Calle 10 # 20-30/);
+
+  // A product request can arrive without the literal word "domicilio". Once
+  // the buyer explicitly chooses "Continuar pedido", VIA must enter its
+  // delivery checkout instead of treating the accepted basket as a quote
+  // ready for confirmation. This reproduces the production regression.
+  args.conversationId = 'checkout-continue-recovers-delivery';
+  args.customerProfile = null;
+  args.normalized = { ...args.normalized, waId: '573000000789', text: 'una leche Colanta' };
+  store.mutate(state => state.conversations.unshift({ id: args.conversationId, tenantId: 'andina', waId: args.normalized.waId, messages: [], status: 'live' }));
+  await runtime.handleDeliveryOrder({ ...args, customerProfile: null, plan: { intent: 'delivery_order',
+    order: { delivery: false, items: [item(1)] }, missingFields: [] } });
+  assert.equal(conv().orderDraft.checkout.phase, 'review');
+  await click(offer('cart_review').options[0]);
+  assert.equal(conv().orderDraft.delivery, true, 'Continuar pedido explicitly starts the delivery checkout');
+  assert.equal(conv().orderDraft.checkout.phase, 'collecting');
+  assert.deepEqual(new Set(conv().orderDraft.missingFields), new Set(['customer_name', 'delivery_address', 'payment_method']));
+  assert.match(reply(), /nombre/i);
+  assert.deepEqual(interactiveButtons(), [], 'The data-capture turn must not repeat the basket or its actions');
   console.log('Checkout sequence passed: ambiguity, additions, review, payment, stale buttons and final confirmation.');
 } finally {
   runtime.stop(); integrationOutbox.stop(); await store.close?.();

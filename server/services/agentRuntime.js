@@ -711,23 +711,31 @@ export class AgentRuntime {
       // only*.  Retrieval stays broad: this must never discard a possible
       // product before the resolver has seen it.
       const itemForResolution = withCatalogPresentationEvidence(item, catalog.rows);
+      // A monetary request is commercially different from a unit request.
+      // Retrieval stays broad, but only catalog references explicitly marked
+      // by this tenant as sellable by amount may become selectable evidence.
+      // This protects the catalog contract without translating the requested
+      // amount into grams, kilograms, or a guessed number of units.
+      const commercialRows = catalogRowsForSaleMode(catalog.rows, itemForResolution);
+      const amountSaleUnavailable = isAmountSaleRequest(itemForResolution)
+        && catalog.rows.length > 0
+        && commercialRows.length === 0;
       const product = contextualSelection
-        ? selectUniqueAcceptableOrderProduct(catalog.rows, itemForResolution)
-        : selectAcceptableOrderProduct(catalog.rows, itemForResolution);
+        ? selectUniqueAcceptableOrderProduct(commercialRows, itemForResolution)
+        : selectAcceptableOrderProduct(commercialRows, itemForResolution);
       const catalogCandidates = contextualSelection
-        ? catalogEvidenceForItem(catalog.rows, itemForResolution, product)
+        ? catalogEvidenceForItem(commercialRows, itemForResolution, product)
         : undefined;
-      return {
+      return normalizeAmountSaleItem({
         ...itemForResolution,
         catalogIndexRequired: catalog.code === 'catalog_index_required',
+        amountSaleUnavailable,
         ...(!catalog.rows.length && catalog.restrictedItems?.length
           ? { commerceCategory: catalog.restrictedItems[0].category } : {}),
         product,
-        presentationOptions: presentationOptionsForItem(catalog.rows, itemForResolution, product),
+        presentationOptions: presentationOptionsForItem(commercialRows, itemForResolution, product),
         ...(catalogCandidates ? { catalogCandidates } : {}),
-        lineTotal: quotedLineTotal({ ...item, product }),
-        available: Boolean(product && product.stock >= (item.quantity ?? 1)),
-      };
+      });
     }));
     if (orderItemsFromCatalog.some((item) => item.catalogIndexRequired)) {
       return this.handleCatalogIndexRequired({ tenantId, conversationId, normalized, plan });
@@ -741,15 +749,16 @@ export class AgentRuntime {
         items: orderItemsFromCatalog,
       })
       : { items: orderItemsFromCatalog, status: 'legacy_fallback' };
-    const orderItems = resolution.items.map((item) => ({
-      ...item,
-      lineTotal: quotedLineTotal(item),
-      available: Boolean(item.product && item.product.stock >= (item.quantity ?? 1)),
-    }));
+    const orderItems = resolution.items.map((item) => normalizeAmountSaleItem(item));
     const previousDraft = currentConversation?.orderDraft;
     const effectiveOrderItems = previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
-      : orderItems;
+      : reconcileCatalogSelectionItems({
+        previousItems: previousDraft?.items ?? [],
+        incomingItems: orderItems,
+        intent: plan.intent,
+        replaceDraft,
+      });
 
     const resolvedCommerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: effectiveOrderItems });
     if (resolvedCommerceResult) return resolvedCommerceResult;
@@ -777,6 +786,10 @@ export class AgentRuntime {
       ?? resolvePaymentMethod(collected.paymentMethod, paymentMethods);
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
+      if (item.amountSaleUnavailable) {
+        missingFields.push(`commercial_review:${item.lineId ?? item.catalogQuery}`);
+        continue;
+      }
       if (item.product) {
         removeResolvedProductMissingFields(missingFields, item);
         if (item.lineId) removeMissingField(missingFields, `selection:${item.lineId}`);
@@ -797,13 +810,20 @@ export class AgentRuntime {
       }
     }
     const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
-    if (nextProfile?.name) removeMissingField(missingFields, 'customer_name');
-    if (nextProfile?.defaultAddress) removeMissingField(missingFields, 'delivery_address');
-    if (selectedPaymentMethod) removeMissingField(missingFields, 'payment_method');
-    if (isDelivery && !selectedPaymentMethod) missingFields.push('payment_method');
-    missingFields = normalizeOperationalMissingFields(missingFields);
-
     const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    // Customer details belong to checkout only after the buyer accepts the
+    // completed basket. Before then we keep the conversation focused on
+    // products and the review action, regardless of an omitted LLM field.
+    missingFields = reconcileCheckoutMissingFields(missingFields, {
+      delivery: isDelivery,
+      customerProfile: nextProfile,
+      paymentMethod: selectedPaymentMethod?.id ?? null,
+      checkoutAccepted: checkoutBasketAccepted({
+        draft: { items: effectiveOrderItems, subtotal, delivery: isDelivery },
+        previous: previousDraft?.checkout,
+        collectionComplete: plan.order?.collectionComplete,
+      }),
+    });
     const checkout = checkoutProgress({
       draft: { items: effectiveOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
       previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete,
@@ -833,15 +853,21 @@ export class AgentRuntime {
     const catalogSelectionOffer = !requiresHumanResolution
       ? await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout, items: effectiveOrderItems })
       : null;
-    const customerReply = await this.composeCustomerReply({
+    const checkoutDataCapture = isCheckoutDataCollectionPhase(checkout, missingFields);
+    // A WhatsApp list represents exactly one pending catalog line. Its body
+    // is the focused question produced during catalog adjudication; letting a
+    // later broad reply-composition pass replace it causes the customer to
+    // see questions for other pending lines without their corresponding list.
+    const customerReply = catalogSelectionOffer?.interactive?.body ?? await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
       facts: {
         kind: canQuote ? 'order_quote' : 'order_clarification',
         checkoutPhase: checkout.phase,
-        products: effectiveOrderItems.map((item) => item.product ?? item),
-        subtotal,
+        checkoutDataCapture,
+        products: checkoutDataCapture ? [] : effectiveOrderItems.map((item) => item.product ?? item),
+        subtotal: checkoutDataCapture ? null : subtotal,
         clarification: clarificationFacts(clarificationState, effectiveOrderItems),
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
@@ -1010,6 +1036,9 @@ export class AgentRuntime {
         sku: item.product?.sku ?? item.skuHint,
         name: item.product?.name ?? item.catalogQuery,
         quantity: item.quantity,
+        saleMode: item.saleMode === 'amount' ? 'amount' : 'units',
+        requestedAmount: item.saleMode === 'amount' ? item.requestedAmount ?? item.budgetAmount : null,
+        allowsSaleByAmount: item.product?.allowsSaleByAmount === true,
         unitPrice: item.product?.price ?? null,
         lineTotal: item.lineTotal ?? null,
       })),
@@ -1163,7 +1192,16 @@ export class AgentRuntime {
       });
     }
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
-    if (draft.delivery && !draft.paymentMethod && !draft.missingFields.includes('payment_method')) draft.missingFields.push('payment_method');
+    draft.missingFields = reconcileCheckoutMissingFields(draft.missingFields, {
+      delivery: draft.delivery,
+      customerProfile: nextProfile,
+      paymentMethod: draft.paymentMethod,
+      checkoutAccepted: checkoutBasketAccepted({
+        draft,
+        previous: conversation?.orderDraft?.checkout,
+        collectionComplete: plan.order?.collectionComplete,
+      }),
+    });
     draft.checkout = checkoutProgress({ draft, previous: conversation?.orderDraft?.checkout, collectionComplete: plan.order?.collectionComplete });
     delete draft.collectionComplete; // A semantic signal belongs only to this turn, not future additions.
 
@@ -1179,15 +1217,19 @@ export class AgentRuntime {
     });
     const checkoutOffer = await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout: draft.checkout });
     const catalogSelectionOffer = await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout: draft.checkout, items: draft.items ?? [] });
-    const customerReply = await this.composeCustomerReply({
+    const checkoutDataCapture = isCheckoutDataCollectionPhase(draft.checkout, draft.missingFields);
+    // Keep the list's question scoped to its selected pending line. This
+    // continuation path is reached after a prior interactive choice.
+    const customerReply = catalogSelectionOffer?.interactive?.body ?? await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
       facts: {
         kind: canQuote ? 'order_quote' : 'order_clarification',
         checkoutPhase: draft.checkout.phase,
-        products: draft.items ?? [],
-        subtotal: draft.subtotal,
+        checkoutDataCapture,
+        products: checkoutDataCapture ? [] : draft.items ?? [],
+        subtotal: checkoutDataCapture ? null : draft.subtotal,
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
@@ -1755,11 +1797,16 @@ export class AgentRuntime {
       candidate.selectionStatus === 'pending' && (candidate.catalogCandidates?.length ?? 0) > 0
     ));
     if (!item) return null;
-    const candidates = item.catalogCandidates.slice(0, 3);
+    // WhatsApp list messages support up to ten rows.  Catalog alternatives
+    // need their presentation and price to remain distinguishable, so using
+    // reply buttons (whose title is capped at 20 characters) is unsuitable
+    // even when there are only two or three variants.
+    const candidates = item.catalogCandidates.slice(0, 10);
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const options = candidates.map((candidate, index) => ({
       id: `vi:${offerId}:${index + 1}`,
-      title: shortProductOptionTitle(candidate),
+      title: catalogListOptionTitle(candidate),
+      description: catalogListOptionDescription(candidate),
       action: 'select_catalog_product',
       value: JSON.stringify({ basketKey: checkout.basketKey, lineId: item.lineId, sku: candidate.sku }),
     }));
@@ -1773,9 +1820,13 @@ export class AgentRuntime {
     });
     return {
       offer,
-      interactive: options.length <= 3
-        ? { kind: 'button', body: item.selectionQuestion ?? '¿Cuál de estas opciones prefieres?', buttons: options.map(({ id, title }) => ({ id, title })) }
-        : null,
+      interactive: {
+        kind: 'list',
+        body: item.selectionQuestion ?? `Para ${requestedProductName(item, item.catalogQuery)}, ¿cuál opción prefieres?`,
+        buttonLabel: 'Ver opciones',
+        sectionTitle: catalogListSectionTitle(item),
+        rows: options.map(({ id, title, description }) => ({ id, title, description })),
+      },
     };
   }
 
@@ -1842,7 +1893,18 @@ export class AgentRuntime {
       const updatedDraft = {
         ...current.orderDraft,
         items: current.orderDraft.items.map((item) => item.lineId === selection.lineId
-          ? { ...item, product: selectedProduct, selectionStatus: 'selected', selectionQuestion: null, lineTotal: quotedLineTotal({ ...item, product: selectedProduct }), available: selectedProduct.stock >= (item.quantity ?? 1) }
+          // A list reply is the customer's explicit resolution of this line.
+          // Candidate arrays belong only to pending selection state; retaining
+          // them leaks the already-resolved alternatives into the next LLM
+          // composition pass and can make it ask the same question again.
+          ? normalizeAmountSaleItem({
+            ...item,
+            product: selectedProduct,
+            selectionStatus: 'selected',
+            selectionQuestion: null,
+            catalogCandidates: [],
+            presentationOptions: [],
+          })
           : item),
       };
       const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
@@ -1862,7 +1924,11 @@ export class AgentRuntime {
         wa_id: normalized.waId, profile_name: normalized.profileName,
       });
       return this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
-        plan: { intent: 'order_clarification', order: { collectionComplete: true } } });
+        // "Continuar pedido" is the customer's explicit transition from a
+        // product quote to VIA's delivery checkout. The interpreter may have
+        // omitted the literal delivery intent while it recognized the basket;
+        // that omission must not bypass customer, address and payment capture.
+        plan: { intent: 'order_clarification', order: { collectionComplete: true, delivery: true } } });
     }
     if (result.option?.action === 'confirm_order') {
       return this.confirmOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
@@ -1960,6 +2026,11 @@ export class AgentRuntime {
   }
 
   async composeCustomerReply({ tenantId, conversationId, fallbackText, facts }) {
+    // At this point the checkout state has already decided the single fact it
+    // needs next. Letting a stylistic LLM pass reintroduce a cart summary or
+    // actions from another phase makes the protocol ambiguous; DeepSeek still
+    // interprets the buyer's next free-text answer in the following turn.
+    if (facts?.checkoutDataCapture === true) return fallbackText;
     if (!this.planner?.composeReply) return fallbackText;
     const composed = await this.planner.composeReply({ tenantId, conversationId, facts, fallbackText });
     return composed.text ?? fallbackText;
@@ -2267,6 +2338,72 @@ function mergeOrderItems(previousItems = [], nextItems = []) {
   return [...byKey.values()];
 }
 
+/**
+ * A clarification that chooses a concrete catalog variant is a replacement
+ * for a pending basket line, not a new purchase of one unit. The LLM decides
+ * whether the turn is an order clarification and identifies the variant; this
+ * state reconciliation only protects an amount or quantity already expressed
+ * by the customer unless the new turn explicitly changes that commercial
+ * instruction.
+ */
+function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = [], intent, replaceDraft = false }) {
+  if (replaceDraft || intent !== 'order_clarification' || !previousItems.some((item) => item?.selectionStatus === 'pending')) {
+    return incomingItems;
+  }
+  const unmatchedPrevious = [...previousItems];
+  const reconciled = incomingItems.map((incoming) => {
+    const matchedIndex = findPendingSelectionMatch(unmatchedPrevious, incoming);
+    if (matchedIndex < 0) return incoming;
+    const previous = unmatchedPrevious.splice(matchedIndex, 1)[0];
+    const incomingExpressesAmount = incoming?.budgetAmountExplicit === true || isPositiveAmount(incoming?.budgetAmount);
+    const preserveBudgetAmount = isPositiveAmount(previous?.budgetAmount)
+      && !incomingExpressesAmount
+      && incoming?.quantityExplicit !== true;
+    const budgetAmount = preserveBudgetAmount ? previous.budgetAmount : incoming.budgetAmount;
+    // A line sold by amount is never also one unit. If the customer changes
+    // it to units, quantityExplicit releases the preserved amount above.
+    const preserveQuantity = !isPositiveAmount(budgetAmount)
+      && previous?.quantity != null
+      && incoming?.quantityExplicit !== true;
+    const quantity = isPositiveAmount(budgetAmount)
+      ? null
+      : preserveQuantity ? previous.quantity : incoming.quantity;
+    const product = incoming.product ?? previous.product ?? null;
+    return {
+      ...previous,
+      ...incoming,
+      // Keep the original line identifier so missingFields and the existing
+      // interaction offer point at the same commercial line.
+      lineId: incoming.lineId ?? previous.lineId,
+      quantity,
+      budgetAmount,
+      lineTotal: quotedLineTotal({ ...incoming, product, quantity, budgetAmount }),
+      available: Boolean(product && product.stock >= (quantity ?? 1)),
+    };
+  });
+  // Product inference often returns only the selected line. Keep every other
+  // pending or already selected basket line until the customer explicitly
+  // removes/replaces it in a dedicated adjustment turn.
+  return [...reconciled, ...unmatchedPrevious];
+}
+
+function findPendingSelectionMatch(previousItems, incoming) {
+  const incomingSkus = new Set([
+    incoming?.product?.sku,
+    incoming?.skuHint,
+  ].filter(Boolean).map(String));
+  if (!incomingSkus.size) return -1;
+  const matches = previousItems
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => candidate?.selectionStatus === 'pending')
+    .filter(({ candidate }) => {
+      const candidateSkus = [candidate?.product?.sku, candidate?.skuHint, ...(candidate?.catalogCandidates ?? []).map((product) => product?.sku)]
+        .filter(Boolean).map(String);
+      return candidateSkus.some((sku) => incomingSkus.has(sku));
+    });
+  return matches.length === 1 ? matches[0].index : -1;
+}
+
 function resolveHumanReplyWaId(state, request, conversation) {
   if (conversation?.waId) return conversation.waId;
   if (request?.contextSnapshot?.customerWaId) return request.contextSnapshot.customerWaId;
@@ -2346,8 +2483,13 @@ function removeResolvedBudgetMissingFields(missingFields, item) {
   ].map(normalizeText).filter(Boolean);
   for (let index = missingFields.length - 1; index >= 0; index -= 1) {
     const field = missingFields[index];
-    if (!field.startsWith('quantity:') && !field.startsWith('presentation:')) continue;
-    const missing = normalizeText(field.replace(/^quantity:|^presentation:/, ''));
+    // A monetary request already defines its commercial total. It must never
+    // retain a previous quantity, physical-presentation or stock placeholder
+    // merely because the catalog has not yet chosen its supporting reference.
+    // Availability is added again later only when a selected reference is
+    // actually out of stock.
+    if (!field.startsWith('quantity:') && !field.startsWith('presentation:') && !field.startsWith('stock:')) continue;
+    const missing = normalizeText(field.replace(/^quantity:|^presentation:|^stock:/, ''));
     if (candidates.some((candidate) => candidate.includes(missing) || missing.includes(candidate))) {
       missingFields.splice(index, 1);
     }
@@ -2490,6 +2632,9 @@ function isAcceptableOrderProduct(product, item = {}) {
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
   const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   if (item.requestedPresentation && !productMatchesRequestedPresentation(product, item.requestedPresentation)) return false;
+  // An explicit attribute is part of the customer's request, not merely a
+  // ranking hint. Semantic retrieval may remain broad, but a conflicting
+  // product must not enter the basket through an inferred SKU or candidate.
   if (item.requestedAttributes && !matchesRequestedCatalogAttributes(product, item.requestedAttributes)) return false;
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
@@ -2526,26 +2671,8 @@ function isAcceptableOrderProduct(product, item = {}) {
   return true;
 }
 
-function requestedProductIdentityTokens(item = {}) {
-  const source = [item.rawName, item.catalogQuery, item.productHypothesis]
-    .filter(Boolean)
-    .join(' ');
-  return [...new Set(normalizeText(source)
-    // Sizes and units describe a requested variant, not the identity of a
-    // product. Presentation compatibility is validated independently.
-    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cc|l|lt|litro|litros|g|gr|kg|unidades?)\b/g, ' ')
-    .replace(/\bx\s*\d+\b/g, ' ')
-    .split(/\s+/)
-    .filter((token) => token.length >= 3)
-    .filter((token) => ![
-      'para', 'domicilio', 'pedido', 'quiero', 'quieres', 'regala', 'regalame',
-      'manda', 'mandame', 'necesito', 'una', 'uno', 'unos', 'unas', 'con', 'por',
-      'favor', 'del', 'que', 'tiene', 'hay', 'me', 'de', 'la', 'el', 'los', 'las',
-    ].includes(token)))];
-}
-
 function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
-  if (!requestedAttributes || typeof requestedAttributes !== 'object') return true;
+  if (!requestedAttributes || typeof requestedAttributes !== 'object' || Array.isArray(requestedAttributes)) return true;
   const actual = normalizeText([
     product.brand,
     product.category,
@@ -2561,6 +2688,31 @@ function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
     const expected = normalizeText(`${key} ${value}`);
     return actual.includes(normalizeText(value)) || actual.includes(expected);
   });
+}
+
+function requestedProductIdentityTokens(item = {}) {
+  const source = [item.rawName, item.catalogQuery, item.productHypothesis]
+    .filter(Boolean)
+    .join(' ');
+  return [...new Set(normalizeText(source)
+    // Sizes and units describe a requested variant, not the identity of a
+    // product. Presentation compatibility is validated independently.
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cc|l|lt|litro|litros|g|gr|kg|unidades?)\b/g, ' ')
+    // A purchase by amount carries commercial metadata (for example,
+    // "5.000 COP" or "por valor"). It is material to the order line, but
+    // cannot identify a catalog product. Leaving it here made the identity
+    // evidence for "limón por valor de 5000 COP" fail against every Limón
+    // Tahití reference after retrieval had already found them.
+    .replace(/\b\d+(?:[.,]\d+)?\b/g, ' ')
+    .replace(/\bx\s*\d+\b/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 3)
+    .filter((token) => ![
+      'para', 'domicilio', 'pedido', 'quiero', 'quieres', 'regala', 'regalame',
+      'manda', 'mandame', 'necesito', 'una', 'uno', 'unos', 'unas', 'con', 'por',
+      'favor', 'del', 'que', 'tiene', 'hay', 'me', 'de', 'la', 'el', 'los', 'las',
+      'valor', 'monto', 'presupuesto', 'peso', 'pesos', 'cop', 'moneda',
+    ].includes(token)))];
 }
 
 function buildCatalogReply({ selected, alternatives, drive, delivery, query, categoryQuery = false }) {
@@ -2677,8 +2829,44 @@ function isPositiveAmount(value) {
 
 function quotedLineTotal(item) {
   if (!isPositiveAmount(item.product?.price)) return null;
+  if (isAmountSaleRequest(item)) return Number(item.budgetAmount);
   if (isPositiveAmount(item.quantity)) return Number(item.product.price) * Number(item.quantity);
-  return isPositiveAmount(item.budgetAmount) ? Number(item.budgetAmount) : null;
+  return null;
+}
+
+function isAmountSaleRequest(item = {}) {
+  return isPositiveAmount(item.budgetAmount);
+}
+
+function catalogRowsForSaleMode(rows = [], item = {}) {
+  if (!isAmountSaleRequest(item)) return rows;
+  return rows.filter((row) => row?.allowsSaleByAmount === true);
+}
+
+function normalizeAmountSaleItem(item = {}) {
+  if (!isAmountSaleRequest(item)) {
+    const product = item.product ?? null;
+    return {
+      ...item,
+      lineTotal: quotedLineTotal({ ...item, product }),
+      available: Boolean(product && product.stock >= (item.quantity ?? 1)),
+    };
+  }
+  const product = item.product?.allowsSaleByAmount === true ? item.product : null;
+  const amountSaleUnavailable = item.amountSaleUnavailable === true || Boolean(item.product && !product);
+  return {
+    ...item,
+    product,
+    quantity: null,
+    saleMode: 'amount',
+    requestedAmount: Number(item.budgetAmount),
+    amountSaleUnavailable,
+    lineTotal: quotedLineTotal({ ...item, product, quantity: null }),
+    // The catalogue records whether the store permits selling this reference
+    // by amount. It does not expose a weight conversion, so stock only means
+    // that the reference is currently available.
+    available: Boolean(product && Number(product.stock ?? 0) > 0),
+  };
 }
 
 function restoreClarificationDraft(saved = {}, planned = {}) {
@@ -2723,6 +2911,17 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
 
 function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal, paymentMethods, paymentMethod, checkout }) {
   const uniqueMissing = [...new Set(missingFields)].filter(field => field !== 'payment_method' || checkout?.phase === 'payment');
+  const checkoutDataCapture = isCheckoutDataCollectionPhase(checkout, uniqueMissing);
+  // After the basket review has been accepted, checkout is a guided capture:
+  // one missing fact per turn. Do not re-quote the basket or expose actions
+  // for later stages while the buyer is supplying identity or delivery data.
+  if (checkoutDataCapture && checkout?.phase === 'collecting') {
+    if (uniqueMissing.includes('customer_name')) return '¿A nombre de quién registramos el domicilio?';
+    if (uniqueMissing.includes('delivery_address')) return '¿A qué dirección llevamos el pedido?';
+  }
+  if (checkoutDataCapture && checkout?.phase === 'payment') {
+    return `¿Cómo prefieres pagar: ${paymentMethodOptionsLabel(paymentMethods)}?`;
+  }
   const foundLines = orderItems
     .filter((item) => item.product && !hasMissingPresentation(item, uniqueMissing))
     .map((item) => {
@@ -2774,6 +2973,13 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
     for (const missing of uniqueMissing.filter((item) => item.startsWith('stock:'))) {
       asks.push(`confirmar alternativa para ${missing.replace('stock:', '')}`);
     }
+    for (const missing of uniqueMissing.filter((item) => item.startsWith('commercial_review:'))) {
+      const lineId = missing.replace('commercial_review:', '');
+      const item = orderItems.find((candidate) => String(candidate.lineId ?? candidate.catalogQuery) === lineId);
+      if (item?.budgetAmount) {
+        asks.push(`si prefieres una presentación de ${requestedProductName(item, item.catalogQuery)} o que la tienda revise una alternativa para ${formatCurrency(item.budgetAmount)}`);
+      }
+    }
     const prefix = foundLines.length ? `Claro. Tengo en la solicitud: ${foundLines.join(', ')}.` : 'Claro, te ayudo con el domicilio.';
     const optionsReply = presentationNotes.length ? ` ${presentationNotes.join(' ')}` : '';
     const dataAsk = asks.length ? ` Para continuar necesito ${joinSpanish(asks)}.` : '';
@@ -2789,6 +2995,12 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
     checkout,
     address,
   });
+}
+
+function isCheckoutDataCollectionPhase(checkout, missingFields = []) {
+  if (!['collecting', 'payment'].includes(checkout?.phase)) return false;
+  const checkoutFields = new Set(['customer_name', 'delivery_address', 'payment_method']);
+  return [...new Set(missingFields)].every((field) => checkoutFields.has(field));
 }
 
 function buildStructuredOrderSummary({ orderItems, customerProfile, subtotal, payment, checkout, address }) {
@@ -2874,6 +3086,29 @@ function normalizeOperationalMissingFields(fields = []) {
     .filter(isOperationalMissingField))];
 }
 
+// The interpreter may omit checkout fields because it correctly focused on a
+// product turn.  Once the buyer has accepted this exact basket, these fields
+// become a canonical checkout requirement owned by the runtime. They are not
+// inferred from prose and they are removed as soon as the persisted profile
+// or payment preference supplies them.
+function reconcileCheckoutMissingFields(fields, { delivery, customerProfile, paymentMethod, checkoutAccepted }) {
+  const next = normalizeOperationalMissingFields(fields);
+  for (const field of ['customer_name', 'delivery_address', 'payment_method']) {
+    removeMissingField(next, field);
+  }
+  if (!delivery || !checkoutAccepted) return normalizeOperationalMissingFields(next);
+  if (!customerProfile?.name) next.push('customer_name');
+  if (!customerProfile?.defaultAddress) next.push('delivery_address');
+  if (!paymentMethod) next.push('payment_method');
+  return normalizeOperationalMissingFields(next);
+}
+
+function checkoutBasketAccepted({ draft, previous, collectionComplete }) {
+  if (collectionComplete === true) return true;
+  if (!previous?.reviewedKey) return false;
+  return previous.reviewedKey === basketKey(draft);
+}
+
 function isOperationalMissingField(field) {
   return [
     'customer_name',
@@ -2941,9 +3176,32 @@ function describeProductOption(product) {
   return `${product.name}${presentation} (${formatCurrency(product.price)})`;
 }
 
-function shortProductOptionTitle(product) {
-  const text = describeProductOption(product) ?? 'Elegir producto';
-  return text.length <= 20 ? text : `${text.slice(0, 17).trim()}...`;
+function catalogListOptionTitle(product) {
+  const name = String(product?.name ?? product?.brand ?? 'Producto').trim();
+  const presentation = String(product?.presentation ?? '').trim();
+  const text = presentation && !normalizeText(name).includes(normalizeText(presentation))
+    ? `${name} ${presentation}`
+    : name;
+  return truncateWhatsAppText(text, 24, 'Producto');
+}
+
+function catalogListOptionDescription(product) {
+  const price = isPositiveAmount(product?.price) ? formatCurrency(product.price) : 'Precio por confirmar';
+  const stock = Number(product?.stock);
+  const availability = Number.isFinite(stock)
+    ? (stock > 0 ? `${stock} disponibles` : 'Sin existencias')
+    : 'Disponibilidad por confirmar';
+  return truncateWhatsAppText(`${price} · ${availability}`, 72, price);
+}
+
+function catalogListSectionTitle(item) {
+  const requested = requestedProductName(item, item?.catalogQuery);
+  return truncateWhatsAppText(`Opciones de ${requested}`, 24, 'Opciones');
+}
+
+function truncateWhatsAppText(value, limit, fallback) {
+  const text = String(value ?? '').trim() || fallback;
+  return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 3)).trim()}...`;
 }
 
 function parseCatalogSelectionValue(value) {

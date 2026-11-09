@@ -109,10 +109,13 @@ try {
   const offer = Object.values(store.getState().interactionOffersById ?? {})
     .find((item) => item.conversationId === conversationId && item.purpose === 'catalog_selection' && item.status === 'active');
   assert.ok(offer, 'Debe ofrecer alternativas al cliente');
-  const latestReply = conversation.messages.filter((message) => message.role === 'agent').at(-1)?.text ?? '';
-  assert.match(latestReply, /1\.5\s*L/);
-  assert.match(latestReply, /35\s*g/);
-  assert.match(latestReply, /65\s*g/);
+  const latestMessage = conversation.messages.filter((message) => message.role === 'agent').at(-1);
+  const latestReply = latestMessage?.text ?? '';
+  assert.match(latestReply, /Coca-Cola litro y medio/);
+  assert.ok(latestMessage?.interactive?.rows?.some((row) => /1\.5\s*L/.test(row.title)),
+    'La lista de la primera ambigüedad conserva sus presentaciones');
+  assert.doesNotMatch(latestReply, /35\s*g/, 'Una lista de WhatsApp debe preguntar solo por la primera ambigüedad pendiente');
+  assert.doesNotMatch(latestReply, /65\s*g/, 'La segunda familia queda en la canasta hasta resolver la primera');
 
   // A compact numeric presentation is common in WhatsApp ("coca 350").
   // The LLM may omit the unit in its structured item. The resolver may use

@@ -110,9 +110,27 @@ function prepareItem(item = {}, index = 0) {
 }
 
 function applyDecision(item, decision) {
+  // The model has already identified an amount-based purchase.  When the
+  // catalogue proves that every retrieved candidate is the same sellable
+  // product (only physical presentations differ), a backing reference is
+  // needed to quote and carry that line forward.  This does not translate
+  // money into weight, nor decide a product from text: it preserves the
+  // monetary intent and relies exclusively on catalog facts.
+  const amountSaleReference = canonicalAmountSaleReference(item.catalogCandidates, item);
+  if (amountSaleReference && !['remove', 'handoff'].includes(decision?.action)) {
+    return selectCandidate(item, amountSaleReference, {
+      action: 'select',
+      confidence: null,
+      reason: 'El catálogo confirmó una única identidad comercial habilitada para venta por valor.',
+      question: null,
+      source: 'catalog_amount_sale_identity',
+    });
+  }
+
   if (!decision) return item;
   const requestedAction = ['select', 'ask', 'preserve', 'remove', 'handoff'].includes(decision.action) ? decision.action : 'ask';
   const selected = candidateForDecision(item.catalogCandidates, decision);
+  const amountSalePresentationVariants = isAmountSalePresentationVariantSet(item.catalogCandidates, selected, item);
   // The model may rank one candidate higher, but ranking is not customer
   // confirmation. A multi-variant line remains pending until the latest
   // customer message explicitly selects one of those variants. This keeps
@@ -121,6 +139,7 @@ function applyDecision(item, decision) {
   const action = requestedAction === 'select'
     && item.catalogCandidates.length > 1
     && decision.customerSelected !== true
+    && !amountSalePresentationVariants
     ? 'ask'
     : requestedAction;
   const evidence = {
@@ -131,16 +150,7 @@ function applyDecision(item, decision) {
     source: 'llm_catalog_adjudication',
   };
 
-  if (action === 'select' && selected) {
-    return {
-      ...item,
-      product: selected,
-      selectionStatus: 'selected',
-      selectionQuestion: null,
-      selectionEvidence: evidence,
-      presentationOptions: [selected, ...item.catalogCandidates.filter((candidate) => candidate.sku !== selected.sku)],
-    };
-  }
+  if (action === 'select' && selected) return selectCandidate(item, selected, evidence);
   if (action === 'preserve' && item.product) {
     return { ...item, selectionStatus: 'selected', selectionEvidence: evidence };
   }
@@ -154,6 +164,69 @@ function applyDecision(item, decision) {
     selectionQuestion: evidence.question,
     selectionEvidence: evidence,
   };
+}
+
+function selectCandidate(item, selected, evidence) {
+  return {
+    ...item,
+    product: selected,
+    selectionStatus: 'selected',
+    selectionQuestion: null,
+    selectionEvidence: evidence,
+    presentationOptions: [selected, ...item.catalogCandidates.filter((candidate) => candidate.sku !== selected.sku)],
+  };
+}
+
+// A customer who asks for a monetary amount is buying that value, not a
+// package size. The LLM may select one catalog reference without an explicit
+// list reply only when the candidates are the *same* sellable-by-amount item
+// and differ solely in their physical presentation. This is an integrity
+// guard over catalog evidence, not text interpretation or a price/weight
+// conversion; distinct brands, flavours or varieties still require a choice.
+function isAmountSalePresentationVariantSet(candidates = [], selected, item = {}) {
+  if (!isPositiveAmount(item.budgetAmount) || !selected?.allowsSaleByAmount || candidates.length < 2) return false;
+  const selectedIdentity = amountSaleProductIdentity(selected);
+  if (!selectedIdentity) return false;
+  return candidates.every((candidate) => (
+    candidate?.allowsSaleByAmount === true
+    && amountSaleProductIdentity(candidate) === selectedIdentity
+  ));
+}
+
+function canonicalAmountSaleReference(candidates = [], item = {}) {
+  if (!isPositiveAmount(item.budgetAmount) || !candidates.length) return null;
+  const firstIdentity = amountSaleProductIdentity(candidates[0]);
+  if (!firstIdentity || !candidates.every((candidate) => (
+    candidate?.allowsSaleByAmount === true
+    && amountSaleProductIdentity(candidate) === firstIdentity
+  ))) return null;
+  // The reference only supports the request while its catalog stock says it
+  // is available. A zero-stock family stays unresolved so the normal
+  // availability/human-review path can explain it truthfully.
+  return candidates.find((candidate) => Number(candidate?.stock ?? 0) > 0) ?? null;
+}
+
+function amountSaleProductIdentity(product = {}) {
+  const presentation = normalizeCatalogText(product.presentation ?? product.normalizedPresentation);
+  const name = normalizeCatalogText(product.name).replace(presentation, '').replace(/\s+/g, ' ').trim();
+  const brand = normalizeCatalogText(product.brand);
+  const family = normalizeCatalogText(product.productFamily);
+  // A product family may be absent in a tenant sheet. The normalized name and
+  // brand remain enough to prove that these are presentation variants only.
+  return name ? `${name}|${brand}|${family}` : null;
+}
+
+function isPositiveAmount(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function normalizeCatalogText(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function candidateForDecision(candidates, decision = {}) {
@@ -189,6 +262,7 @@ function compactProduct(product = {}) {
     attributes: product.attributes ?? null,
     matchScore: product.matchScore ?? null,
     matchType: product.matchType ?? null,
+    allowsSaleByAmount: product.allowsSaleByAmount === true,
   };
 }
 

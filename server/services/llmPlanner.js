@@ -715,10 +715,13 @@ function extractItems(text, products) {
         .sort((a, b) => a.index - b.index)[0];
       if (!match) return null;
       const before = text.slice(Math.max(0, match.index - 28), match.index).trim();
+      const budgetAmount = inferBudgetAmount(before);
       return {
         rawName: match.alias,
         quantity: inferQuantity(before),
-        budgetAmount: inferBudgetAmount(before),
+        quantityExplicit: inferQuantity(before) !== null,
+        budgetAmount,
+        budgetAmountExplicit: budgetAmount !== null,
         catalogQuery: product.name,
         // A name/alias match is evidence, not a confirmed SKU. The runtime
         // must keep compatible variants available until the customer chooses.
@@ -806,11 +809,19 @@ function buildUnknownItem(fragment, options = {}) {
     .join(' ')
     .trim();
   if (!product || product.length < 3) return null;
-  const quantity = options.quantity ?? inferFragmentQuantity(fragment) ?? 1;
+  const inferredQuantity = options.quantity ?? inferFragmentQuantity(fragment);
+  // A budget is the commercial instruction for this line. It is not a
+  // conventional fallback unit and must survive until the catalog resolves a
+  // product that the tenant explicitly allows to sell by amount.
+  const quantity = options.budgetAmount ? null : (inferredQuantity ?? 1);
   const catalogQuery = [options.presentation, product].filter(Boolean).join(' ');
   return {
     rawName: [options.prefix, product].filter(Boolean).join(' '),
     quantity,
+    // A fallback parser still needs to distinguish the conventional default
+    // of one from an amount actually stated by the customer. The runtime uses
+    // that provenance to preserve a pending line's quantity on selection.
+    quantityExplicit: options.quantityExplicit ?? inferredQuantity !== null,
     catalogQuery,
     skuHint: null,
     inferred: true,
@@ -818,7 +829,7 @@ function buildUnknownItem(fragment, options = {}) {
     ambiguityReason: options.budgetAmount
       ? 'pedido_por_valor_o_producto_no_confirmado'
       : 'producto_inferido_desde_texto_no_validado',
-    ...(options.budgetAmount ? { budgetAmount: options.budgetAmount } : {}),
+    ...(options.budgetAmount ? { budgetAmount: options.budgetAmount, budgetAmountExplicit: true } : {}),
     ...(options.presentation ? { presentationHint: options.presentation } : {}),
     ...(options.container ? { containerHint: options.container } : {}),
   };
@@ -1116,6 +1127,7 @@ function buildReplyPrompt({ facts, fallbackText, config }) {
     'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
     'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
     'Respeta facts.checkoutPhase: collecting resuelve solo datos/productos pendientes, review muestra la canasta y pregunta si desea agregar o continuar, payment pregunta el medio de pago, confirmation solicita confirmación final. No adelantes el pago ni la confirmación si la fase no lo permite. Si el pago ya está anotado antes, es solo una preferencia.',
+    'Si facts.checkoutDataCapture es true, formula únicamente la pregunta del dato de checkout pendiente. No repitas canasta, productos, precios, subtotal ni botones de otra etapa.',
     'Si facts.clarification existe, formula únicamente la aclaración concreta que aún falta para esos productos. Usa la conversación previa y no anuncies escalamiento humano mientras queden rondas de aclaración.',
     'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
     JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
@@ -1485,7 +1497,7 @@ function buildCatalogAdjudicationPrompt({ context, config }) {
     'El planner ya interpretó el mensaje y la herramienta ya devolvió candidatos reales del catálogo.',
     'Decide solo entre esos candidatos; no inventes SKU, nombre, presentación, precio, stock ni atributos.',
     'Usa el historial, la solicitud original, la canasta y todos los atributos como evidencia. Corrige ortografía y modismos solo cuando la evidencia del catálogo lo respalde.',
-    'Si una línea tiene una única coincidencia compatible, selecciona su SKU. Si hay varias alternativas compatibles, usa ask y formula una pregunta breve con opciones: no selecciones una solo porque parezca más probable. Solo usa select con varias alternativas cuando el último mensaje del cliente nombre claramente una de ellas y marca customerSelected=true. Usa handoff solo cuando la incertidumbre o una restricción impida continuar de forma segura.',
+      'Si una línea tiene una única coincidencia compatible, selecciona su SKU. Si hay varias alternativas compatibles, usa ask y formula una pregunta breve con opciones: no selecciones una solo porque parezca más probable. Solo usa select con varias alternativas cuando el último mensaje del cliente nombre claramente una de ellas y marca customerSelected=true. Excepción de venta por valor: cuando budgetAmount sea positivo y los candidatos correspondan al mismo producto, marca y variedad, pero difieran únicamente en presentación física, esa presentación no es una ambigüedad; selecciona el SKU que mejor represente el producto y puedes dejar customerSelected=false. El runtime conservará el monto como total de la línea y jamás lo convertirá en unidades, gramos o kilos. Si cambian marca, sabor, variedad o producto, pregunta antes de seleccionar. Usa handoff solo cuando la incertidumbre o una restricción impida continuar de forma segura.',
     'No calcules totales y no decidas políticas comerciales. La respuesta debe ser JSON válido, sin markdown:',
     JSON.stringify({
       decisions: [{ lineId: 'id', action: 'select|ask|preserve|remove|handoff', selectedSku: null, customerSelected: false, confidence: 0, reason: '', question: '' }],
@@ -1870,7 +1882,12 @@ export function normalizeCandidateItems(value) {
       category: item.category ?? null,
       brand: item.brand ?? null,
       quantity: item.quantity ?? null,
+      quantityExplicit: item.quantityExplicit === true,
       budgetAmount: item.budgetAmount ?? null,
+      // Older provider responses do not include provenance. A positive amount
+      // in the current message is itself explicit evidence, while null means
+      // the selection should preserve a prior amount-sale line when present.
+      budgetAmountExplicit: item.budgetAmountExplicit === true || Number(item.budgetAmount) > 0,
       requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
       requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
       inferredAttributes: item.inferredAttributes ?? {},
