@@ -311,7 +311,9 @@ try {
   // must preserve that constraint instead of quoting the incompatible 400 ml
   // row as if it were the requested product.
   assert.equal(unavailablePresentationReply.includes('Coca-Cola 400ml'), false);
-  assert.match(unavailablePresentationReply, /validaci[oó]n|no encontr|pendiente/i);
+  // A catalog ambiguity starts an autonomous clarification. It becomes a
+  // human case only after the contextual clarification budget is exhausted.
+  assert.match(unavailablePresentationReply, /referencia|producto|presentaci[oó]n|pendiente/i);
 
   // A live catalog can express a 1.5 L item only in its display name. The
   // runtime must still match it to a request for "1.5 litros" and avoid
@@ -718,10 +720,9 @@ try {
     profileName: 'Producto Desconocido',
     text: 'Buenas tardes, para un domicilio, me regalas por favor un six pack de club colombia y un paquete de malboro sandia.',
   });
-  assert.equal(unknownOrderRun.result.summary, 'Structured order escalated to human');
-  assert.equal(unknownOrderRun.conversation.status, 'blocked');
-  assert.ok(unknownOrderRun.conversation.orderDraft.missingFields.some((field) => field.startsWith('product:')));
-  assert.ok(unknownOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
+  assert.equal(unknownOrderRun.result.summary, 'WhatsApp commerce restriction handled');
+  assert.equal(unknownOrderRun.conversation.status, 'live');
+  assert.match(unknownOrderRun.conversation.messages.at(-1).text, /políticas de WhatsApp/i);
 
   const cancellationRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -760,9 +761,10 @@ try {
     profileName: 'Pedido Mixto',
     text: 'Buenas tardes, para un domicilio, me regalas favor 5000 de calchichon y una coca-cola 350',
   });
-  assert.equal(mixedOrderRun.result.summary, 'Structured order escalated to human');
+  assert.equal(mixedOrderRun.result.summary, 'Structured order needs clarification');
+  assert.equal(mixedOrderRun.conversation.status, 'live');
   assert.ok(mixedOrderRun.conversation.orderDraft.missingFields.some((field) => field.includes('calchichon')));
-  assert.ok(mixedOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
+  assert.ok(mixedOrderRun.conversation.messages.at(-1).text.match(/referencia|producto|pendiente/i));
 
   const realGreetingRun = await postJson(`${base}/api/agent/run`, {
     tenantId: 'andina',
@@ -790,10 +792,18 @@ try {
     profileName: 'Conversacion Real',
     text: 'Me regalas por favor un paquete de Malboro sandía, 3 chocorramos y un brownie mamai de arequipe, 10 ramitos X2, ponque Bimbo mora / tres leches, 2 tacos de ducales',
   });
-  assert.equal(realLargeOrderRun.result.summary, 'Structured order escalated to human');
+  assert.equal(realLargeOrderRun.result.summary, 'WhatsApp commerce restriction handled');
   assert.ok(realLargeOrderRun.conversation.orderDraft.items.length >= 4);
-  assert.ok(realLargeOrderRun.conversation.orderDraft.missingFields.some((field) => field.includes('malboro')));
-  assert.ok(realLargeOrderRun.conversation.messages.at(-1).text.match(/valid(ar|o)|validación/));
+  assert.match(realLargeOrderRun.conversation.messages.at(-1).text, /políticas de WhatsApp/i);
+
+  // Only a real store takeover pauses the agent. Ambiguity and an approval
+  // stay in the autonomous conversational path.
+  await runtime.tools.call('human_handoff', 'andina', realLargeOrderRun.conversation.id, {
+    reason: 'El cliente pidió explícitamente atención de la tienda.',
+    urgency: 'Normal',
+    assigned_team: 'ventas',
+    context_snapshot: { action: 'human_takeover_smoke' },
+  });
 
   const pendingHandoffsBeforeFollowUp = store.getState().pendingRequests.filter((request) => (
     request.conversationId === realLargeOrderRun.conversation.id

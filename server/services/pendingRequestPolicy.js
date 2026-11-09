@@ -24,11 +24,21 @@ export function findOpenPendingRequest(state, candidate) {
 }
 
 export function hasOpenHumanRequest(state, conversationId) {
-  return (state?.pendingRequests ?? []).some((request) => (
-    request.conversationId === conversationId
-    && isPendingRequest(request)
-    && ['human_handoff', 'approval.requested', 'decision.requested'].includes(request.type)
+  return getPendingConversationMode(state, conversationId).mode === 'human_takeover';
+}
+
+// A commercial approval is a gate on one action, not a takeover of the whole
+// dialogue. Only a real human handoff pauses the agent so the buyer never
+// receives concurrent answers from the store and VIA.
+export function getPendingConversationMode(state, conversationId) {
+  const pending = (state?.pendingRequests ?? []).filter((request) => (
+    request.conversationId === conversationId && isPendingRequest(request)
   ));
+  const humanRequest = pending.find((request) => request.type === 'human_handoff');
+  if (humanRequest) return { mode: 'human_takeover', request: humanRequest };
+  const approvalRequest = pending.find((request) => ['approval.requested', 'decision.requested'].includes(request.type));
+  if (approvalRequest) return { mode: 'approval_pending', request: approvalRequest };
+  return { mode: 'none', request: null };
 }
 
 export function collapseDuplicateOpenPendingRequests(state, { now = new Date().toISOString() } = {}) {

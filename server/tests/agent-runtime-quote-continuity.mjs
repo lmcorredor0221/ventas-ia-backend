@@ -99,7 +99,8 @@ try {
   const missing = setup();
   missing.plan.order.items.push({ skuHint: 'UNKNOWN', catalogQuery: 'Producto inexistente', quantity: 1 });
   await runtime.handleOrderClarification(missing);
-  assert.equal(conversation(missing.conversationId).status, 'blocked', 'Unknown product must go to human review');
+  assert.equal(conversation(missing.conversationId).status, 'live', 'The first unresolved product asks for a contextual clarification before human review');
+  assert.equal(conversation(missing.conversationId).clarificationState?.attempts, 1);
   assert.ok(!Object.values(store.getState().interactionOffersById).some((item) => item.conversationId === missing.conversationId && item.purpose === 'order_confirmation'));
 
   const legacy = setup();

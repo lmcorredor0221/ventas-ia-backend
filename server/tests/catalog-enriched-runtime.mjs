@@ -5,11 +5,11 @@ import path from 'node:path';
 import { createAppAsync } from '../index.js';
 import { catalogImportRanges, enrichedCatalogRange } from '../domain/catalogMetadata.js';
 
-assert.equal(enrichedCatalogRange('Catalogo!A:H'), 'Catalogo!A:P');
+assert.equal(enrichedCatalogRange('Catalogo!A:H'), 'Catalogo!A:Q');
 assert.equal(enrichedCatalogRange('RangoNombrado'), 'RangoNombrado');
 assert.equal(enrichedCatalogRange('Catalogo!A1:Q2000'), 'Catalogo!A1:Q2000');
 assert.deepEqual(catalogImportRanges("'Otra hoja'!A3:J1000", 1200, 1500), {
-  read:"'Otra hoja'!A3:P1503", clear:"'Otra hoja'!A3:P1503", write:"'Otra hoja'!A3:P1203",
+  read:"'Otra hoja'!A3:Q1503", clear:"'Otra hoja'!A3:Q1503", write:"'Otra hoja'!A3:Q1203",
 });
 const dir = fs.mkdtempSync(path.join(os.tmpdir(),'via-catalog-attributes-'));
 const {store,runtime,integrationOutbox} = await createAppAsync({storageDriver:'json',whatsappMode:'mock',allowLocalCatalogFallback:true,dataFile:path.join(dir,'store.json')});
@@ -30,10 +30,12 @@ try {
       assert.equal(draft.subtotal,4000);
     } else {
       assert.ok(!draft.items[0].product,'A suggested SKU must not bypass an explicit conflicting attribute');
-      assert.ok(store.getState().pendingRequests.some(r=>r.conversationId===id),'Missing evidence follows existing human escalation');
+      assert.equal(store.getState().conversations.find((conversation) => conversation.id === id).status, 'live');
+      assert.equal(store.getState().conversations.find((conversation) => conversation.id === id).clarificationState?.attempts, 1);
+      assert.ok(!store.getState().pendingRequests.some(r=>r.conversationId===id),'Missing evidence starts a contextual clarification before human escalation');
     }
   }
-  console.log('Catalog constraints survive runtime quoting and missing evidence escalates');
+  console.log('Catalog constraints survive runtime quoting and missing evidence requests clarification');
 } finally {
   integrationOutbox?.stop?.();
   await store.close?.();

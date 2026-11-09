@@ -13,7 +13,7 @@ assert.equal(validation.valid, true);
 const products = validation.rows.map(catalogRowToProduct);
 assert.equal(products[0].description, 'Biodegradables para limpieza');
 assert.equal(products[0].attributes.material, 'algodón');
-assert.equal(catalogRowsToSheetValues(validation.rows)[0].length, 16);
+assert.equal(catalogRowsToSheetValues(validation.rows)[0].length, 17);
 assert.equal(validateCatalogCsv(csv.replace('""material""','invalid')).valid, false);
 const legacy = validateCatalogCsv('sku,nombre,precio,stock\nOLD,Arroz,3000,2');
 assert.equal(legacy.valid, true);
@@ -34,7 +34,7 @@ assert.deepEqual(await search({attributes:{desconocido:true}}), []);
 assert.deepEqual(await search({sku:'A-no-existe'}), []);
 
 const liveRows = await tools.readLiveCatalogRows({tenantId:'demo',live:{spreadsheetId:'test',accessToken:'fixture'},range:"'Mi Catalogo'!A1:J1000"});
-assert.equal(ranges[0], "'Mi Catalogo'!A1:P1000", 'Historical ranges must include metadata without changing tenant/tab');
+assert.equal(ranges[0], "'Mi Catalogo'!A1:Q1000", 'Historical ranges must include metadata without changing tenant/tab');
 assert.deepEqual(liveRows[0].attributes, products[0].attributes);
 assert.equal(liveRows[0].description, products[0].description);
 assert.equal(liveRows[0].price, 4000);

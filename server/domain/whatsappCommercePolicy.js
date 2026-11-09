@@ -22,13 +22,13 @@ export function catalogCommerceCategory(product = {}) {
   if (categories.has(explicit) || explicit === 'uncertain') return explicit;
   const category = normalize(product.category);
   const name = normalize(product.name ?? product.rawName ?? product.catalogQuery);
-  if (/\b(tabaco|cigarrillos?|cigarros?|tobacco|vapeadores?)\b/.test(`${category} ${name}`)) return 'tobacco';
+  if (/\b(tabaco|cigarrillos?|cigarros?|tobacco|vapeadores?|marlboro|malboro)\b/.test(`${category} ${name}`)) return 'tobacco';
   // "Alcohol" alone is not evidence of an alcoholic drink. Do not confuse
   // cleaning products, ingredients, personal names or alcohol-free claims.
   if (/\b(gel|limpieza|antiseptico|desinfectante|vinagre|salsa|esencia)\b/.test(name)) return null;
   if (/\b(sin alcohol|0[.,]0|no alcoholica)\b/.test(name)) return 'uncertain';
   if (/\b(cervezas?|licores?|aguardientes?|rones|ron|whisk[ey]+|vodka|tequila|vinos?|bebidas alcoholicas)\b/.test(category)) return 'alcohol';
-  if (/\b(cervezas?|licores?|aguardientes?|ron|whisk[ey]+|vodka|tequila)\b/.test(name) || /^vino\b/.test(name)) return 'alcohol';
+  if (/\b(cervezas?|licores?|aguardientes?|ron|whisk[ey]+|vodka|tequila|club colombia)\b/.test(name) || /^vino\b/.test(name)) return 'alcohol';
   if (/\balcohol\b/.test(name)) return 'uncertain';
   return null;
 }

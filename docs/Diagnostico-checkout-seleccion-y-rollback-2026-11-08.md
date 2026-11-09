@@ -55,3 +55,40 @@ Pruebas locales aprobadas:
 Por solicitud del usuario, la producción se revierte al commit estable `00329e4`. Este rollback solo cambia la versión ejecutada por Render; no purga ni modifica datos de producción.
 
 La corrección documentada queda disponible en Git para revisión y reproducción local, pero no debe considerarse activa mientras Render ejecute `00329e4`.
+
+## Complemento: escalamiento prematuro y mensajes posteriores (cliente terminado en 5060)
+
+Fecha de análisis: 8 de noviembre de 2026. La siguiente evidencia usa identificadores reducidos y horas de Colombia (UTC-5).
+
+### Secuencia observada en producción
+
+| Hora | Evidencia | Resultado |
+| --- | --- | --- |
+| 3:53 p. m. | DeepSeek ejecutó interpretación de contexto y luego inferencia de producto. | Reconoció dos solicitudes; no fue un fallo de comprensión inicial. |
+| 3:53 p. m. | PostgreSQL devolvió candidatos para ambas búsquedas de catálogo: 22 para gaseosas y 25 para papas. | No fue ausencia de catálogo ni indisponibilidad de PostgreSQL. |
+| 3:53 p. m. | No se emitió `catalog.reconciliation`. | La selección contextual que conserva candidatos como alternativas pendientes no estuvo activa en esta ejecución. |
+| 3:59 p. m. | Un mensaje posterior ejecutó solo `context_interpretation` (`provider_api_context_only`), sin inferencia de productos ni consulta de catálogo. | El modelo tuvo una única etapa de contexto; la traza no expone el texto ni permite afirmar la intención exacta. |
+| 4:00 p. m. | Otro mensaje entrante terminó en 192 ms, sin llamada a DeepSeek, catálogo ni WhatsApp saliente. | Coincide con el cortocircuito de una solicitud humana pendiente: el mensaje queda registrado pero no recibe análisis ni respuesta automática. |
+
+### Causa adicional confirmada
+
+Cuando una búsqueda termina sin producto seleccionado, el flujo sin selección contextual conserva el faltante como `product:<consulta>`. Esa clave es considerada una resolución humana obligatoria. Se crea la tarea `human_handoff`, la conversación queda bloqueada y los mensajes posteriores se detienen antes de que DeepSeek pueda hacer una pregunta de aclaración.
+
+La guarda que produce este comportamiento está en `agentRuntime`: si existe una solicitud humana abierta, persiste el mensaje entrante y retorna antes de enrutar la conversación. Es consistente con la traza de 192 ms observada a las 4:00 p. m.
+
+### Qué queda demostrado y qué no
+
+- Demostrado: DeepSeek sí identificó productos y el catálogo devolvió candidatos; el salto a humano ocurrió después de esas dos etapas.
+- Demostrado: después de crear la tarea humana, el siguiente mensaje no recorrió DeepSeek ni catálogo.
+- Fuertemente sustentado: la ruta de reconciliación contextual estaba desactivada, pues no hay evento `catalog.reconciliation` y el comportamiento corresponde al fallback legado.
+- No verificable desde los registros disponibles: el valor crudo de `missingFields` y la fila de la solicitud pendiente. El conector de Supabase disponible no apunta a la base de datos operativa de VIA; para comprobarlo directamente se requiere acceso de solo lectura a la base de datos de Render.
+
+### Ajuste focalizado propuesto, aún no aplicado
+
+1. Mantener candidatos como selecciones pendientes cuando hay evidencia razonable, en vez de convertir de inmediato la ambigüedad en `product:<consulta>`.
+2. Registrar por solicitud ambigua un estado estructurado de aclaración (`ámbito`, `intentos`, `última pregunta` y `evidencia`), separado de las tareas humanas.
+3. Hacer que DeepSeek formule hasta dos preguntas contextuales, usando el historial y los candidatos reales; el contador limita la seguridad operacional, no interpreta por palabras clave.
+4. Escalar únicamente después de esas dos aclaraciones sin resolución, o inmediatamente ante una solicitud explícita de humano, restricción de política, error de proveedor u otra condición obligatoria.
+5. Separar solicitudes de aprobación operativa de `human_handoff`, para que una tarea interna no bloquee innecesariamente el análisis de nuevos mensajes del cliente.
+
+Antes de aplicar ese ajuste deben añadirse pruebas para categorías vagas como “dos gaseosas y dos paquetes de papas”, dos rondas de aclaración, solicitud explícita de humano y continuidad después de una tarea humana cerrada. Esto preserva la línea base `00329e4` para reconocimiento, alternativas y selección de productos.

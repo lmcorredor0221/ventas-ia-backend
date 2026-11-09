@@ -1114,6 +1114,7 @@ function buildReplyPrompt({ facts, fallbackText, config }) {
     'Los hechos comerciales son cerrados: no inventes, elimines ni cambies productos, precios, subtotal, stock, descuentos, direcciones, pago, estado ni promesas de entrega.',
     'Mantén la respuesta breve, amable y accionable. No hables del sistema, del LLM ni de herramientas.',
     'Respeta facts.checkoutPhase: collecting resuelve solo datos/productos pendientes, review muestra la canasta y pregunta si desea agregar o continuar, payment pregunta el medio de pago, confirmation solicita confirmación final. No adelantes el pago ni la confirmación si la fase no lo permite. Si el pago ya está anotado antes, es solo una preferencia.',
+    'Si facts.clarification existe, formula únicamente la aclaración concreta que aún falta para esos productos. Usa la conversación previa y no anuncies escalamiento humano mientras queden rondas de aclaración.',
     'Debes conservar literalmente los términos obligatorios que vienen en requiredTerms.',
     JSON.stringify({ facts: facts ?? {}, requiredTerms, fallbackText }),
   ].join('\n');
@@ -1225,6 +1226,7 @@ function plannerConversationContext(conversation) {
   return {
     stage: conversation?.stage ?? null,
     hasAgentReply: messages.some(m => m.role === 'agent'),
+    clarificationState: conversation?.clarificationState ?? conversation?.orderDraft?.clarificationState ?? null,
     recentMessages: messages.slice(-6).map(m => ({ role: m.role, text: String(m.text ?? '').slice(0, 700) })),
   };
 }

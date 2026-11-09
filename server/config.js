@@ -39,6 +39,9 @@ export const RUNTIME_CONFIG = {
   // validate the new evidence/selection state. The legacy resolver remains
   // the safe fallback when this flag is false.
   contextualProductSelectionV2: process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true',
+  // A vague commercial request remains an autonomous conversation for two
+  // contextual clarification turns before it becomes a human case.
+  clarificationMaxAttempts: Number(process.env.CLARIFICATION_MAX_ATTEMPTS ?? 2),
   authRequired: process.env.AUTH_REQUIRED === 'true',
   csrfRequired: process.env.CSRF_REQUIRED ? process.env.CSRF_REQUIRED === 'true' : process.env.AUTH_REQUIRED === 'true',
   // The simulated payment endpoint exists for local contracts only. A pending

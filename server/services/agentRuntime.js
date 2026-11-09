@@ -33,6 +33,11 @@ export class AgentRuntime {
       || process.env.CONTEXTUAL_PRODUCT_SELECTION_V2 === 'true';
   }
 
+  clarificationMaxAttempts() {
+    const configured = Number(this.config?.clarificationMaxAttempts ?? 2);
+    return Number.isFinite(configured) ? Math.max(1, Math.min(4, Math.trunc(configured))) : 2;
+  }
+
   start() {
     if (this.manualSweepTimer) return;
     const intervalMs = Number(this.config.manualCaseSweepIntervalMs ?? 30_000);
@@ -794,7 +799,13 @@ export class AgentRuntime {
       draft: { items: effectiveOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
       previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete,
     });
-    const requiresHumanResolution = needsHumanProductResolution(missingFields);
+    const clarificationState = deriveClarificationState({
+      previous: previousDraft?.clarificationState ?? currentConversation?.clarificationState,
+      items: effectiveOrderItems,
+      missingFields,
+      maxAttempts: this.clarificationMaxAttempts(),
+    });
+    const requiresHumanResolution = needsHumanProductResolution(missingFields, clarificationState);
     const reply = requiresHumanResolution
       ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile })
       : buildOrderReply({
@@ -822,6 +833,7 @@ export class AgentRuntime {
         checkoutPhase: checkout.phase,
         products: effectiveOrderItems.map((item) => item.product ?? item),
         subtotal,
+        clarification: clarificationFacts(clarificationState, effectiveOrderItems),
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
@@ -846,6 +858,7 @@ export class AgentRuntime {
         addressSource: collected.defaultAddressSource,
         capturedAt: collected.name || collected.defaultAddress ? new Date().toISOString() : null,
       },
+      clarificationState,
       orderDraft: {
         delivery: isDelivery,
         items: effectiveOrderItems,
@@ -856,9 +869,24 @@ export class AgentRuntime {
         driveRefs: drive.source_refs ?? [],
         driveStatus: drive.status,
         catalogResolution: resolution.status,
+        clarificationState,
         checkout,
       },
     });
+
+    if (clarificationState) {
+      this.telemetry?.record('conversation', 'clarification', {
+        tenantId,
+        traceId: normalized.traceId,
+        metadata: {
+          attempts: clarificationState.attempts,
+          maxAttempts: clarificationState.maxAttempts,
+          exhausted: clarificationState.exhausted,
+          unresolvedCount: clarificationState.unresolvedLineIds.length,
+          escalated: requiresHumanResolution,
+        },
+      });
+    }
 
     if (requiresHumanResolution) {
       await this.tools.call('human_handoff', tenantId, conversationId, {
@@ -1119,7 +1147,7 @@ export class AgentRuntime {
       if (item.lineTotal === null) draft.missingFields.push(`quantity:${item.catalogQuery}`);
       if (!item.available) draft.missingFields.push(`stock:${item.catalogQuery}`);
     }
-    if (needsHumanProductResolution(draft.missingFields) && !preserveExistingCatalogSelections) {
+    if ((hasUnresolvedProductMissingField(draft.missingFields) || needsMandatoryHumanProductResolution(draft.missingFields)) && !preserveExistingCatalogSelections) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
         plan: { ...plan, order: draft, missingFields: draft.missingFields },
       });
@@ -1255,6 +1283,20 @@ export class AgentRuntime {
       const conversation = state.conversations.find((item) => item.id === request.conversationId);
       if (conversation) {
         conversationSnapshot = { id: conversation.id, waId: resolveHumanReplyWaId(state, request, conversation) };
+        // A human case ends the autonomous clarification scope. Keeping an
+        // exhausted scope open would make a later, legitimate message jump
+        // straight back to handoff without getting its own two turns.
+        if (request.type === 'human_handoff' && conversation.clarificationState?.status !== 'closed') {
+          const clarificationState = {
+            ...conversation.clarificationState,
+            status: 'closed',
+            exhausted: false,
+            closedAt: now,
+            resolution: outcome === 'approved' ? 'human_resolved' : 'human_denied',
+          };
+          conversation.clarificationState = clarificationState;
+          if (conversation.orderDraft) conversation.orderDraft.clarificationState = clarificationState;
+        }
         if (!this.orders || !currentOrder || outcome !== 'approved') {
           conversation.status = outcome === 'approved' ? 'live' : 'blocked';
           conversation.zone = outcome === 'approved' ? 'agent' : 'approval';
@@ -2771,12 +2813,56 @@ function buildStructuredOrderSummary({ orderItems, customerProfile, subtotal, pa
   return lines.join('\n');
 }
 
-function needsHumanProductResolution(missingFields) {
-  return missingFields.some((field) =>
-    field.startsWith('product:') ||
-    field.startsWith('price:') ||
-    field.startsWith('stock:')
-  );
+function needsHumanProductResolution(missingFields, clarificationState = null) {
+  if (needsMandatoryHumanProductResolution(missingFields)) return true;
+  return hasUnresolvedProductMissingField(missingFields) && clarificationState?.exhausted === true;
+}
+
+function needsMandatoryHumanProductResolution(missingFields = []) {
+  return missingFields.some((field) => field.startsWith('price:') || field.startsWith('stock:'));
+}
+
+function hasUnresolvedProductMissingField(missingFields = []) {
+  return missingFields.some((field) => field.startsWith('product:'));
+}
+
+function deriveClarificationState({ previous, items = [], missingFields = [], maxAttempts = 2 }) {
+  const unresolvedItems = items.filter((item) => !item.product && missingFields.includes(`product:${item.catalogQuery}`));
+  if (!unresolvedItems.length) return null;
+
+  const unresolvedLineIds = unresolvedItems.map((item) => item.lineId ?? item.catalogQuery).filter(Boolean);
+  const scopeKey = unresolvedItems
+    .map((item) => normalizeText(item.catalogQuery ?? item.rawName ?? item.lineId))
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  const sameScope = previous?.kind === 'catalog_ambiguity'
+    && previous?.status === 'open'
+    && previous?.scopeKey === scopeKey;
+  const attempts = (sameScope ? Number(previous?.attempts ?? 0) : 0) + 1;
+  const normalizedMaxAttempts = Math.max(1, Number(maxAttempts) || 2);
+  return {
+    version: 1,
+    status: attempts > normalizedMaxAttempts ? 'exhausted' : 'open',
+    kind: 'catalog_ambiguity',
+    scopeKey,
+    attempts,
+    maxAttempts: normalizedMaxAttempts,
+    exhausted: attempts > normalizedMaxAttempts,
+    unresolvedLineIds,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function clarificationFacts(state, items = []) {
+  if (!state) return null;
+  return {
+    attempts: state.attempts,
+    maxAttempts: state.maxAttempts,
+    unresolvedItems: items
+      .filter((item) => state.unresolvedLineIds.includes(item.lineId ?? item.catalogQuery))
+      .map((item) => ({ rawName: item.rawName ?? item.catalogQuery, candidateCount: item.catalogCandidates?.length ?? 0 })),
+  };
 }
 
 function productMatchesRequestedPresentation(product, requestedPresentation) {
