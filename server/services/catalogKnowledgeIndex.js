@@ -28,6 +28,7 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
   const nodes = [];
   const nodeIds = new Set();
   const relations = [];
+  const relationKeys = new Set();
   const productsBySku = {};
   const familyProducts = new Map();
 
@@ -49,20 +50,20 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
     const presentationNode = product.presentation
       ? addNode(CATALOG_NODE_TYPES.presentation, `${family}:${product.presentation}`, { value: product.presentation, family })
       : null;
-    addRelation(relations, CATALOG_RELATION_TYPES.relatedTo, tenantNode, productNode, { scope: 'tenant' });
-    addRelation(relations, CATALOG_RELATION_TYPES.belongsToFamily, productNode, familyNode);
-    if (brandNode) addRelation(relations, CATALOG_RELATION_TYPES.sameBrand, productNode, brandNode);
-    if (categoryNode) addRelation(relations, CATALOG_RELATION_TYPES.relatedTo, productNode, categoryNode);
-    if (presentationNode) addRelation(relations, CATALOG_RELATION_TYPES.hasPresentation, productNode, presentationNode);
+    addRelation(relations, CATALOG_RELATION_TYPES.relatedTo, tenantNode, productNode, { scope: 'tenant' }, relationKeys);
+    addRelation(relations, CATALOG_RELATION_TYPES.belongsToFamily, productNode, familyNode, {}, relationKeys);
+    if (brandNode) addRelation(relations, CATALOG_RELATION_TYPES.sameBrand, productNode, brandNode, {}, relationKeys);
+    if (categoryNode) addRelation(relations, CATALOG_RELATION_TYPES.relatedTo, productNode, categoryNode, {}, relationKeys);
+    if (presentationNode) addRelation(relations, CATALOG_RELATION_TYPES.hasPresentation, productNode, presentationNode, {}, relationKeys);
     for (const [key, value] of Object.entries(product.attributes ?? {})) {
       const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, `${key}:${value}`, { key, value });
-      addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode);
+      addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode, {}, relationKeys);
       const normalizedKey = normalizeKey(key);
       if (normalizedKey.includes('sabor') || normalizedKey.includes('flavor')) {
-        addRelation(relations, CATALOG_RELATION_TYPES.hasFlavor, productNode, attributeNode);
+        addRelation(relations, CATALOG_RELATION_TYPES.hasFlavor, productNode, attributeNode, {}, relationKeys);
       }
       if (normalizedKey.includes('variante') || normalizedKey.includes('tipo')) {
-        addRelation(relations, CATALOG_RELATION_TYPES.hasVariant, productNode, attributeNode);
+        addRelation(relations, CATALOG_RELATION_TYPES.hasVariant, productNode, attributeNode, {}, relationKeys);
       }
     }
     productsBySku[product.sku] = { ...product, family, nodeId: productNode };
@@ -85,6 +86,7 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
             nodeKey(CATALOG_NODE_TYPES.product, product.sku),
             nodeKey(CATALOG_NODE_TYPES.product, alternative.sku),
             { samePresentation, sameBrand, sameCategory },
+            relationKeys,
           );
         }
       }

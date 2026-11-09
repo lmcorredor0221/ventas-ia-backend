@@ -38,9 +38,12 @@ export function normalizeKey(value) {
     .slice(0, 180);
 }
 
-export function addRelation(relations, type, from, to, metadata = {}) {
+export function addRelation(relations, type, from, to, metadata = {}, relationKeys = null) {
   if (!type || !from || !to || from === to) return;
   const key = relationKey(type, from, to);
-  if (relations.some((relation) => relation.key === key)) return;
+  if (relationKeys) {
+    if (relationKeys.has(key)) return;
+    relationKeys.add(key);
+  } else if (relations.some((relation) => relation.key === key)) return;
   relations.push({ key, type, from, to, metadata });
 }
