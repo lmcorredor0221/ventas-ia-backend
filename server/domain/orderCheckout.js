@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 export function basketKey(draft = {}) {
   const lines = (draft.items ?? []).map(item => [item.product?.sku ?? item.skuHint ?? item.catalogQuery,
     item.product?.name, item.product?.presentation, item.quantity, item.budgetAmount,
+    item.requestedWeight, item.requestedWeightGrams, item.unitPricePerKg,
     item.requestedPresentation, item.requestedAttributes, item.product?.price, item.lineTotal]);
   return createHash('sha256').update(JSON.stringify([lines, draft.subtotal, draft.delivery])).digest('hex');
 }

@@ -8,6 +8,7 @@ import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.
 import { normalizeCommercePolicy } from '../domain/whatsappCommercePolicy.js';
 import { agentDisplayNameForTenant, DEFAULT_AGENT_NAME } from '../domain/agentIdentity.js';
 import { buildContextInterpreterPrompt, buildProductInferencePrompt, buildTenantProductVocabulary, tenantVocabularyPrompt } from '../prompts/catalogSemanticGuide.js';
+import { normalizeRequestedWeight as normalizeWeightRequest } from '../domain/catalogCommerce.js';
 
 const NUMBER_WORDS = {
   un: 1,
@@ -264,6 +265,7 @@ export class LLMPlanner {
             // payment without re-running product inference.
             collectionComplete: context.pendingAction === 'continue_checkout' ? true : null,
           },
+          lineUpdates: context.lineUpdates,
           commercePolicy: context.commercePolicy,
           missingFields: [],
           candidateItems: [],
@@ -292,6 +294,7 @@ export class LLMPlanner {
         collectionComplete: products.orderSignals?.collectionComplete ?? null,
         paymentMethod: products.orderSignals?.paymentMethod ?? null,
       },
+      lineUpdates: products.lineUpdates?.length ? products.lineUpdates : context.lineUpdates,
       candidateItems: products.items,
       missingInfo: products.missingInfo,
       // Keep explanatory product-inference text out of the checkout state.
@@ -1665,6 +1668,7 @@ function normalizeProviderPlan(plan) {
     customerDetails: normalizeCustomerDetails(plan.customerDetails),
     commercePolicy: normalizeCommercePolicy(plan.commercePolicy),
     candidateItems: plan.candidateItems,
+    lineUpdates: normalizeLineUpdates(plan.lineUpdates),
     toolPlan: plan.toolPlan,
     responseStrategy: normalizeResponseStrategy(plan.responseStrategy),
     explicitHumanRequest: plan.explicitHumanRequest === true,
@@ -1820,6 +1824,7 @@ function enrichPlannerOutput(plan, text) {
     reasoningMode: normalizeReasoningMode(plan.reasoningMode),
     customerUnderstanding,
     candidateItems: enrichedCandidateItems,
+    lineUpdates: normalizeLineUpdates(plan.lineUpdates),
     toolPlan: Array.isArray(plan.toolPlan) && plan.toolPlan.length
       ? plan.toolPlan
       : buildToolPlan({ intent: plan.intent, items: enrichedCandidateItems, order, responseStrategy }),
@@ -1872,6 +1877,16 @@ export function normalizeCandidateItems(value) {
       ?? item.productFamily
       ?? item.productHypothesis
       ?? null;
+    const requestedMeasure = normalizeRequestedMeasure(item);
+    const requestedWeight = normalizeWeightRequest(item.requestedWeight);
+    const normalizedQuantity = normalizeUnitQuantity(item.quantity);
+    // A provider can emit a carry-over numeric quantity while explicitly
+    // marking it as inferred and describing the customer's actual request as
+    // a measure (for example, "media libra"). That number is not an
+    // operational unit instruction and must not become stock arithmetic.
+    const quantity = requestedMeasure && item.quantityExplicit !== true
+      ? null
+      : normalizedQuantity;
     return {
       ...item,
       lineId: item.lineId ?? null,
@@ -1881,14 +1896,16 @@ export function normalizeCandidateItems(value) {
       productHypothesis: item.productHypothesis ?? null,
       category: item.category ?? null,
       brand: item.brand ?? null,
-      quantity: item.quantity ?? null,
-      quantityExplicit: item.quantityExplicit === true,
+      quantity,
+      quantityExplicit: item.quantityExplicit === true && quantity !== null,
       budgetAmount: item.budgetAmount ?? null,
       // Older provider responses do not include provenance. A positive amount
       // in the current message is itself explicit evidence, while null means
       // the selection should preserve a prior amount-sale line when present.
       budgetAmountExplicit: item.budgetAmountExplicit === true || Number(item.budgetAmount) > 0,
       requestedPresentation: item.requestedPresentation ?? item.presentation ?? item.explicitAttributes?.presentation ?? null,
+      requestedMeasure,
+      requestedWeight,
       requestedAttributes: item.requestedAttributes ?? item.explicitAttributes ?? null,
       inferredAttributes: item.inferredAttributes ?? {},
       recommendationIntent: item.recommendationIntent ?? item.categoryIntent ?? null,
@@ -1902,6 +1919,43 @@ export function normalizeCandidateItems(value) {
       explicitSku: item.explicitSku === true,
     };
   }).filter((item) => item.rawName || item.catalogQuery);
+}
+
+function normalizeUnitQuantity(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function normalizeRequestedMeasure(item = {}) {
+  const explicit = item.requestedMeasure ?? item.measure ?? item.explicitAttributes?.measure ?? item.explicitAttributes?.weight;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim().slice(0, 80);
+  // Older provider payloads sometimes placed a phrase such as "media libra"
+  // in quantity. Preserve it as semantic evidence, never as stock arithmetic.
+  if (typeof item.quantity === 'string' && normalizeUnitQuantity(item.quantity) === null) {
+    return item.quantity.trim().slice(0, 80) || null;
+  }
+  return null;
+}
+
+function normalizeLineUpdates(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((update) => {
+    const lineId = String(update?.lineId ?? '').trim().slice(0, 160);
+    const quantity = normalizeUnitQuantity(update?.quantity);
+    const requestedMeasure = normalizeRequestedMeasure(update ?? {});
+    const requestedWeight = normalizeWeightRequest(update?.requestedWeight);
+    const requestedAttributes = update?.requestedAttributes && typeof update.requestedAttributes === 'object'
+      ? update.requestedAttributes
+      : null;
+    return {
+      lineId,
+      quantity,
+      quantityExplicit: update?.quantityExplicit === true && quantity !== null,
+      requestedMeasure,
+      requestedWeight,
+      requestedAttributes,
+    };
+  }).filter((update) => update.lineId && (update.quantity !== null || update.requestedMeasure || update.requestedWeight || update.requestedAttributes));
 }
 
 function normalizeProviderIntent(intent) {
@@ -2138,6 +2192,7 @@ function normalizeContextAnalysis(value = {}) {
     handoffReason: String(value.handoffReason ?? '').trim() || null,
     customerDetails: normalizeCustomerDetails(value.customerDetails),
     pendingAction: value.pendingAction ?? null,
+    lineUpdates: normalizeLineUpdates(value.lineUpdates),
     customerUnderstanding: normalizeCustomerUnderstanding(value.customerUnderstanding),
     commercePolicy: value.commercePolicy ?? null,
     greetingReply: String(value.greetingReply ?? '').trim() || null,
@@ -2148,6 +2203,7 @@ function normalizeContextAnalysis(value = {}) {
 function normalizeProductInference(value = {}) {
   return {
     items: normalizeCandidateItems(value.items ?? value.candidateItems ?? []),
+    lineUpdates: normalizeLineUpdates(value.lineUpdates),
     customerDetails: normalizeCustomerDetails(value.customerDetails),
     orderSignals: value.orderSignals && typeof value.orderSignals === 'object' ? value.orderSignals : {},
     missingInfo: Array.isArray(value.missingInfo) ? value.missingInfo.map((item) => String(item)).slice(0, 20) : [],

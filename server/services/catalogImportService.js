@@ -1,3 +1,5 @@
+import { supportsWeightSale } from '../domain/catalogCommerce.js';
+
 const CANONICAL_HEADERS = [
   'sku',
   'nombre',
@@ -86,6 +88,8 @@ export function validateCatalogCsv(csvText) {
     if (row.atributos_json && !parseAttributes(row.atributos_json)) {
       errors.push({ row: rowNumber, field: 'atributos_json', message: 'Los atributos deben ser un objeto JSON valido.' });
     }
+    const commerceIssue = weightCommerceIssue(row);
+    if (commerceIssue) errors.push({ row: rowNumber, field: 'atributos_json', message: commerceIssue });
     if (row.activo === false && row.sku) warnings.push({ row: rowNumber, field: 'activo', message: 'Este producto quedara inactivo y no se ofrecera.' });
     rows.push(row);
   }
@@ -290,6 +294,24 @@ export function normalizePresentation(value) {
     .replace(/gramos?/g, 'g')
     .replace(/unidades?/g, 'und')
     .replace(/\s+/g, ' ');
+}
+
+function weightCommerceIssue(row) {
+  const attributes = parseAttributes(row.atributos_json);
+  if (!attributes || !Object.hasOwn(attributes, 'commerce')) return null;
+  const commerce = attributes.commerce;
+  if (!commerce || typeof commerce !== 'object' || Array.isArray(commerce)) {
+    return 'commerce debe ser un objeto JSON.';
+  }
+  const saleModes = commerce.saleModes;
+  if (saleModes == null) return commerce.weight ? 'commerce.weight requiere saleModes:["weight"].' : null;
+  if (!Array.isArray(saleModes) || saleModes.some((mode) => String(mode).trim().toLowerCase() !== 'weight')) {
+    return 'commerce.saleModes solo admite "weight". La venta por presupuesto se configura en permite_venta_por_valor.';
+  }
+  if (!saleModes.map((mode) => String(mode).trim().toLowerCase()).includes('weight')) return null;
+  return supportsWeightSale(catalogRowToProduct(row))
+    ? null
+    : 'La venta por peso requiere commerce.weight con precioPorKg, stockGrams, minGrams e incrementoGrams enteros positivos (stockGrams puede ser 0).';
 }
 
 function invalidResult(message) {

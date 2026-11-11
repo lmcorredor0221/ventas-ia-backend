@@ -3,6 +3,7 @@ import { EDITABLE_ORDER_STATUSES, assertOrderEditVersion, assertOrderEditPolicy,
 import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
 import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
+import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
 
 export class OrderService {
   constructor({ store, events, tools, outbox = null }) {
@@ -27,6 +28,7 @@ export class OrderService {
       sku: String(row.sku), name: row.name, presentation: row.presentation ?? '', description: row.description ?? '',
       brand: row.brand ?? '', category: row.category ?? '', productFamily: row.productFamily ?? '',
       price: Number(row.price), stock: row.stock == null ? null : Number(row.stock),
+      attributes: structuredClone(row.attributes ?? {}),
       allowsSaleByAmount: row.allowsSaleByAmount === true,
     }));
   }
@@ -101,15 +103,33 @@ export class OrderService {
       if (!product || seen.has(line.sku)) throw Object.assign(new Error('Hay un producto no disponible o repetido. Revisa el catálogo.'), { code: 'invalid_order_items', statusCode: 422 });
       seen.add(line.sku);
       const amountSale = line.saleMode === 'amount';
-      const quantity = amountSale ? null : Number(line.quantity);
+      const weightSale = line.saleMode === 'weight';
+      if (amountSale && weightSale) throw Object.assign(new Error('El producto no puede venderse por peso y por presupuesto a la vez.'), { code: 'invalid_sale_mode', statusCode: 422 });
+      const quantity = amountSale || weightSale ? null : Number(line.quantity);
       const requestedAmount = amountSale ? Number(line.requestedAmount) : null;
+      const requestedWeight = weightSale
+        ? normalizeRequestedWeight(line.requestedWeight ?? (line.requestedWeightGrams != null
+          ? { amount: line.requestedWeightGrams, unit: 'g' } : null))
+        : null;
       if (amountSale && (product.allowsSaleByAmount !== true || !Number.isSafeInteger(requestedAmount) || requestedAmount < 1 || line.quantity != null)) {
         throw Object.assign(new Error(`Este producto no permite solicitar un valor específico: ${product.name}.`), { code: 'invalid_sale_mode', statusCode: 422 });
       }
-      if (!amountSale && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999)) throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'invalid_order_quantity', statusCode: 422 });
-      if (!Number.isSafeInteger(product.price) || product.price <= 0 || !Number.isFinite(product.stock) || (!amountSale && product.stock < quantity)) throw Object.assign(new Error(`Revisa el precio o las existencias de ${product.name}.`), { code: 'invalid_order_product', statusCode: 422 });
-      if (line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw Object.assign(new Error(`Cambió el precio de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
-      return { sku: product.sku, name: product.name, presentation: product.presentation, quantity, saleMode: amountSale ? 'amount' : 'units', requestedAmount, unitPrice: product.price, lineTotal: amountSale ? requestedAmount : product.price * quantity, allowsSaleByAmount: product.allowsSaleByAmount === true };
+      const weightQuote = weightSale ? quoteWeightSale(product, requestedWeight) : null;
+      if (weightSale && (!supportsWeightSale(product) || !weightQuote || !weightQuote.available)) {
+        throw Object.assign(new Error(`Este producto no permite venderse por el peso solicitado: ${product.name}.`), { code: 'invalid_weight_sale', statusCode: 422 });
+      }
+      if (!amountSale && !weightSale && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999)) throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'invalid_order_quantity', statusCode: 422 });
+      if (!Number.isInteger(product.price) || product.price <= 0 || !Number.isFinite(product.stock) || (!amountSale && !weightSale && product.stock < quantity)) throw Object.assign(new Error(`Revisa el precio o las existencias de ${product.name}.`), { code: 'invalid_order_product', statusCode: 422 });
+      if (!weightSale && line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw Object.assign(new Error(`Cambió el precio de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
+      if (weightSale && line.unitPricePerKg !== undefined && Number(line.unitPricePerKg) !== weightQuote.pricePerKg) throw Object.assign(new Error(`Cambió el precio por kilo de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
+      return {
+        sku: product.sku, name: product.name, presentation: product.presentation, quantity,
+        saleMode: weightSale ? 'weight' : amountSale ? 'amount' : 'units', requestedAmount,
+        requestedWeightGrams: weightSale ? weightQuote.grams : null,
+        unitPricePerKg: weightSale ? weightQuote.pricePerKg : null,
+        unitPrice: product.price, lineTotal: weightSale ? weightQuote.lineTotal : amountSale ? requestedAmount : product.price * quantity,
+        allowsSaleByAmount: product.allowsSaleByAmount === true,
+      };
     });
     assertCommerceOrderAllowed(items, products);
     const policy = deliveryPolicyForTenant(tenant);

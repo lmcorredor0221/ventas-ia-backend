@@ -256,6 +256,51 @@ try {
   assert.equal(closedPackageDraft.items[0].quantity, null);
   assert.equal(closedPackageDraft.items[0].saleMode, 'amount');
   assert.ok(closedPackageDraft.missingFields.some((field) => field.startsWith('commercial_review:')));
+
+  const weightConversationId = 'weight-initial-request';
+  const quesoAlCorte = {
+    sku: 'QUESO-CORTE-001',
+    name: 'Queso doble crema al corte',
+    brand: 'Lácteos del barrio',
+    presentation: 'Al corte',
+    price: 43200,
+    stock: 1,
+    category: 'Charcutería',
+    attributes: { commerce: { saleModes: ['weight'], weight: {
+      pricePerKg: 43200, stockGrams: 12000, minGrams: 50, incrementGrams: 50,
+    } } },
+  };
+  const quesoEmpacado = {
+    sku: 'QUESO-PAQ-250', name: 'Queso doble crema empacado', presentation: '250 g', price: 10800, stock: 24,
+    category: 'Lácteos', attributes: { measure: { amount: 250, unit: 'g', dimension: 'weight' } },
+  };
+  store.mutate((state) => {
+    state.productsByTenant[tenantId].push(structuredClone(quesoAlCorte), structuredClone(quesoEmpacado));
+    state.conversations.unshift({ id: weightConversationId, tenantId, waId: '573000000906', messages: [], status: 'live', orderDraft: null });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId,
+    conversationId: weightConversationId,
+    normalized: { waId: '573000000906', text: 'Media libra de queso doble crema', traceId: 'weight-initial-request' },
+    customerProfile: null,
+    plan: {
+      intent: 'delivery_order',
+      order: { delivery: true, items: [{
+        rawName: 'queso doble crema', catalogQuery: 'queso doble crema',
+        requestedMeasure: 'media libra', requestedWeight: { amount: 0.5, unit: 'lb' },
+      }] },
+      missingFields: [],
+    },
+  });
+  const weightDraft = store.getState().conversations.find((item) => item.id === weightConversationId).orderDraft;
+  assert.equal(weightDraft.items[0].product?.sku, quesoAlCorte.sku, 'A weight request uses only catalog references explicitly configured for weight sale');
+  assert.equal(weightDraft.items[0].saleMode, 'weight');
+  assert.equal(weightDraft.items[0].requestedWeightGrams, 250);
+  assert.equal(weightDraft.items[0].unitPricePerKg, 43200);
+  assert.equal(weightDraft.items[0].lineTotal, 10800);
+  assert.equal(weightDraft.subtotal, 10800);
+  assert.ok(!weightDraft.missingFields.some((field) => field.startsWith('quantity:')), 'A validated weight replaces the unit quantity requirement');
+
   console.log('Order quantity reconciliation passed.');
 } finally {
   runtime.stop();

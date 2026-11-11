@@ -7,6 +7,7 @@ import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant,
 import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
 import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
 import { CatalogResolutionService } from './catalogResolutionService.js';
+import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null, catalogResolver = null }) {
@@ -720,16 +721,20 @@ export class AgentRuntime {
       const amountSaleUnavailable = isAmountSaleRequest(itemForResolution)
         && catalog.rows.length > 0
         && commercialRows.length === 0;
+      const weightSaleUnavailable = isWeightSaleRequest(itemForResolution)
+        && catalog.rows.length > 0
+        && commercialRows.length === 0;
       const product = contextualSelection
         ? selectUniqueAcceptableOrderProduct(commercialRows, itemForResolution)
         : selectAcceptableOrderProduct(commercialRows, itemForResolution);
       const catalogCandidates = contextualSelection
         ? catalogEvidenceForItem(commercialRows, itemForResolution, product)
         : undefined;
-      return normalizeAmountSaleItem({
+      return normalizeOperationalOrderItem({
         ...itemForResolution,
         catalogIndexRequired: catalog.code === 'catalog_index_required',
         amountSaleUnavailable,
+        weightSaleUnavailable,
         ...(!catalog.rows.length && catalog.restrictedItems?.length
           ? { commerceCategory: catalog.restrictedItems[0].category } : {}),
         product,
@@ -749,16 +754,16 @@ export class AgentRuntime {
         items: orderItemsFromCatalog,
       })
       : { items: orderItemsFromCatalog, status: 'legacy_fallback' };
-    const orderItems = resolution.items.map((item) => normalizeAmountSaleItem(item));
+    const orderItems = resolution.items.map((item) => normalizeOperationalOrderItem(item));
     const previousDraft = currentConversation?.orderDraft;
-    const effectiveOrderItems = previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
+    const effectiveOrderItems = (previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
       : reconcileCatalogSelectionItems({
         previousItems: previousDraft?.items ?? [],
         incomingItems: orderItems,
         intent: plan.intent,
         replaceDraft,
-      });
+      })).map((item) => normalizeOperationalOrderItem(item));
 
     const resolvedCommerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: effectiveOrderItems });
     if (resolvedCommerceResult) return resolvedCommerceResult;
@@ -786,7 +791,7 @@ export class AgentRuntime {
       ?? resolvePaymentMethod(collected.paymentMethod, paymentMethods);
     if (!effectiveOrderItems.length) missingFields.push('order_items');
     for (const item of effectiveOrderItems) {
-      if (item.amountSaleUnavailable) {
+      if (item.amountSaleUnavailable || item.weightSaleUnavailable) {
         missingFields.push(`commercial_review:${item.lineId ?? item.catalogQuery}`);
         continue;
       }
@@ -794,7 +799,7 @@ export class AgentRuntime {
         removeResolvedProductMissingFields(missingFields, item);
         if (item.lineId) removeMissingField(missingFields, `selection:${item.lineId}`);
       }
-      if (item.budgetAmount) removeResolvedBudgetMissingFields(missingFields, item);
+      if (item.budgetAmount || isWeightSaleRequest(item)) removeResolvedBudgetMissingFields(missingFields, item);
       if (!item.product && item.selectionStatus === 'pending' && item.catalogCandidates?.length) {
         missingFields.push(`selection:${item.lineId}`);
       } else if (!item.product && item.selectionStatus === 'handoff') {
@@ -802,9 +807,9 @@ export class AgentRuntime {
       } else if (!item.product) {
         missingFields.push(`product:${item.catalogQuery}`);
       }
-      if (item.product && !isPositiveAmount(item.product.price)) missingFields.push(`price:${item.catalogQuery}`);
-      if (!isPositiveAmount(item.quantity) && !isPositiveAmount(item.budgetAmount)) missingFields.push(`quantity:${item.catalogQuery}`);
-      if (item.product && !item.available) missingFields.push(`stock:${item.catalogQuery}`);
+      if (item.product && !isWeightSaleRequest(item) && !isPositiveAmount(item.product.price)) missingFields.push(`price:${item.catalogQuery}`);
+      if (!isPositiveUnitQuantity(item.quantity) && !isPositiveAmount(item.budgetAmount) && !isWeightSaleRequest(item)) missingFields.push(`quantity:${item.catalogQuery}`);
+      if (item.product && (isPositiveUnitQuantity(item.quantity) || isWeightSaleRequest(item)) && item.available === false) missingFields.push(`stock:${item.catalogQuery}`);
       if (item.product && item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)) {
         missingFields.push(`presentation:${item.catalogQuery}`);
       }
@@ -1036,8 +1041,10 @@ export class AgentRuntime {
         sku: item.product?.sku ?? item.skuHint,
         name: item.product?.name ?? item.catalogQuery,
         quantity: item.quantity,
-        saleMode: item.saleMode === 'amount' ? 'amount' : 'units',
+        saleMode: item.saleMode === 'amount' || item.saleMode === 'weight' ? item.saleMode : 'units',
         requestedAmount: item.saleMode === 'amount' ? item.requestedAmount ?? item.budgetAmount : null,
+        requestedWeightGrams: item.saleMode === 'weight' ? item.requestedWeightGrams : null,
+        unitPricePerKg: item.saleMode === 'weight' ? item.unitPricePerKg : null,
         allowsSaleByAmount: item.product?.allowsSaleByAmount === true,
         unitPrice: item.product?.price ?? null,
         lineTotal: item.lineTotal ?? null,
@@ -1111,6 +1118,11 @@ export class AgentRuntime {
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile, preserveProductAmbiguity = false, preserveExistingCatalogSelections = false }) {
     const conversation = await this.getConversation(conversationId);
     const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
+    // The LLM may understand a short contextual reply (for example, "una de
+    // cada una") as updates to several previously selected lines. It may only
+    // update existing line identifiers; product, price and stock remain facts
+    // owned by the catalog/runtime.
+    draft.items = applyStructuredLineUpdates(draft.items ?? [], plan.lineUpdates ?? []);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: draft.items });
     if (commerceResult) return commerceResult;
     const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
@@ -1130,10 +1142,8 @@ export class AgentRuntime {
     }
 
     for (const item of draft.items ?? []) {
-      if (!item.quantity && collected.quantity) {
+      if (!isPositiveUnitQuantity(item.quantity) && collected.quantity) {
         item.quantity = collected.quantity;
-        item.lineTotal = item.product ? item.product.price * item.quantity : null;
-        item.available = Boolean(item.product && item.product.stock >= item.quantity);
       }
     }
     if (collected.removeProductQuery) {
@@ -1148,10 +1158,7 @@ export class AgentRuntime {
         plan: { ...plan, order: draft, missingFields: draft.missingFields ?? [] },
       });
     }
-    for (const item of draft.items) {
-      item.lineTotal = quotedLineTotal(item);
-      item.available = Boolean(item.product && item.product.stock >= (item.quantity ?? 1));
-    }
+    draft.items = draft.items.map((item) => normalizeOperationalOrderItem(item));
 
     let missingFields = normalizeOperationalMissingFields(draft.missingFields ?? []).filter((field) => {
       if (field === 'customer_name') return !(nextProfile?.name || collected.name);
@@ -1160,7 +1167,7 @@ export class AgentRuntime {
       if (field.startsWith('quantity:')) {
         const query = field.replace('quantity:', '');
         const item = (draft.items ?? []).find((candidate) => candidate.catalogQuery === query);
-        return !item?.quantity;
+        return !isPositiveUnitQuantity(item?.quantity) && !isWeightSaleRequest(item);
       }
       if (field.startsWith('presentation:')) {
         return preserveProductAmbiguity || !confirmsPresentation(normalized.text, field.replace('presentation:', ''));
@@ -1182,8 +1189,10 @@ export class AgentRuntime {
     }
     if (!draft.items.length) draft.missingFields.push('order_items');
     for (const item of draft.items) {
-      if (item.lineTotal === null) draft.missingFields.push(`quantity:${item.catalogQuery}`);
-      if (!item.available) draft.missingFields.push(`stock:${item.catalogQuery}`);
+      if (item.lineTotal === null && !isWeightSaleRequest(item)) draft.missingFields.push(`quantity:${item.catalogQuery}`);
+      // Stock can only be evaluated after a numeric unit quantity is known.
+      // A semantic measure is an interpretation fact, not a stock shortage.
+      if ((isPositiveUnitQuantity(item.quantity) || isWeightSaleRequest(item)) && item.available === false) draft.missingFields.push(`stock:${item.catalogQuery}`);
     }
     draft.missingFields = normalizeOperationalMissingFields(draft.missingFields);
     if ((hasUnresolvedProductMissingField(draft.missingFields) || needsMandatoryHumanProductResolution(draft.missingFields)) && !preserveExistingCatalogSelections) {
@@ -2326,13 +2335,14 @@ function mergeOrderItems(previousItems = [], nextItems = []) {
       byKey.set(key, item);
       continue;
     }
-    const quantity = Number(current.quantity ?? 0) + Number(item.quantity ?? 0);
+    const quantity = (isPositiveUnitQuantity(current.quantity) ? Number(current.quantity) : 0)
+      + (isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : 0);
     byKey.set(key, {
       ...current,
       ...item,
-      quantity: quantity || (item.quantity ?? current.quantity),
+      quantity: quantity || (isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : isPositiveUnitQuantity(current.quantity) ? Number(current.quantity) : null),
       lineTotal: item.product && quantity ? item.product.price * quantity : item.lineTotal ?? current.lineTotal,
-      available: item.product && quantity ? item.product.stock >= quantity : item.available ?? current.available,
+      available: item.product && quantity ? item.product.stock >= quantity : item.available ?? current.available ?? null,
     });
   }
   return [...byKey.values()];
@@ -2360,14 +2370,15 @@ function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = []
       && !incomingExpressesAmount
       && incoming?.quantityExplicit !== true;
     const budgetAmount = preserveBudgetAmount ? previous.budgetAmount : incoming.budgetAmount;
+    const requestedWeight = incoming.requestedWeight ?? previous.requestedWeight ?? null;
     // A line sold by amount is never also one unit. If the customer changes
     // it to units, quantityExplicit releases the preserved amount above.
     const preserveQuantity = !isPositiveAmount(budgetAmount)
-      && previous?.quantity != null
+      && isPositiveUnitQuantity(previous?.quantity)
       && incoming?.quantityExplicit !== true;
     const quantity = isPositiveAmount(budgetAmount)
       ? null
-      : preserveQuantity ? previous.quantity : incoming.quantity;
+      : preserveQuantity ? Number(previous.quantity) : isPositiveUnitQuantity(incoming.quantity) ? Number(incoming.quantity) : null;
     const product = incoming.product ?? previous.product ?? null;
     return {
       ...previous,
@@ -2377,8 +2388,9 @@ function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = []
       lineId: incoming.lineId ?? previous.lineId,
       quantity,
       budgetAmount,
-      lineTotal: quotedLineTotal({ ...incoming, product, quantity, budgetAmount }),
-      available: Boolean(product && product.stock >= (quantity ?? 1)),
+      requestedWeight,
+      requestedMeasure: incoming.requestedMeasure ?? semanticMeasureFromLegacyQuantity(previous),
+      ...normalizeOperationalOrderItem({ ...incoming, product, quantity, budgetAmount, requestedWeight }),
     };
   });
   // Product inference often returns only the selected line. Keep every other
@@ -2827,10 +2839,26 @@ function isPositiveAmount(value) {
   return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) > 0;
 }
 
+function isPositiveUnitQuantity(value) {
+  const quantity = Number(value);
+  return Number.isInteger(quantity) && quantity > 0;
+}
+
+function semanticMeasureFromLegacyQuantity(item = {}) {
+  item = item ?? {};
+  const measure = item.requestedMeasure ?? item.requestedAttributes?.measure ?? item.requestedAttributes?.weight;
+  if (typeof measure === 'string' && measure.trim()) return measure.trim().slice(0, 80);
+  if (typeof item.quantity === 'string' && !isPositiveUnitQuantity(item.quantity)) {
+    return item.quantity.trim().slice(0, 80) || null;
+  }
+  return null;
+}
+
 function quotedLineTotal(item) {
   if (!isPositiveAmount(item.product?.price)) return null;
   if (isAmountSaleRequest(item)) return Number(item.budgetAmount);
-  if (isPositiveAmount(item.quantity)) return Number(item.product.price) * Number(item.quantity);
+  if (isWeightSaleRequest(item)) return quoteWeightSale(item.product, item.requestedWeight)?.lineTotal ?? null;
+  if (isPositiveUnitQuantity(item.quantity)) return Number(item.product.price) * Number(item.quantity);
   return null;
 }
 
@@ -2838,18 +2866,28 @@ function isAmountSaleRequest(item = {}) {
   return isPositiveAmount(item.budgetAmount);
 }
 
+function isWeightSaleRequest(item = {}) {
+  return Boolean(normalizeRequestedWeight(item.requestedWeight));
+}
+
 function catalogRowsForSaleMode(rows = [], item = {}) {
-  if (!isAmountSaleRequest(item)) return rows;
-  return rows.filter((row) => row?.allowsSaleByAmount === true);
+  if (isAmountSaleRequest(item)) return rows.filter((row) => row?.allowsSaleByAmount === true);
+  if (isWeightSaleRequest(item)) return rows.filter((row) => supportsWeightSale(row));
+  return rows;
 }
 
 function normalizeAmountSaleItem(item = {}) {
   if (!isAmountSaleRequest(item)) {
     const product = item.product ?? null;
+    const quantity = isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : null;
     return {
       ...item,
-      lineTotal: quotedLineTotal({ ...item, product }),
-      available: Boolean(product && product.stock >= (item.quantity ?? 1)),
+      quantity,
+      requestedMeasure: semanticMeasureFromLegacyQuantity(item),
+      lineTotal: quotedLineTotal({ ...item, product, quantity }),
+      // Do not turn a missing/non-operational quantity into an invented unit
+      // or a stock shortage. Inventory is checked only for a validated unit.
+      available: quantity === null ? null : Boolean(product && product.stock >= quantity),
     };
   }
   const product = item.product?.allowsSaleByAmount === true ? item.product : null;
@@ -2867,6 +2905,47 @@ function normalizeAmountSaleItem(item = {}) {
     // that the reference is currently available.
     available: Boolean(product && Number(product.stock ?? 0) > 0),
   };
+}
+
+function normalizeOperationalOrderItem(item = {}) {
+  if (isWeightSaleRequest(item)) {
+    const product = supportsWeightSale(item.product) ? item.product : null;
+    const quote = product ? quoteWeightSale(product, item.requestedWeight) : null;
+    return {
+      ...item,
+      product,
+      quantity: null,
+      saleMode: 'weight',
+      requestedWeight: normalizeRequestedWeight(item.requestedWeight),
+      requestedWeightGrams: quote?.grams ?? null,
+      unitPricePerKg: quote?.pricePerKg ?? null,
+      weightSaleUnavailable: item.weightSaleUnavailable === true || Boolean(item.product && !product),
+      lineTotal: quote?.lineTotal ?? null,
+      available: quote?.available ?? null,
+    };
+  }
+  return normalizeAmountSaleItem(item);
+}
+
+function applyStructuredLineUpdates(items = [], updates = []) {
+  const byLineId = new Map((updates ?? [])
+    .filter((update) => update?.lineId)
+    .map((update) => [String(update.lineId), update]));
+  return items.map((item) => {
+    const update = byLineId.get(String(item?.lineId ?? ''));
+    if (!update) return normalizeOperationalOrderItem(item);
+    const quantity = isPositiveUnitQuantity(update.quantity)
+      ? Number(update.quantity)
+      : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : null;
+    return normalizeOperationalOrderItem({
+      ...item,
+      quantity,
+      quantityExplicit: update.quantityExplicit === true || item.quantityExplicit === true,
+      requestedMeasure: update.requestedMeasure ?? semanticMeasureFromLegacyQuantity(item),
+      requestedWeight: update.requestedWeight ?? item.requestedWeight ?? null,
+      requestedAttributes: update.requestedAttributes ?? item.requestedAttributes ?? null,
+    });
+  });
 }
 
 function restoreClarificationDraft(saved = {}, planned = {}) {
@@ -2900,7 +2979,11 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
         ? knownProduct
         : plannedProduct;
       return { ...known, ...item,
-        quantity: item.quantity ?? known?.quantity,
+        quantity: isPositiveUnitQuantity(item.quantity) ? Number(item.quantity)
+          : isPositiveUnitQuantity(known?.quantity) ? Number(known.quantity) : null,
+        requestedMeasure: item.requestedMeasure ?? semanticMeasureFromLegacyQuantity(item)
+          ?? known?.requestedMeasure ?? semanticMeasureFromLegacyQuantity(known),
+        requestedWeight: item.requestedWeight ?? known?.requestedWeight ?? null,
         budgetAmount: item.budgetAmount ?? known?.budgetAmount,
         product,
         lineTotal: null,
@@ -2927,6 +3010,13 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
     .map((item) => {
       const name = item.product.name;
       if (item.budgetAmount) return `${formatCurrency(item.budgetAmount)} de ${name}`;
+      if (item.saleMode === 'weight') {
+        const weight = formatWeight(item.requestedWeightGrams);
+        const pricePerKg = isPositiveAmount(item.unitPricePerKg)
+          ? ` (${formatCurrency(item.unitPricePerKg)}/kg)`
+          : '';
+        return `${weight} de ${name}${pricePerKg}`;
+      }
       const price = Number(item.product?.price ?? 0);
       const unitPrice = price > 0 ? ` (${formatCurrency(price)} c/u)` : '';
       return `${item.quantity ?? 'cantidad pendiente'} x ${name}${unitPrice}`;
@@ -3009,8 +3099,13 @@ function buildStructuredOrderSummary({ orderItems, customerProfile, subtotal, pa
   if (customerProfile?.defaultAddress) lines.push(`Dirección: ${customerProfile.defaultAddress}`);
   lines.push('', 'Productos:');
   for (const item of orderItems.filter((candidate) => candidate.product)) {
-    const quantity = item.budgetAmount ? formatCurrency(item.budgetAmount) : `${item.quantity ?? 0} x`;
-    const unitPrice = item.budgetAmount ? '' : ` x ${formatCurrency(item.product.price)}`;
+    const weightSale = item.saleMode === 'weight';
+    const quantity = item.budgetAmount ? formatCurrency(item.budgetAmount)
+      : weightSale ? formatWeight(item.requestedWeightGrams)
+        : `${item.quantity ?? 0} x`;
+    const unitPrice = item.budgetAmount ? ''
+      : weightSale ? ` x ${formatCurrency(item.unitPricePerKg)}/kg`
+        : ` x ${formatCurrency(item.product.price)}`;
     const lineTotal = item.lineTotal !== null && item.lineTotal !== undefined ? ` = ${formatCurrency(item.lineTotal)}` : '';
     lines.push(`- ${quantity} ${item.product.name}${unitPrice}${lineTotal}`.replace(/\s+/g, ' ').trim());
   }
@@ -3396,6 +3491,13 @@ function confirmsPresentation(text, productName) {
 
 function formatCurrency(value) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value);
+}
+
+function formatWeight(grams) {
+  const normalized = Number(grams);
+  if (!Number.isFinite(normalized) || normalized <= 0) return 'peso por confirmar';
+  if (normalized % 1000 === 0) return `${normalized / 1000} kg`;
+  return `${normalized} g`;
 }
 
 function formatOrderItems(items = []) {

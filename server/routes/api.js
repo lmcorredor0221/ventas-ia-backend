@@ -497,13 +497,14 @@ function enrichOrderForDisplay(order, state) {
       || currentName === item.sku
       || currentName === item.skuHint
       || /^producto(?:\s+por\s+validar)?$/i.test(currentName);
-    const quantity = Number(item.quantity ?? 1) || 1;
+    const weightSale = item.saleMode === 'weight';
+    const quantity = weightSale ? null : Number(item.quantity ?? 1) || 1;
     const unitPrice = Number.isFinite(Number(item.unitPrice)) && Number(item.unitPrice) > 0
       ? Number(item.unitPrice)
       : Number(product?.price ?? 0) || null;
     const lineTotal = Number.isFinite(Number(item.lineTotal)) && Number(item.lineTotal) > 0
       ? Number(item.lineTotal)
-      : unitPrice ? unitPrice * quantity : null;
+      : weightSale ? null : unitPrice ? unitPrice * quantity : null;
     return {
       ...item,
       name: technicalName ? ((product?.name ?? currentName) || 'Producto por validar') : currentName,

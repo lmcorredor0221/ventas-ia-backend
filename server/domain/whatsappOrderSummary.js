@@ -4,7 +4,9 @@ export function whatsappOrderSummary(order, { stage = 'confirmed' } = {}) {
   const items = Array.isArray(order?.items) ? order.items : [];
   const pricing = order?.pricing ?? {};
   const lines = items.map(item => {
-    const quantity = item.saleMode === 'amount' ? `por ${money(item.requestedAmount)}` : `${item.quantity} x ${money(item.unitPrice)}`;
+    const quantity = item.saleMode === 'amount' ? `por ${money(item.requestedAmount)}`
+      : item.saleMode === 'weight' ? `${Number(item.requestedWeightGrams ?? 0)} g a ${money(item.unitPricePerKg)}/kg`
+        : `${item.quantity} x ${money(item.unitPrice)}`;
     const total = Number(item.lineTotal ?? 0);
     return `• ${quantity} ${item.name ?? 'Producto'}${item.presentation ? ` (${item.presentation})` : ''} = ${money(total)}`;
   });

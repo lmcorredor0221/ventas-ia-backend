@@ -56,6 +56,14 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
     if (categoryNode) addRelation(relations, CATALOG_RELATION_TYPES.relatedTo, productNode, categoryNode, {}, relationKeys);
     if (presentationNode) addRelation(relations, CATALOG_RELATION_TYPES.hasPresentation, productNode, presentationNode, {}, relationKeys);
     for (const [key, value] of Object.entries(product.attributes ?? {})) {
+      if (key === 'commerce' && value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const mode of Array.isArray(value.saleModes) ? value.saleModes : []) {
+          if (String(mode).trim().toLowerCase() !== 'weight') continue;
+          const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, 'modalidad_venta:peso', { key: 'modalidad_venta', value: 'peso' });
+          addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode, {}, relationKeys);
+        }
+        continue;
+      }
       const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, `${key}:${value}`, { key, value });
       addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode, {}, relationKeys);
       const normalizedKey = normalizeKey(key);
@@ -415,6 +423,7 @@ export function normalizeProduct(row) {
     tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
     productFamily: String(row.productFamily ?? '').trim() || null,
     attributes: row.attributes && typeof row.attributes === 'object' ? row.attributes : {},
+    allowsSaleByAmount: row.allowsSaleByAmount === true,
     active: row.active !== false,
     driveFileId: row.driveFileId ?? null,
     catalogOrigin: row.catalogOrigin ?? null,

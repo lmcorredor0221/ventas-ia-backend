@@ -55,6 +55,8 @@ export function refreshOrderConversation(conversation, order, catalogProducts = 
       quantity: line.quantity,
       saleMode: line.saleMode ?? 'units',
       requestedAmount: line.requestedAmount ?? null,
+      requestedWeightGrams: line.requestedWeightGrams ?? null,
+      unitPricePerKg: line.unitPricePerKg ?? null,
       budgetAmount: null,
       lineTotal: line.lineTotal,
       product,

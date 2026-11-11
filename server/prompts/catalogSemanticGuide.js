@@ -63,7 +63,7 @@ export function buildContextInterpreterPrompt({ text, customerProfile, conversat
   return [
     'Eres el intérprete contextual de una tienda colombiana por WhatsApp.',
     'Tu única responsabilidad es comprender el acto conversacional actual. No busques productos, no selecciones SKU y no calcules precios.',
-    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, explicitHumanRequest, handoffReason, customerDetails, pendingAction, confidence, greetingReply, customerUnderstanding.',
+    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, explicitHumanRequest, handoffReason, customerDetails, pendingAction, lineUpdates, confidence, greetingReply, customerUnderstanding.',
     'Intents permitidos: greeting, delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     ...catalogSemanticGuide(),
     'Usa el historial reciente y el estado de la conversación. Una respuesta breve puede contestar una pregunta previa, seleccionar una variante, indicar pago, confirmar datos o agregar productos.',
@@ -73,6 +73,7 @@ export function buildContextInterpreterPrompt({ text, customerProfile, conversat
     'Usa human_handoff únicamente cuando el cliente pida explícitamente hablar con una persona/tienda, exista un reclamo operativo que requiera intervención o una política obligatoria lo exija. Una baja confianza, un producto no encontrado o una ambigüedad de catálogo no son por sí solos una intención human_handoff: conserva la intención comercial y deja la duda para que el catálogo y el diálogo la resuelvan.',
     'Cuando uses human_handoff, marca explicitHumanRequest:true solo si el cliente lo pidió literalmente o por una expresión equivalente; explica handoffReason. Para una escalación obligatoria de política, explicitHumanRequest puede ser false pero handoffReason debe explicar la restricción.',
     'customerDetails solo incluye nombre o dirección expresados en el mensaje actual; no copies el perfil automáticamente.',
+    'lineUpdates solo actualiza líneas existentes del orderDraft cuando el cliente responde sobre ellas. Cada entrada es {lineId, quantity, quantityExplicit, requestedMeasure, requestedWeight, requestedAttributes}. Usa el lineId exacto del borrador. quantity es exclusivamente un número de unidades positivas. Para un peso explícito conserva el texto en requestedMeasure y, si el cliente indicó una unidad inequívoca, usa requestedWeight:{amount:number,unit:"g"|"kg"|"lb"|"arroba"}; nunca lo conviertas en unidades. Si una respuesta como “una de cada una” aplica a varias líneas pendientes, emite una actualización por cada lineId correspondiente.',
     `Identidad y voz: ${JSON.stringify({ name: config.agentName, tone: config.tone, language: config.responseLanguage })}.`,
     JSON.stringify({
       message: text,
@@ -89,15 +90,16 @@ export function buildProductInferencePrompt({ text, contextAnalysis, customerPro
   return [
     'Eres el intérprete de productos de una tienda colombiana por WhatsApp.',
     'Solo ejecuta esta etapa cuando la intención tenga relación con productos o una canasta existente.',
-    'Devuelve exclusivamente JSON válido con: items, customerDetails, orderSignals, missingInfo, confidence.',
+    'Devuelve exclusivamente JSON válido con: items, lineUpdates, customerDetails, orderSignals, missingInfo, confidence.',
     'No selecciones SKU, no afirmes disponibilidad y no inventes productos. Entrega hipótesis estructuradas para que una herramienta especializada busque en el catálogo.',
-    'Cada item debe tener: lineId, rawText, familyHypothesis, productHypothesis, category, brand, quantity, quantityExplicit, budgetAmount, budgetAmountExplicit, explicitAttributes, inferredAttributes, uncertainties, searchQuery, confidence, skuHint, skuHintSource.',
+    'Cada item debe tener: lineId, rawText, familyHypothesis, productHypothesis, category, brand, quantity, quantityExplicit, budgetAmount, budgetAmountExplicit, requestedMeasure, requestedWeight, explicitAttributes, inferredAttributes, uncertainties, searchQuery, confidence, skuHint, skuHintSource.',
     'quantityExplicit es true únicamente cuando el cliente expresó la cantidad en este turno. Si la respuesta solo elige una variante de una línea pendiente, no inventes ni cambies la cantidad: usa quantity:null y quantityExplicit:false.',
     'budgetAmountExplicit es true únicamente cuando el cliente expresó un monto en este turno. Si la respuesta solo elige una variante de una línea pendiente que ya era por valor, no inventes ni elimines ese monto: usa budgetAmount:null y budgetAmountExplicit:false.',
     ...catalogSemanticGuide(),
     'Una presentación, marca, sabor o atributo escrito explícitamente es una restricción de búsqueda; lo inferido es evidencia, no filtro absoluto.',
     'Para un pedido por valor usa budgetAmount y no conviertas el valor en cantidad, gramos ni otra cantidad física. El monto representa el total solicitado para esa línea. No exijas presentación salvo que el cliente la haya expresado o sea necesaria para diferenciar variedades reales del catálogo.',
     'Conserva todas las líneas solicitadas, incluso si la conversación contiene varios mensajes o una modificación de la canasta.',
+    'Para actualizar cantidad de una línea ya presente en orderDraft, emite lineUpdates con el lineId existente. quantity solo representa unidades positivas. Si el cliente expresó una medida de peso como “media libra”, “250 gramos”, “un kilo” o “una arroba”, conserva el texto en requestedMeasure y emite requestedWeight:{amount:number,unit:"g"|"kg"|"lb"|"arroba"} solamente cuando la unidad sea clara. No la conviertas en unidades ni en una presentación comercial. No conviertas compras por presupuesto a gramos.',
     ...tenantVocabularyPrompt(tenantCatalogVocabulary),
     JSON.stringify({
       message: text,

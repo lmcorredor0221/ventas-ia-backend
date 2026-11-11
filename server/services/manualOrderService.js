@@ -3,6 +3,7 @@ import { paymentMethodsForTenant } from './paymentMethods.js';
 import { billingPeriodForTenant } from './usageService.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
 import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
+import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
 
 const fail = (message, code = 'manual_order_invalid', statusCode = 422) => Object.assign(new Error(message), { code, statusCode });
 
@@ -57,7 +58,7 @@ export class ManualOrderService {
         deliveryAddress: draft.deliveryAddress ?? profile.defaultAddress ?? '',
         paymentMethod: draft.paymentMethod ?? '',
         items: (draft.items ?? []).filter(item => products.some(product => product.sku === item.sku))
-          .map(item => ({ sku: item.sku, quantity: item.quantity ?? 1 })),
+          .map(item => ({ sku: item.sku, quantity: item.quantity ?? 1, saleMode: item.saleMode ?? 'units', requestedWeightGrams: item.requestedWeightGrams ?? null })),
       },
     };
   }
@@ -100,12 +101,24 @@ export class ManualOrderService {
       const product = products.find(row => row.sku === item.sku);
       if (!product || seen.has(item.sku)) throw fail('Hay un producto no disponible o repetido. Revisa el pedido.');
       seen.add(item.sku);
-      const quantity = Number(item.quantity);
-      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) throw fail('Revisa las cantidades de los productos.');
+      const weightSale = item.saleMode === 'weight';
+      const quantity = weightSale ? null : Number(item.quantity);
+      const requestedWeight = weightSale
+        ? normalizeRequestedWeight(item.requestedWeight ?? (item.requestedWeightGrams ? { amount: item.requestedWeightGrams, unit: 'g' } : null))
+        : null;
+      const weightQuote = weightSale ? quoteWeightSale(product, requestedWeight) : null;
+      if (weightSale && (!supportsWeightSale(product) || !weightQuote || !weightQuote.available)) throw fail(`No es posible vender ${product.name} por el peso solicitado. Revisa su modalidad, precio por kilo y existencias.`);
+      if (!weightSale && (!Number.isInteger(quantity) || quantity < 1 || quantity > 999)) throw fail('Revisa las cantidades de los productos.');
       if (!Number.isFinite(product.price) || product.price <= 0) throw fail(`Revisa el precio de ${product.name} en el catálogo.`);
-      if (!Number.isFinite(product.stock) || product.stock < quantity) throw fail(`No hay existencias suficientes de ${product.name}. Actualiza el catálogo o ajusta la cantidad.`);
-      if (Number(item.unitPrice) !== product.price) throw fail(`Cambió el precio de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
-      return { sku: product.sku, name: product.name, presentation: product.presentation, quantity, saleMode: 'units', requestedAmount: null, unitPrice: product.price, lineTotal: product.price * quantity };
+      if (!weightSale && (!Number.isFinite(product.stock) || product.stock < quantity)) throw fail(`No hay existencias suficientes de ${product.name}. Actualiza el catálogo o ajusta la cantidad.`);
+      if (!weightSale && Number(item.unitPrice) !== product.price) throw fail(`Cambió el precio de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
+      if (weightSale && item.unitPricePerKg !== undefined && Number(item.unitPricePerKg) !== weightQuote.pricePerKg) throw fail(`Cambió el precio por kilo de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
+      return {
+        sku: product.sku, name: product.name, presentation: product.presentation, quantity,
+        saleMode: weightSale ? 'weight' : 'units', requestedAmount: null,
+        requestedWeightGrams: weightSale ? weightQuote.grams : null, unitPricePerKg: weightSale ? weightQuote.pricePerKg : null,
+        unitPrice: product.price, lineTotal: weightSale ? weightQuote.lineTotal : product.price * quantity,
+      };
     });
     assertCommerceOrderAllowed(items, products);
     const delivery = input.delivery !== false;
