@@ -4,6 +4,7 @@ import { billingPeriodForTenant } from './usageService.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
 import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
 import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
+import { initializeVariableEstimate } from '../domain/variablePricing.js';
 
 const fail = (message, code = 'manual_order_invalid', statusCode = 422) => Object.assign(new Error(message), { code, statusCode });
 
@@ -25,32 +26,52 @@ export class ManualOrderService {
     return this.store.getState().ordersByTenant?.[tenantId]?.find(order => order.conversationId === conversationId);
   }
 
-  async catalog(tenantId) {
+  async catalog(tenantId, { query = '', cursor = null, limit = 25, skus = null, withMetadata = false } = {}) {
     const result = await this.tools.googleSheetsReadTable(tenantId, {
       filters: {},
       cache_policy: 'short_ttl',
       purpose: 'manual_order_catalog',
+      query,
+      cursor,
+      limit,
+      skus,
     });
     if (result.status !== 'success') throw fail('No se pudo leer el catálogo de esta tienda. Revisa la conexión de Google y vuelve a intentar.', 'manual_order_catalog_unavailable', 503);
-    return (result.rows ?? []).filter(row => !catalogCommerceCategory(row)).map(row => ({
+    const products = (result.rows ?? []).filter(row => !catalogCommerceCategory(row)).map(row => ({
       sku: String(row.sku), name: row.name, presentation: row.presentation ?? '', description: row.description ?? '',
       price: Number(row.price), stock: row.stock == null ? null : Number(row.stock),
       brand: row.brand ?? '', category: row.category ?? '', productFamily: row.productFamily ?? '',
       attributes: structuredClone(row.attributes ?? {}), tags: structuredClone(row.tags ?? []), allowsSaleByAmount: row.allowsSaleByAmount === true,
     }));
+    if (!withMetadata) return products;
+    return {
+      products,
+      catalog: {
+        catalogVersion: result.catalog_version ?? null,
+        totalCount: result.pagination?.totalCount ?? products.length,
+        returnedCount: result.pagination?.returnedCount ?? products.length,
+        nextCursor: result.pagination?.nextCursor ?? null,
+        limit: result.pagination?.limit ?? Math.min(50, Math.max(1, Number(limit) || 25)),
+      },
+    };
   }
 
-  async context(tenantId, id) {
+  async catalogPage(tenantId, options = {}) {
+    return this.catalog(tenantId, { ...options, withMetadata: true });
+  }
+
+  async context(tenantId, id, catalogOptions = {}) {
     const conversation = await this.conversation(tenantId, id);
     const existing = this.existingOrder(tenantId, id);
     if (existing) return { conversation: manualConversationSnapshot(conversation), order: existing, products: [], paymentMethods: [], deliveryPolicy: deliveryPolicyForTenant(this.store.getState().tenants.find(item => item.id === tenantId)) };
     this.assertManual(conversation);
     const state = this.store.getState();
-    const products = await this.catalog(tenantId);
+    const catalogPage = await this.catalogPage(tenantId, catalogOptions);
+    const products = catalogPage.products;
     const profile = state.customerProfilesByTenant?.[tenantId]?.[conversation.waId] ?? {};
     const draft = conversation.orderDraft ?? {};
     return {
-      conversation: manualConversationSnapshot(conversation), conversationId: id, products,
+      conversation: manualConversationSnapshot(conversation), conversationId: id, products, catalog: catalogPage.catalog,
       paymentMethods: paymentMethodsForTenant(state.tenants.find(item => item.id === tenantId)).filter(method => method.enabled !== false),
       deliveryPolicy: deliveryPolicyForTenant(state.tenants.find(item => item.id === tenantId)),
       draft: {
@@ -95,7 +116,9 @@ export class ManualOrderService {
     const payment = paymentMethodsForTenant(tenant).find(method => method.enabled !== false && method.id === input.paymentMethod);
     if (!payment) throw fail('Selecciona un medio de pago disponible en la tienda.');
     if (!Array.isArray(input.items) || !input.items.length || input.items.length > 100) throw fail('Agrega los productos acordados con el cliente.');
-    const products = await this.catalog(tenantId);
+    // Confirmation verifies only the references selected by the operator. It
+    // must not fetch a full catalog page merely to re-price an order.
+    const products = await this.catalog(tenantId, { skus: input.items.map((item) => item.sku) });
     const seen = new Set();
     const items = input.items.map(item => {
       const product = products.find(row => row.sku === item.sku);
@@ -113,12 +136,12 @@ export class ManualOrderService {
       if (!weightSale && (!Number.isFinite(product.stock) || product.stock < quantity)) throw fail(`No hay existencias suficientes de ${product.name}. Actualiza el catálogo o ajusta la cantidad.`);
       if (!weightSale && Number(item.unitPrice) !== product.price) throw fail(`Cambió el precio de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
       if (weightSale && item.unitPricePerKg !== undefined && Number(item.unitPricePerKg) !== weightQuote.pricePerKg) throw fail(`Cambió el precio por kilo de ${product.name}. Vuelve a cargar el catálogo y confirma el nuevo total con el cliente.`, 'manual_order_price_changed', 409);
-      return {
+      return initializeVariableEstimate({
         sku: product.sku, name: product.name, presentation: product.presentation, quantity,
         saleMode: weightSale ? 'weight' : 'units', requestedAmount: null,
         requestedWeightGrams: weightSale ? weightQuote.grams : null, unitPricePerKg: weightSale ? weightQuote.pricePerKg : null,
         unitPrice: product.price, lineTotal: weightSale ? weightQuote.lineTotal : product.price * quantity,
-      };
+      });
     });
     assertCommerceOrderAllowed(items, products);
     const delivery = input.delivery !== false;

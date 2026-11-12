@@ -71,8 +71,8 @@ try {
   };
   const failed = await run('retry-exhausted');
   assert.equal(calls.length, 2, 'Invalid JSON retries once only');
-  assert.equal(failed.executionMode, 'provider_unavailable_handoff');
-  assert.equal(failed.intent, 'human_handoff');
+  assert.equal(failed.executionMode, 'provider_unavailable');
+  assert.equal(failed.intent, 'provider_unavailable');
   assert.equal(failed.order.items[0].catalogQuery, 'leche entera', 'Keep the existing cart on failure');
   const failure = events.find(e => e.conversationId === 'retry-exhausted' && e.type === 'llm.plan.fallback');
   assert.equal(failure.metadata.providerMetadata.usage.total_tokens, 60);
@@ -83,7 +83,7 @@ try {
     return new Response('Unauthorized', { status: 401 });
   };
   const unauthorized = await run('no-auth-retry');
-  assert.equal(unauthorized.executionMode, 'provider_unavailable_handoff');
+  assert.equal(unauthorized.executionMode, 'provider_unavailable');
   assert.equal(calls.length, 1, 'Do not retry invalid credentials as JSON errors');
 
   calls = [];
@@ -94,6 +94,32 @@ try {
   };
   assert.equal((await run('normal-response')).executionMode, 'provider_api');
   assert.equal(calls.length, 1, 'Valid replies retain the single-call fast path');
+
+  // The two-stage path must have the same bounded JSON recovery as the
+  // legacy full-plan path. A malformed product-inference response cannot
+  // turn a correct semantic correction into a mock/handoff fallback.
+  const twoStagePlanner = new LLMPlanner({ store, events: eventBus, usage, config: {
+    whatsappMode: 'live', allowLocalCatalogFallback: false, llmRequestTimeoutMs: 8000,
+    llmMaxTokens: 600, llmJsonRetryMaxTokens: 1800,
+  } });
+  calls = [];
+  globalThis.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    calls.push(request);
+    const productStage = request.messages.some((message) => String(message.content).includes('intérprete de productos'));
+    const isFirstProductAttempt = productStage && calls.filter((item) => item.messages.some((message) => String(message.content).includes('intérprete de productos'))).length === 1;
+    const content = !productStage
+      ? JSON.stringify({ intent: 'delivery_order', productRequestDetected: true, pendingAction: null, customerUnderstanding: { delivery: true }, customerDetails: {}, confidence: 0.9 })
+      : isFirstProductAttempt
+        ? '{"items":[{"rawName":"pan tajado"'
+        : JSON.stringify({ items: [{ rawName: 'pan tajado', catalogQuery: 'pan tajado', productHypothesis: "pan tajado (posible corrección de 'pantajado')", quantity: 1 }], customerDetails: {}, confidence: 0.9 });
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content } }], usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } });
+  };
+  const twoStage = await twoStagePlanner.plan({ tenantId: 'andina', conversationId: 'two-stage-json-retry',
+    normalized: { text: 'un pantajado', waId: '573001112234' }, customerProfile: null, conversation: { messages: [] } });
+  assert.equal(twoStage.executionMode, 'provider_api_two_stage');
+  assert.equal(twoStage.order.items[0].catalogQuery, 'pan tajado');
+  assert.equal(calls.length, 3, 'Context once; malformed product inference retries once');
 
   const originalNow = Date.now;
   let elapsed = 0;
@@ -106,7 +132,7 @@ try {
       elapsed = 8001;
       return Response.json({ choices: [{ finish_reason: 'length', message: { content: '{' } }] });
     };
-    assert.equal((await run('deadline-exhausted')).executionMode, 'provider_unavailable_handoff');
+    assert.equal((await run('deadline-exhausted')).executionMode, 'provider_unavailable');
     assert.equal(calls.length, 1, 'Never start a retry after the original request deadline');
   } finally { Date.now = originalNow; }
   console.log('LLM JSON recovery passed: bounded retry, cart preserved, accurate usage, safe handoff');

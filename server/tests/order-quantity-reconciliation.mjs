@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createAppAsync } from '../index.js';
+import { basketKey } from '../domain/orderCheckout.js';
 
 // A customer may state a quantity before choosing the exact catalog variant.
 // The later selection must replace the pending line, not reset its quantity to
@@ -300,6 +301,133 @@ try {
   assert.equal(weightDraft.items[0].lineTotal, 10800);
   assert.equal(weightDraft.subtotal, 10800);
   assert.ok(!weightDraft.missingFields.some((field) => field.startsWith('quantity:')), 'A validated weight replaces the unit quantity requirement');
+
+  // The production regression was specific to the WhatsApp interactive
+  // callback. The text-based reconciliation tests above never exercised this
+  // path: selecting a closed catalog package left its quantity as null and the
+  // next checkout pass asked for the quantity again. Reproduce the stored
+  // interaction offer exactly, then verify a selected package becomes one
+  // package while a configured sale by weight remains a weight instruction.
+  const packageSelectionConversationId = 'package-selection-interactive';
+  const packageSelectionLine = {
+    lineId: 'line-queso-package',
+    rawName: 'media de queso doble crema',
+    catalogQuery: 'queso doble crema',
+    requestedMeasure: 'media',
+    quantity: null,
+    selectionStatus: 'pending',
+    catalogCandidates: [structuredClone(quesoEmpacado)],
+  };
+  const packageSelectionDraft = {
+    delivery: true,
+    items: [packageSelectionLine],
+    missingFields: ['selection:line-queso-package'],
+  };
+  const packageOfferId = 'io-packageselection';
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: packageSelectionConversationId,
+      tenantId,
+      waId: '573000000907',
+      messages: [],
+      status: 'live',
+      orderDraft: structuredClone(packageSelectionDraft),
+    });
+  });
+  await store.createInteractionOffer({
+    id: packageOfferId,
+    tenantId,
+    conversationId: packageSelectionConversationId,
+    purpose: 'catalog_selection',
+    options: [{
+      id: `vi:${packageOfferId}:1`,
+      title: 'Queso doble crema empacado 250 g',
+      action: 'select_catalog_product',
+      value: JSON.stringify({
+        basketKey: basketKey(packageSelectionDraft),
+        lineId: packageSelectionLine.lineId,
+        sku: quesoEmpacado.sku,
+      }),
+    }],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await runtime.handleInteractiveReply({
+    tenantId,
+    conversationId: packageSelectionConversationId,
+    normalized: {
+      waId: '573000000907',
+      profileName: 'Cliente de prueba',
+      text: 'Queso doble crema empacado 250 g',
+      traceId: 'package-selection-interactive',
+      interactive: { optionId: `vi:${packageOfferId}:1`, title: 'Queso doble crema empacado 250 g' },
+    },
+  });
+  const packageSelectionResult = store.getState().conversations.find((item) => item.id === packageSelectionConversationId).orderDraft;
+  assert.equal(packageSelectionResult.items[0].product?.sku, quesoEmpacado.sku);
+  assert.equal(packageSelectionResult.items[0].quantity, 1, 'An explicit package selection becomes one package when no unit quantity was stated');
+  assert.equal(packageSelectionResult.items[0].lineTotal, 10800);
+  assert.ok(!packageSelectionResult.missingFields.some((field) => field.startsWith('quantity:')), 'A chosen closed package does not reopen quantity collection');
+
+  const weightSelectionConversationId = 'weight-selection-interactive';
+  const weightSelectionLine = {
+    lineId: 'line-queso-weight',
+    rawName: 'media libra de queso doble crema',
+    catalogQuery: 'queso doble crema',
+    requestedWeight: { amount: 0.5, unit: 'lb' },
+    requestedMeasure: 'media libra',
+    quantity: null,
+    selectionStatus: 'pending',
+    catalogCandidates: [structuredClone(quesoAlCorte)],
+  };
+  const weightSelectionDraft = {
+    delivery: true,
+    items: [weightSelectionLine],
+    missingFields: ['selection:line-queso-weight'],
+  };
+  const weightOfferId = 'io-weightselection';
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: weightSelectionConversationId,
+      tenantId,
+      waId: '573000000908',
+      messages: [],
+      status: 'live',
+      orderDraft: structuredClone(weightSelectionDraft),
+    });
+  });
+  await store.createInteractionOffer({
+    id: weightOfferId,
+    tenantId,
+    conversationId: weightSelectionConversationId,
+    purpose: 'catalog_selection',
+    options: [{
+      id: `vi:${weightOfferId}:1`,
+      title: 'Queso doble crema al corte',
+      action: 'select_catalog_product',
+      value: JSON.stringify({
+        basketKey: basketKey(weightSelectionDraft),
+        lineId: weightSelectionLine.lineId,
+        sku: quesoAlCorte.sku,
+      }),
+    }],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await runtime.handleInteractiveReply({
+    tenantId,
+    conversationId: weightSelectionConversationId,
+    normalized: {
+      waId: '573000000908',
+      profileName: 'Cliente de prueba',
+      text: 'Queso doble crema al corte',
+      traceId: 'weight-selection-interactive',
+      interactive: { optionId: `vi:${weightOfferId}:1`, title: 'Queso doble crema al corte' },
+    },
+  });
+  const weightSelectionResult = store.getState().conversations.find((item) => item.id === weightSelectionConversationId).orderDraft;
+  assert.equal(weightSelectionResult.items[0].saleMode, 'weight');
+  assert.equal(weightSelectionResult.items[0].quantity, null, 'An explicit weight selection is not converted into a package');
+  assert.equal(weightSelectionResult.items[0].requestedWeightGrams, 250);
+  assert.equal(weightSelectionResult.items[0].lineTotal, 10800);
 
   console.log('Order quantity reconciliation passed.');
 } finally {

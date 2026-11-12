@@ -54,6 +54,35 @@ try {
   assert.equal(imported.activeRows, 2);
   assert.equal(store.getState().productsByTenant[tenantId][0].name, 'Chocoramo');
 
+  const weightedAttributes = JSON.stringify({ commerce: { saleModes: ['weight'], weight: {
+    pricePerKg: 43200, stockGrams: 12000, minGrams: 50, incrementGrams: 50,
+  } } }).replaceAll('"', '""');
+  const weightedCsv = [
+    'sku,nombre,precio,stock,atributos_json',
+    `Q-001,Queso doble crema al corte,43200,12000,"${weightedAttributes}"`,
+  ].join('\n');
+  const weightedResponse = await fetch(`${base}/api/saas/tenants/${tenantId}/google/catalog/validate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ csvText: weightedCsv }),
+  });
+  const weighted = await weightedResponse.json();
+  assert.equal(weighted.valid, true, JSON.stringify(weighted.errors));
+
+  const invalidWeightAttributes = JSON.stringify({ commerce: { saleModes: ['weight'] } }).replaceAll('"', '""');
+  const invalidWeightCsv = [
+    'sku,nombre,precio,stock,atributos_json',
+    `Q-002,Queso sin contrato comercial,10000,10,"${invalidWeightAttributes}"`,
+  ].join('\n');
+  const invalidWeightResponse = await fetch(`${base}/api/saas/tenants/${tenantId}/google/catalog/validate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ csvText: invalidWeightCsv }),
+  });
+  const invalidWeight = await invalidWeightResponse.json();
+  assert.equal(invalidWeight.valid, false);
+  assert.ok(invalidWeight.errors.some((item) => item.field === 'atributos_json'));
+
   const invalidResponse = await fetch(`${base}/api/saas/tenants/${tenantId}/google/catalog/validate`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

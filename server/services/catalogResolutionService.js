@@ -23,7 +23,12 @@ export class CatalogResolutionService {
 
   async resolve({ tenantId, conversationId, normalized, conversation, items = [] }) {
     const prepared = items.map((item, index) => prepareItem(item, index));
-    const ambiguous = prepared.filter((item) => item.catalogCandidates.length > 1 && !item.product);
+    // A customer can explicitly remove an unresolved line. It remains in the
+    // draft as audit evidence, but it is no longer a catalog task and must not
+    // be re-adjudicated on later checkout turns.
+    const ambiguous = prepared.filter((item) => (
+      item.selectionStatus !== 'removed' && item.catalogCandidates.length > 1 && !item.product
+    ));
     if (!ambiguous.length) {
       return { items: prepared, status: 'not_needed', decisions: [] };
     }
@@ -43,11 +48,12 @@ export class CatalogResolutionService {
           latestMessage: normalized?.text ?? '',
           conversation: compactConversation(conversation),
           orderDraft: compactDraft(conversation?.orderDraft),
-          items: prepared.map(compactItem),
+          items: prepared.filter((item) => !item.product && item.selectionStatus !== 'removed').map(compactItem),
         },
       });
       const decisions = Array.isArray(adjudication?.decisions) ? adjudication.decisions : [];
-      const resolved = prepared.map((item) => applyDecision(item, decisions.find((decision) => decision.lineId === item.lineId)));
+      const resolved = prepared.map((item) => item.product || item.selectionStatus === 'removed'
+        ? item : applyDecision(item, decisions.find((decision) => decision.lineId === item.lineId)));
       const metadata = {
         status: adjudication?.executionMode ?? 'provider_api',
         durationMs: Math.round(performance.now() - startedAt),
@@ -88,7 +94,7 @@ export class CatalogResolutionService {
       // A failed adjudication must never invent a SKU. Keep the evidence so
       // the conversation can ask for a selection or escalate safely.
       return {
-        items: prepared.map((item) => item.product ? item : { ...item, product: null, selectionStatus: item.catalogCandidates.length ? 'pending' : 'not_found' }),
+        items: prepared.map((item) => item.product || item.selectionStatus === 'removed' ? item : { ...item, product: null, selectionStatus: item.catalogCandidates.length ? 'pending' : 'not_found' }),
         status: 'error_fallback',
         decisions: [],
       };
@@ -100,16 +106,29 @@ function prepareItem(item = {}, index = 0) {
   const candidates = uniqueCandidates(item.catalogCandidates ?? item.presentationOptions ?? []);
   const lineId = String(item.lineId ?? `${lineKey(item.catalogQuery ?? item.rawName ?? 'item')}:${index + 1}`);
   const product = item.product ?? null;
+  const removedByCustomer = item.removedByCustomer === true || item.selectionStatus === 'removed';
   return {
     ...item,
     lineId,
     catalogCandidates: candidates,
-    selectionStatus: product ? 'selected' : candidates.length ? 'pending' : 'not_found',
-    presentationOptions: item.presentationOptions?.length ? item.presentationOptions : candidates,
+    // `removed` is a terminal customer decision. Do not infer a pending state
+    // merely because the retained audit line intentionally has no product.
+    removedByCustomer,
+    product: removedByCustomer ? null : product,
+    selectionStatus: removedByCustomer ? 'removed' : product ? 'selected' : candidates.length ? 'pending' : 'not_found',
+    presentationOptions: removedByCustomer ? [] : (item.presentationOptions?.length ? item.presentationOptions : candidates),
   };
 }
 
 function applyDecision(item, decision) {
+  if (item.removedByCustomer === true || item.selectionStatus === 'removed') {
+    return {
+      ...item,
+      product: null,
+      removedByCustomer: true,
+      selectionStatus: 'removed',
+    };
+  }
   // The model has already identified an amount-based purchase.  When the
   // catalogue proves that every retrieved candidate is the same sellable
   // product (only physical presentations differ), a backing reference is
@@ -276,6 +295,7 @@ function compactItem(item = {}) {
     requestedPresentation: item.requestedPresentation ?? null,
     requestedAttributes: item.requestedAttributes ?? null,
     selectionStatus: item.selectionStatus,
+    removedByCustomer: item.removedByCustomer === true,
     currentProduct: item.product ? compactProduct(item.product) : null,
     candidates: item.catalogCandidates.map(compactProduct),
   };

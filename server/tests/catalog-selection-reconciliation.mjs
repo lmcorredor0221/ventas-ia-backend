@@ -23,6 +23,12 @@ const products = [
   { sku: 'COKE-ORIGINAL-15', name: 'Coca-Cola original', brand: 'Coca-Cola', presentation: '1.5 L', description: 'Gaseosa original', price: 7200, stock: 10, category: 'Bebidas' },
   { sku: 'COKE-ZERO-15', name: 'Coca-Cola Zero', brand: 'Coca-Cola', presentation: '1.5 L', description: 'Gaseosa sin azúcar', price: 7500, stock: 10, category: 'Bebidas' },
   { sku: 'CHOCORAMO', name: 'Chocorramo', brand: 'Ramo', presentation: '65 g', description: 'Ponqué cubierto de chocolate', price: 2800, stock: 12, category: 'Snacks' },
+  { sku: 'PAN-TAJADO-BLANCO', name: 'Pan tajado blanco', brand: 'Bimbo', presentation: '500 g', description: 'Pan de sándwich tajado', price: 7600, stock: 18, category: 'Panadería', aliases: ['pan tajado', 'pan bimbo'] },
+  { sku: 'PAN-TAJADO-INTEGRAL', name: 'Pan tajado integral', brand: 'Bimbo', presentation: '500 g', description: 'Pan integral tajado', price: 8400, stock: 14, category: 'Panadería', aliases: ['pan tajado integral', 'pan integral'] },
+  { sku: 'MANZANA-400', name: 'Manzana Postobon', brand: 'Postobon', presentation: '400 ml', description: 'Gaseosa sabor manzana', price: 3000, stock: 18, category: 'Bebidas', aliases: ['gaseosa manzana'] },
+  { sku: 'MANZANA-600', name: 'Manzana Postobon', brand: 'Postobon', presentation: '600 ml', description: 'Gaseosa sabor manzana', price: 4200, stock: 18, category: 'Bebidas', aliases: ['gaseosa manzana'] },
+  { sku: 'MARGARITA-25', name: 'Papas Margarita natural', brand: 'Margarita', presentation: '25 g', description: 'Papas naturales', price: 1000, stock: 18, category: 'Snacks', aliases: ['papas margarita natural'] },
+  { sku: 'MARGARITA-105', name: 'Papas Margarita natural', brand: 'Margarita', presentation: '105 g', description: 'Papas naturales', price: 5200, stock: 18, category: 'Snacks', aliases: ['papas margarita natural'] },
   { sku: 'LIMON-500G', name: 'Limón Tahití', brand: 'Campo', presentation: '500 g', description: 'Limón fresco', price: 5000, stock: 12, category: 'Frutas', productFamily: 'Limón Tahití', allowsSaleByAmount: true },
   { sku: 'LIMON-1KG', name: 'Limón Tahití', brand: 'Campo', presentation: '1 kg', description: 'Limón fresco', price: 10000, stock: 12, category: 'Frutas', productFamily: 'Limón Tahití', allowsSaleByAmount: true },
 ];
@@ -30,6 +36,7 @@ store.mutate((state) => {
   state.productsByTenant.andina = structuredClone(products);
   state.conversations.unshift({ id: conversationId, tenantId: 'andina', waId, messages: [], status: 'live' });
 });
+const composedReplyFacts = [];
 runtime.planner = {
   async adjudicateCatalogCandidates({ context }) {
     const item = context.items.find((candidate) => candidate.candidates.length > 1);
@@ -62,7 +69,8 @@ runtime.planner = {
       executionMode: 'test_adjudicator',
     };
   },
-  async composeReply({ fallbackText }) {
+  async composeReply({ fallbackText, facts }) {
+    composedReplyFacts.push(structuredClone(facts));
     return { text: fallbackText };
   },
 };
@@ -149,6 +157,10 @@ try {
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Resumen del pedido|Resumen final del pedido/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /Coca-Cola original/);
   assert.match(conversation().messages.filter((message) => message.role === 'agent').at(-1).text, /7\.200/);
+  const composedReviewFacts = composedReplyFacts.at(-1);
+  assert.ok(composedReviewFacts, 'The completed selection must reach the reply composer');
+  assert.ok(composedReviewFacts.products.every((item) => !Object.hasOwn(item, 'selectionEvidence')),
+    'Historic selection questions must remain in persisted audit state, not in the reply-composer facts');
 
   await runtime.handleInteractiveReply({
     tenantId: 'andina',
@@ -211,6 +223,114 @@ try {
   assert.equal(amountDraft.missingFields.some((field) => /^(quantity|presentation|stock):limón$/.test(field)), false,
     'Stale physical gaps cannot block an amount sale after the catalog has resolved it');
   assert.equal(amountDraft.checkout.phase, 'review', 'An amount-sale line advances to the normal cart review without asking for grams or a package');
+
+  // The product hypothesis is the interpreter's explanatory note, not an
+  // additional customer constraint. A spelling-correction note must never
+  // make real catalog evidence for the corrected request disappear.
+  const correctionConversationId = 'catalog-correction-evidence';
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: correctionConversationId,
+      tenantId: 'andina',
+      waId: '573000000890',
+      messages: [],
+      status: 'live',
+      orderDraft: {
+        delivery: true,
+        items: [
+          { lineId: 'chocorramo:1', rawName: 'Chocorramo', catalogQuery: 'chocorramo', quantity: 1, product: products.find((item) => item.sku === 'CHOCORAMO'), selectionStatus: 'selected' },
+          { lineId: 'pantajado:1', rawName: 'pantajado', catalogQuery: 'pantajado', quantity: 1, product: null, selectionStatus: 'pending' },
+        ],
+        missingFields: ['selection:pantajado:1'],
+      },
+    });
+  });
+  await runtime.handleOrderClarification({
+    tenantId: 'andina',
+    conversationId: correctionConversationId,
+    normalized: { waId: '573000000890', text: 'pan tajado', traceId: 'trace-catalog-correction' },
+    customerProfile: { name: 'Cliente local', defaultAddress: 'Calle de prueba 10' },
+    plan: {
+      intent: 'order_clarification',
+      customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
+      order: {
+        delivery: true,
+        items: [{
+          lineId: 'pantajado:1',
+          rawName: 'pan tajado',
+          catalogQuery: 'pan tajado',
+          // This mirrors the DeepSeek explanation captured in the incident.
+          // It must help observability but cannot become a catalog predicate.
+          productHypothesis: "pan tajado (posible corrección de 'pantajado')",
+          requestedAttributes: { producto: 'pan tajado' },
+          quantity: 1,
+        }],
+      },
+      missingFields: [],
+    },
+  });
+  const correctionDraft = store.getState().conversations.find((item) => item.id === correctionConversationId).orderDraft;
+  const correctedPan = correctionDraft.items.find((item) => item.lineId === 'pantajado:1');
+  assert.equal(correctedPan.selectionStatus, 'pending');
+  assert.deepEqual(correctedPan.catalogCandidates.map((item) => item.sku).sort(), ['PAN-TAJADO-BLANCO', 'PAN-TAJADO-INTEGRAL']);
+  assert.ok(correctionDraft.missingFields.includes('selection:pantajado:1'));
+  assert.equal(correctionDraft.items.find((item) => item.lineId === 'chocorramo:1')?.product?.sku, 'CHOCORAMO',
+    'Resolving one pending line must preserve an already selected basket line');
+  const correctionOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === correctionConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+  assert.ok(correctionOffer, 'The corrected pan line should expose its real catalog variants');
+  assert.match(correctionOffer.options[0].title, /Bimbo/, 'Catalog option labels must include the catalog brand');
+
+  // Typos and conversational qualifiers are soft retrieval evidence. They
+  // must not erase the actual catalog alternatives after the search has found
+  // them; the contextual adjudicator decides which pending line to present.
+  const softAttributesConversationId = 'soft-attributes-evidence';
+  store.mutate((state) => {
+    state.conversations.unshift({ id: softAttributesConversationId, tenantId: 'andina', waId: '573000000891', messages: [], status: 'live' });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId: 'andina',
+    conversationId: softAttributesConversationId,
+    normalized: { waId: '573000000891', text: 'Dos gaseosas de manaza y dos paquetes de papas Margarita natural', traceId: 'trace-soft-attributes' },
+    customerProfile: { name: 'Cliente local', defaultAddress: 'Calle de prueba 10' },
+    plan: {
+      intent: 'delivery_order',
+      customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
+      order: {
+        delivery: true,
+        items: [
+          { rawName: 'gaseosa de manaza', catalogQuery: 'gaseosa manzana', quantity: 2, quantityExplicit: true, requestedAttributes: { sabor: 'manaza', cantidad: '2 paquetes' } },
+          { rawName: 'papas Margarita natural', catalogQuery: 'papas margarita natural', quantity: 2, quantityExplicit: true, requestedAttributes: { marca: 'Margarita', variante: 'natural', cantidad: '2 paquetes' } },
+        ],
+      },
+      missingFields: [],
+    },
+  });
+  const softDraft = store.getState().conversations.find((item) => item.id === softAttributesConversationId).orderDraft;
+  assert.ok(softDraft.items.every((item) => item.catalogCandidates?.length >= 2),
+    'Soft inferred attributes must preserve compatible catalog candidates for contextual selection');
+  assert.ok(softDraft.items.every((item) => item.selectionStatus === 'pending'),
+    'Ambiguous catalog variants must remain pending rather than being escalated or discarded');
+
+  // WhatsApp permits only 24 title characters. Labels must retain the
+  // differentiating catalog data (here, presentation) instead of truncating
+  // every alternative to the same visible prefix.
+  const compactList = await runtime.createCatalogSelectionOffer({
+    tenantId: 'andina',
+    conversationId: softAttributesConversationId,
+    checkout: { phase: 'collecting', basketKey: 'compact-title-test' },
+    items: [{
+      lineId: 'margarita:1',
+      rawName: 'papas Margarita natural',
+      selectionStatus: 'pending',
+      catalogCandidates: products.filter((product) => product.sku.startsWith('MARGARITA-')),
+    }],
+  });
+  const compactTitles = compactList.interactive.rows.map((row) => row.title);
+  assert.deepEqual(compactTitles, ['Margarita · 25 g', 'Margarita · 105 g']);
+  assert.ok(compactTitles.every((title) => title.length <= 24));
+  assert.equal(new Set(compactTitles).size, compactTitles.length,
+    'Every catalog option must remain visibly distinguishable in WhatsApp');
   console.log('Catalog selection reconciliation passed: contextual ambiguity, offer, selection and structured summary.');
 } finally {
   runtime.stop();

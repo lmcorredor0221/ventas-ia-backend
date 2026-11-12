@@ -223,6 +223,25 @@ export class PostgresStore {
     return result.rows[0]?.document ?? null;
   }
 
+  async getPublishedCatalogKnowledgeIndexMetadata(tenantId) {
+    const result = await this.pool.query(
+      `SELECT tenant_id, catalog_version, source_hash, row_count, published_at
+         FROM catalog_knowledge_indexes
+        WHERE tenant_id = $1 AND status = 'published'
+        ORDER BY published_at DESC NULLS LAST, created_at DESC
+        LIMIT 1`,
+      [tenantId],
+    );
+    const row = result.rows[0];
+    return row ? {
+      tenantId: row.tenant_id,
+      catalogVersion: row.catalog_version,
+      sourceHash: row.source_hash,
+      rowCount: Number(row.row_count ?? 0),
+      publishedAt: row.published_at?.toISOString?.() ?? row.published_at ?? null,
+    } : null;
+  }
+
   async persistCatalogKnowledgeIndex(index) {
     if (!index?.tenantId || !index?.catalogVersion) return;
     return this.queueWrite(async () => {

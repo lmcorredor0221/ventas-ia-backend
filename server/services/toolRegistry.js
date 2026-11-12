@@ -7,10 +7,19 @@ import { assertOrderStatus, fromGoogleSheetStatus, toGoogleSheetStatus } from '.
 import { findOpenPendingRequest } from './pendingRequestPolicy.js';
 import { CatalogSearchService } from './catalogSearchService.js';
 import { catalogReadSource, effectiveCatalogRange } from '../domain/catalogSource.js';
+import { initializeVariableEstimate } from '../domain/variablePricing.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const GOOGLE_ACCESS_TOKEN_CACHE_TTL_MS = 45 * 60 * 1000;
 const LIVE_CATALOG_CACHE_TTL_MS = 30 * 1000;
+
+function customerProfileReadSource(config = {}) {
+  const source = String(
+    config.customerProfileReadSource
+      ?? (process.env.NODE_ENV === 'production' ? 'postgres' : 'google'),
+  ).trim().toLowerCase();
+  return source === 'postgres' ? 'postgres' : 'google';
+}
 
 function googleConnectionRequiredError(message) {
   const error = new Error(message);
@@ -114,6 +123,9 @@ export class ToolRegistry {
     const startedAt = performance.now();
     await sleep(30);
     const manualCatalogRead = payload?.purpose === 'manual_order_catalog';
+    const requestedSkus = [...new Set((Array.isArray(payload?.skus) ? payload.skus : [])
+      .map((sku) => String(sku ?? '').trim())
+      .filter(Boolean))];
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
     const readSource = catalogReadSource(this.config, tenant);
@@ -123,21 +135,33 @@ export class ToolRegistry {
       return googleConnectionRequiredResult('No se pudo consultar el catalogo de Google de esta tienda.');
     }
     let rows;
+    let sourceRowCount = 0;
     let index = null;
+    let catalogLoad = null;
     let source = live ? 'google_sheets_live' : 'local_test_fixture';
     if (readSource === 'postgres') {
-      index = await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
+      catalogLoad = await this.catalogSearch?.loadPublishedIndex?.(tenantId);
+      index = catalogLoad?.index ?? await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
       if (index?.products) {
         this.catalogSearch?.hydrate(index);
-        rows = Object.values(index.products).map((product) => ({
-          ...product,
-          productFamily: product.productFamily ?? product.family ?? '',
-        }));
+        sourceRowCount = Number(index.rowCount ?? Object.keys(index.products).length);
+        // A manual page is constructed directly from the immutable index.
+        // Avoid rebuilding an array with every catalog product for each UI
+        // refresh; confirmation asks for exact SKUs and remains bounded too.
+        rows = manualCatalogRead
+          ? requestedSkus.map((sku) => index.products[sku]).filter(Boolean).map((product) => ({
+            ...product,
+            productFamily: product.productFamily ?? product.family ?? '',
+          }))
+          : Object.values(index.products).map((product) => ({
+            ...product,
+            productFamily: product.productFamily ?? product.family ?? '',
+          }));
       } else {
         rows = [];
       }
       source = 'postgres_catalog';
-      if (!rows.length) {
+      if (!index?.products) {
         return {
           status: 'sync_required',
           code: 'catalog_sync_required',
@@ -169,6 +193,7 @@ export class ToolRegistry {
       rows = live
         ? await this.readLiveCatalogRows({ tenantId, tenant, live, range: effectiveRange })
         : this.store.listProducts ? await this.store.listProducts(tenantId) : (state.productsByTenant[tenantId] ?? []);
+      sourceRowCount = rows.length;
     }
     // A manual catalog refresh publishes its index in this process. Reuse it for
     // reads instead of rebuilding the graph on each customer message.
@@ -185,7 +210,7 @@ export class ToolRegistry {
         range: effectiveRange,
       });
     }
-    const indexed = index && this.config.catalogKnowledgeIndexEnabled !== false
+    const indexed = !manualCatalogRead && index && this.config.catalogKnowledgeIndexEnabled !== false
       ? this.catalogSearch?.search(tenantId, {
         // The planner may provide a category/attribute filter together with
         // the candidate query. Keeping both preserves the LLM's decomposition
@@ -195,15 +220,24 @@ export class ToolRegistry {
         recommendation: payload.recommendation === true,
         filters: payload.filters ?? {},
         retrievalHints: payload.retrievalHints ?? {},
-        // Manual order workspaces need the complete tenant catalog because
-        // the UI performs its own query filtering. Conversational searches
-        // remain bounded so they return only relevant candidates.
-        limit: manualCatalogRead
-          ? Math.max(rows.length, 1)
-          : Math.max(Number(payload.limit ?? 25), 25),
+        limit: Math.min(50, Math.max(Number(payload.limit ?? 25), 25)),
       })
       : null;
-    const matchingRows = (indexed
+    const manualPage = manualCatalogRead && !requestedSkus.length && index
+      ? this.catalogSearch?.page(tenantId, {
+        query: payload.query ?? payload.filters?.query ?? '',
+        semanticQuery: payload.semanticQuery ?? '',
+        filters: payload.filters ?? {},
+        cursor: payload.cursor ?? null,
+        limit: payload.limit ?? 25,
+        productFilter: (product) => !catalogCommerceCategory(product),
+      })
+      : null;
+    const matchingRows = (requestedSkus.length
+      ? rows.filter((row) => requestedSkus.includes(String(row.sku)))
+      : manualPage
+        ? manualPage.rows
+        : indexed
       ? indexed.rows.map((row) => {
         const sourceRow = rows.find((candidate) => candidate.sku === row.sku);
         // Preserve the live/source row shape while carrying index evidence
@@ -236,7 +270,7 @@ export class ToolRegistry {
       metadata: {
         source,
         sourceRange: effectiveRange,
-        sourceRowCount: rows.length,
+        sourceRowCount,
         matchedRowCount: acceptedRows.length,
         restrictedRowCount: matchingRows.length - acceptedRows.length,
         catalogVersion: index?.catalogVersion ?? null,
@@ -245,13 +279,19 @@ export class ToolRegistry {
         semanticCandidateCount: indexed?.retrieval?.semanticCandidateCount ?? 0,
         manualCatalogRead,
         returnedRowCount: acceptedRows.length,
+        payloadBytes: catalogLoad?.cacheHit ? 0 : (index ? Buffer.byteLength(JSON.stringify(index), 'utf8') : 0),
+        responseBytes: Buffer.byteLength(JSON.stringify(acceptedRows), 'utf8'),
+        cacheHit: catalogLoad?.cacheHit ?? null,
+        cacheLoadWait: catalogLoad?.cacheLoadWait ?? false,
+        pageTotalCount: manualPage?.totalCount ?? acceptedRows.length,
+        pageNextCursor: Boolean(manualPage?.nextCursor),
         truncated: !manualCatalogRead && indexed
           ? (indexed.retrieval?.candidateCount ?? indexed.rows.length) > indexed.rows.length
           : false,
       },
     });
     return {
-      status: rows.length ? 'success' : 'error',
+      status: sourceRowCount ? 'success' : 'error',
       columns: ['sku', 'name', 'price', 'stock', 'category', 'brand', 'presentation', 'normalizedPresentation', 'description', 'tags', 'productFamily', 'attributes', 'catalogOrigin', 'driveFileId', 'allowsSaleByAmount'],
       rows: acceptedRows,
       restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
@@ -259,12 +299,20 @@ export class ToolRegistry {
       source_revision: index?.catalogVersion ?? `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:unindexed`,
       catalog_version: index?.catalogVersion ?? null,
       source_range: effectiveRange,
-      source_row_count: rows.length,
+      source_row_count: sourceRowCount,
       catalog_index: index
         ? { status: index.status, node_count: index.nodeCount, relation_count: index.relationCount, vector_count: index.vectorCount, provider: index.vectorProvider }
         : { status: 'unavailable' },
-      catalog_retrieval: indexed?.retrieval ?? null,
-      relation_evidence: indexed?.relations ?? [],
+      // The browser receives product fields through ManualOrderService. Keep
+      // graph paths and retrieval diagnostics server-side for manual pages.
+      catalog_retrieval: manualCatalogRead ? null : indexed?.retrieval ?? null,
+      relation_evidence: manualCatalogRead ? [] : indexed?.relations ?? [],
+      pagination: manualPage ? {
+        totalCount: manualPage.totalCount,
+        returnedCount: acceptedRows.length,
+        nextCursor: manualPage.nextCursor,
+        limit: Math.min(50, Math.max(1, Number(payload.limit ?? 25) || 25)),
+      } : null,
       fetched_at: new Date().toISOString(),
     };
   }
@@ -285,9 +333,46 @@ export class ToolRegistry {
   }
 
   async googleSheetsCustomerProfileLookup(tenantId, payload) {
+    const startedAt = performance.now();
     await sleep(25);
     const state = this.store.getState();
     const tenant = state.tenants.find((item) => item.id === tenantId);
+    // Prefer the persisted operational profile. Google remains a compatibility
+    // fallback while historical customer profiles are migrated on demand.
+    const persistedProfile = this.store.getCustomerProfile
+      ? await this.store.getCustomerProfile(tenantId, payload.wa_id)
+      : state.customerProfilesByTenant?.[tenantId]?.[payload.wa_id] ?? null;
+    if (persistedProfile) {
+      this.telemetry?.record('customer_profile', 'lookup', {
+        durationMs: performance.now() - startedAt,
+        status: 'found',
+        tenantId,
+        metadata: { source: 'postgres_customer_profile' },
+      });
+      return {
+        status: 'found',
+        profile: persistedProfile,
+        source_ref: persistedProfile.sheetRowId ?? persistedProfile.driveFileId ?? null,
+        source: 'postgres_customer_profile',
+        sheet_ref: tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
+      };
+    }
+    if (customerProfileReadSource(this.config) === 'postgres') {
+      const result = {
+        status: 'not_found',
+        profile: null,
+        source_ref: null,
+        source: 'postgres_customer_profile',
+        sheet_ref: tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
+      };
+      this.telemetry?.record('customer_profile', 'lookup', {
+        durationMs: performance.now() - startedAt,
+        status: result.status,
+        tenantId,
+        metadata: { source: result.source },
+      });
+      return result;
+    }
     const live = await this.liveGoogleContext(tenantId);
     if (!live && !this.config.allowLocalCatalogFallback) {
       return googleConnectionRequiredResult('No se pudo consultar el cliente en Google Sheets de esta tienda.');
@@ -297,20 +382,28 @@ export class ToolRegistry {
       : this.store.getCustomerProfile
       ? await this.store.getCustomerProfile(tenantId, payload.wa_id)
       : state.customerProfilesByTenant?.[tenantId]?.[payload.wa_id];
-    return {
+    const result = {
       status: profile ? 'found' : 'not_found',
       profile: profile ?? null,
       source_ref: profile?.sheetRowId ?? profile?.driveFileId ?? null,
       source: live ? 'google_sheets_live' : 'local_test_fixture',
       sheet_ref: tenant?.config?.googleSheets?.customerProfilesRange ?? 'Clientes!A1:F500',
     };
+    this.telemetry?.record('customer_profile', 'lookup', {
+      durationMs: performance.now() - startedAt,
+      status: result.status,
+      tenantId,
+      metadata: { source: result.source },
+    });
+    return result;
   }
 
   async googleSheetsCustomerProfileUpsert(tenantId, payload) {
     await sleep(25);
     const now = new Date().toISOString();
-    const live = await this.liveGoogleContext(tenantId);
-    if (!live && !this.config.allowLocalCatalogFallback) {
+    const mirrorToGoogle = customerProfileReadSource(this.config) !== 'postgres';
+    const live = mirrorToGoogle ? await this.liveGoogleContext(tenantId) : null;
+    if (mirrorToGoogle && !live && !this.config.allowLocalCatalogFallback) {
       throw googleConnectionRequiredError('No se pudo guardar el cliente en Google Sheets de esta tienda.');
     }
     const liveSourceRef = live ? await this.upsertLiveCustomerProfile({ tenantId, live, payload, now }) : null;
@@ -338,7 +431,12 @@ export class ToolRegistry {
       waId: payload.wa_id,
       sourceRef: profile.sheetRowId,
     });
-    return { status: 'saved', profile, source_ref: liveSourceRef ?? profile.sheetRowId, source: live ? 'google_sheets_live' : 'local_test_fixture' };
+    return {
+      status: 'saved',
+      profile,
+      source_ref: liveSourceRef ?? profile.sheetRowId,
+      source: live ? 'google_sheets_live' : mirrorToGoogle ? 'local_test_fixture' : 'postgres_customer_profile',
+    };
   }
 
   async googleSheetsOrderWrite(tenantId, conversationId, payload) {
@@ -354,10 +452,17 @@ export class ToolRegistry {
       waId: payload.wa_id,
       customerName: payload.customer_name,
       deliveryAddress: payload.delivery_address,
-      items: payload.items ?? [],
+      items: (payload.items ?? []).map(initializeVariableEstimate),
       subtotal: payload.subtotal ?? 0,
+      delivery: payload.delivery !== false,
+      pricing: payload.pricing
+        ? structuredClone(payload.pricing)
+        : { subtotal: payload.subtotal ?? 0, deliveryFee: 0, total: payload.subtotal ?? 0 },
       paymentMethod: payload.payment_method ?? null,
       paymentMethodLabel: payload.payment_method_label ?? null,
+      manualProductReview: payload.manual_product_review
+        ? structuredClone(payload.manual_product_review)
+        : null,
       status,
       sheetSyncStatus: this.outbox ? 'pending' : 'not_queued',
       createdAt: now,

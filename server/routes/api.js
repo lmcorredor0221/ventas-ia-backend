@@ -58,8 +58,42 @@ export function createApiRouter({ store, events, runtime, tools, orders, manualO
       const conversation = await readConversation(store, req.params.id);
       if (!conversation) return res.status(404).json({ error: 'Conversación no encontrada.' });
       auth.authorizeTenant(req, conversation.tenantId, { roles: ['owner', 'operator'] });
-      return res.json(await manualOrders.context(conversation.tenantId, conversation.id));
+      const context = await manualOrders.context(conversation.tenantId, conversation.id, manualCatalogOptions(req.query));
+      telemetry?.record('catalog', 'manual_order_context_response', {
+        durationMs: 0,
+        status: 'ok',
+        tenantId: conversation.tenantId,
+        metadata: {
+          returnedCount: context.catalog?.returnedCount ?? 0,
+          totalCount: context.catalog?.totalCount ?? 0,
+          responseBytes: Buffer.byteLength(JSON.stringify(context), 'utf8'),
+          usedCursor: Boolean(req.query.cursor),
+        },
+      });
+      return res.json(context);
     } catch (error) { next(error); }
+  });
+
+  // The human order workspace loads one catalog page at a time. This gives a
+  // page-aware client a lightweight way to search/load more without asking for
+  // the whole conversation workspace again.
+  router.get('/tenants/:tenantId/catalog/products', async (req, res, next) => {
+    try {
+      auth.authorizeTenant(req, req.params.tenantId, { roles: ['owner', 'operator'] });
+      const page = await manualOrders.catalogPage(req.params.tenantId, manualCatalogOptions(req.query));
+      telemetry?.record('catalog', 'manual_catalog_page_response', {
+        durationMs: 0,
+        status: 'ok',
+        tenantId: req.params.tenantId,
+        metadata: {
+          totalCount: page.catalog.totalCount,
+          returnedCount: page.catalog.returnedCount,
+          responseBytes: Buffer.byteLength(JSON.stringify(page), 'utf8'),
+          usedCursor: Boolean(req.query.cursor),
+        },
+      });
+      return res.json(page);
+    } catch (error) { return next(error); }
   });
 
   router.post('/conversations/:id/manual-order', async (req, res, next) => {
@@ -90,6 +124,78 @@ export function createApiRouter({ store, events, runtime, tools, orders, manualO
       auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
       const result = await orders.edit({ orderId: order.id, tenantId: order.tenantId, input: req.body ?? {}, actorId: req.auth?.user?.id ?? 'local-owner' });
       auth.recordTenantAction(req, { tenantId: order.tenantId, action: 'order.edited', resource: order.id, metadata: { version: result.order.version } });
+      return res.json(result);
+    } catch (error) { return next(error); }
+  });
+
+  router.patch('/orders/:id/variable-pricing', async (req, res, next) => {
+    try {
+      const order = orders?.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const result = await orders.adjustVariablePricing({
+        orderId: order.id, tenantId: order.tenantId, input: req.body ?? {}, actorId: req.auth?.user?.id ?? 'local-owner',
+      });
+      auth.recordTenantAction(req, { tenantId: order.tenantId, action: 'order.variable_pricing_adjusted', resource: order.id,
+        metadata: { sku: req.body?.sku, version: result.order.version, customerReconfirmationRequired: result.customerReconfirmationRequired } });
+      return res.json(result);
+    } catch (error) { return next(error); }
+  });
+
+  router.patch('/orders/:id/variable-pricing/confirm', async (req, res, next) => {
+    try {
+      const order = orders?.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const result = await orders.confirmVariablePricing({
+        orderId: order.id, tenantId: order.tenantId, input: req.body ?? {}, actorId: req.auth?.user?.id ?? 'local-owner',
+      });
+      auth.recordTenantAction(req, { tenantId: order.tenantId, action: 'order.variable_pricing_customer_confirmed', resource: order.id,
+        metadata: { version: result.order.version } });
+      return res.json(result);
+    } catch (error) { return next(error); }
+  });
+
+  router.patch('/orders/:id/product-review/:lineId/found', async (req, res, next) => {
+    try {
+      const order = orders?.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const result = await orders.resolveManualProductFound({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        lineId: req.params.lineId,
+        input: req.body ?? {},
+        actorId: req.auth?.user?.id ?? 'local-owner',
+      });
+      auth.recordTenantAction(req, {
+        tenantId: order.tenantId,
+        action: 'order.manual_product_found',
+        resource: order.id,
+        metadata: { lineId: req.params.lineId, sku: req.body?.sku, version: result.order.version },
+      });
+      return res.json(result);
+    } catch (error) { return next(error); }
+  });
+
+  router.patch('/orders/:id/product-review/:lineId/unavailable', async (req, res, next) => {
+    try {
+      const order = orders?.findOrder(req.params.id);
+      if (!order) return res.status(404).json({ error: 'Pedido no encontrado.' });
+      auth.authorizeTenant(req, order.tenantId, { roles: ['owner', 'operator'] });
+      const result = await orders.resolveManualProductUnavailable({
+        orderId: order.id,
+        tenantId: order.tenantId,
+        lineId: req.params.lineId,
+        input: req.body ?? {},
+        actorId: req.auth?.user?.id ?? 'local-owner',
+      });
+      auth.recordTenantAction(req, {
+        tenantId: order.tenantId,
+        action: 'order.manual_product_unavailable',
+        resource: order.id,
+        metadata: { lineId: req.params.lineId, version: result.order.version },
+      });
       return res.json(result);
     } catch (error) { return next(error); }
   });
@@ -404,6 +510,15 @@ function tenantToolSource(tool, googleWorkspace) {
   if (tool.name.includes('drive')) return rootFolderId ? `Drive ${rootFolderId}` : 'Drive aprovisionado';
   if (tool.name.includes('sheets')) return spreadsheetId ? `Sheets ${spreadsheetId}` : 'Sheets aprovisionado';
   return tool.source;
+}
+
+function manualCatalogOptions(query = {}) {
+  const limit = Number(query.limit);
+  return {
+    query: typeof query.query === 'string' ? query.query : '',
+    cursor: typeof query.cursor === 'string' ? query.cursor : null,
+    limit: Number.isFinite(limit) ? Math.min(50, Math.max(1, Math.floor(limit))) : 25,
+  };
 }
 
 async function readTenants(store) {

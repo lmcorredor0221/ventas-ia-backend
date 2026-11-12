@@ -30,6 +30,8 @@ export function deliveryBasketRevision(items = []) {
     item.unitPrice ?? item.product?.price ?? null,
     item.saleMode ?? 'units',
     item.requestedAmount ?? null,
+    item.requestedWeightGrams ?? null,
+    item.unitPricePerKg ?? null,
   ]))).digest('hex');
 }
 

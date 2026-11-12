@@ -299,8 +299,8 @@ try {
     customerProfile: null,
     conversation: null,
   });
-  assert.equal(unavailablePlan.executionMode, 'provider_unavailable_handoff');
-  assert.equal(unavailablePlan.intent, 'human_handoff');
+  assert.equal(unavailablePlan.executionMode, 'provider_unavailable');
+  assert.equal(unavailablePlan.intent, 'provider_unavailable');
   assert.deepEqual(unavailablePlan.order.items, []);
 
   console.log('LLM provider contract tests passed');

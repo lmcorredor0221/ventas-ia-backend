@@ -16,6 +16,9 @@ const rows = [{
 }];
 
 const calls = [];
+const state = {
+  tenants: [{ id: 'demo', config: { googleSheets: { catalogRange: 'Catalogo!A1:P1000' } } }],
+};
 const index = buildCatalogKnowledgeIndex({
   tenantId: 'demo',
   rows,
@@ -23,7 +26,10 @@ const index = buildCatalogKnowledgeIndex({
   range: 'Catalogo!A1:P1000',
 });
 const store = {
-  getTenant: async () => ({ id: 'demo', config: { googleSheets: { catalogRange: 'Catalogo!A1:P1000' } } }),
+  getState: () => state,
+  getTenant: async () => state.tenants[0],
+  mutate: (mutator) => mutator(state),
+  persistTenantCritical: async (tenantId) => { calls.push(['tenant', tenantId]); },
   persistCatalogSnapshot: async (payload) => { calls.push(['snapshot', payload]); return { status: 'published', catalogVersion: payload.index.catalogVersion }; },
 };
 const tools = {
@@ -59,6 +65,9 @@ assert.equal(calls[1][1].persist, false);
 assert.equal(calls[2][0], 'snapshot');
 assert.equal(calls[2][1].index.catalogVersion, index.catalogVersion);
 assert.equal(calls[2][1].products.length, 1);
+assert.deepEqual(calls[3], ['tenant', 'demo']);
+assert.equal(state.tenants[0].config.catalog.readSource, 'postgres');
+assert.equal(result.operationalSource, 'postgres');
 assert.equal((await worker.getStatus('demo')).mode, 'on_demand');
 assert.equal((await worker.getStatus('demo')).scheduled, false);
 assert.equal((await worker.getStatus('demo')).lastResult.status, 'published');

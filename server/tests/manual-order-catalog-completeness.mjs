@@ -43,7 +43,16 @@ const result = await tools.googleSheetsReadTable('demo', {
 
 assert.equal(result.status, 'success');
 assert.equal(result.source_row_count, 30);
-assert.equal(result.rows.length, 30, 'El flujo manual no debe truncar el catálogo a 25 productos');
-assert.deepEqual(result.rows.filter((row) => row.name.toLowerCase().includes('chocorramo')).map((row) => row.sku).sort(), ['SKU-029', 'SKU-030']);
+assert.equal(result.rows.length, 25, 'El flujo manual debe entregar solo la primera página');
+assert.equal(result.pagination.totalCount, 30);
+assert.ok(result.pagination.nextCursor, 'La primera página debe indicar que hay más productos');
 
-console.log('manual-order-catalog-completeness: ok');
+const search = await tools.googleSheetsReadTable('demo', {
+  purpose: 'manual_order_catalog',
+  query: 'chocorramo',
+  limit: 25,
+});
+assert.equal(search.pagination.totalCount, 2);
+assert.deepEqual(search.rows.map((row) => row.sku).sort(), ['SKU-029', 'SKU-030']);
+
+console.log('manual-order-catalog-completeness: paged catalog and search ok');

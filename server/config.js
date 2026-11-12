@@ -12,10 +12,15 @@ export const RUNTIME_CONFIG = {
   // Local JSON fixtures keep the desktop simulator usable; production must use live Google data.
   allowLocalCatalogFallback: process.env.ALLOW_LOCAL_CATALOG_FALLBACK === 'true'
     || (process.env.NODE_ENV !== 'production' && (process.env.STORAGE_DRIVER ?? 'json') === 'json'),
-  // Keep Google as the safe default for local compatibility. PostgreSQL becomes
-  // operational only after a tenant has a published catalog version and has
-  // passed shadow validation.
-  catalogReadSource: process.env.CATALOG_READ_SOURCE ?? 'google',
+  // Drive/Sheets is tenant-managed source data. PostgreSQL is the operational
+  // catalog in production, so a WhatsApp interaction never depends on Drive.
+  catalogReadSource: process.env.CATALOG_READ_SOURCE
+    ?? (process.env.NODE_ENV === 'production' ? 'postgres' : 'google'),
+  // Customer profiles follow the same operational rule in production. Google
+  // may remain an administration mirror, but a new inbound conversation must
+  // not wait on it to learn whether a customer profile exists.
+  customerProfileReadSource: process.env.CUSTOMER_PROFILE_READ_SOURCE
+    ?? (process.env.NODE_ENV === 'production' ? 'postgres' : 'google'),
   // Catalog publication is an explicit tenant action. The scheduled worker is
   // opt-in only for controlled maintenance jobs and must never be enabled by
   // an old CATALOG_SYNC_WORKER_ENABLED variable alone.

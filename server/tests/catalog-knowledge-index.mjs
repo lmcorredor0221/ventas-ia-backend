@@ -66,6 +66,23 @@ assert.equal(searchCatalogKnowledgeIndex(multiValueAttributes, {
   filters: { attributes: { formato: ['familiar'] } },
 }).rows[0].sku, 'ATTR-1');
 
+const weightedCatalog = buildCatalogKnowledgeIndex({
+  tenantId: 'tenant-weight',
+  rows: [{
+    sku: 'BANANO-KG', name: 'Banano criollo', category: 'Frutas', presentation: '1 kg',
+    price: 4500, stock: 50, active: true, allowsSaleByAmount: true,
+    attributes: { measure: { amount: 1, unit: 'kg' }, commerce: {
+      saleModes: ['weight'], weight: { pricePerKg: 4500, stockGrams: 12000, minGrams: 50, incrementGrams: 50 },
+    } },
+  }],
+});
+const weightNode = weightedCatalog.nodes.find(node => node.type === 'attribute' && node.key === 'modalidad-venta-peso');
+assert.ok(weightNode, 'el grafo debe representar la modalidad por peso');
+assert.ok(weightedCatalog.relations.some(relation => relation.to === weightNode.id && relation.type === 'PRODUCT_HAS_ATTRIBUTE'));
+assert.ok(!weightedCatalog.nodes.some(node => node.key === 'commerce-object-object'));
+assert.equal(weightedCatalog.products['BANANO-KG'].attributes.commerce.weight.stockGrams, 12000);
+assert.equal(weightedCatalog.products['BANANO-KG'].allowsSaleByAmount, true);
+
 const changed = buildCatalogKnowledgeIndex({ tenantId: 'tenant-a', rows: [...rows, { ...rows[0], sku: 'NEW-1' }], sourceRef: 'sheet-a', range: 'Catalogo!A1:P1000', previousVersion: index.catalogVersion });
 assert.notEqual(changed.catalogVersion, index.catalogVersion);
 assert.equal(changed.previousVersion, index.catalogVersion);

@@ -142,10 +142,10 @@ export class LLMPlanner {
       providerMetadata = error.providerMetadata ?? null;
       const strictProduction = this.config?.allowLocalCatalogFallback === false && this.config?.whatsappMode === 'live';
       parsed = strictProduction
-        ? providerUnavailableHandoffPlan({ text, conversation })
+        ? providerUnavailablePlan({ text, conversation })
         : this.mockStructuredParse({ tenantId, text, customerProfile, conversation, products, paymentMethods });
       executionMode = strictProduction
-        ? 'provider_unavailable_handoff'
+        ? 'provider_unavailable'
         : provider === 'mock'
           ? 'mock_structured'
           : 'mock_structured_fallback';
@@ -154,7 +154,15 @@ export class LLMPlanner {
         tenantId,
         conversationId,
         detail: `${provider} unavailable: ${error.message}`,
-        metadata: { provider, model: config.model, simulator: config.simulator, executionMode, reason: shorten(error.message, 180), providerMetadata },
+        metadata: {
+          provider,
+          model: config.model,
+          simulator: config.simulator,
+          executionMode,
+          reason: shorten(error.message, 180),
+          failureStage: error.llmStage ?? null,
+          providerMetadata,
+        },
       });
     }
     this.telemetry?.record('llm', 'plan', {
@@ -170,7 +178,8 @@ export class LLMPlanner {
         inputTokens: providerMetadata?.usage?.prompt_tokens ?? providerMetadata?.usage?.input_tokens ?? null,
         outputTokens: providerMetadata?.usage?.completion_tokens ?? providerMetadata?.usage?.output_tokens ?? null,
         totalTokens: providerMetadata?.usage?.total_tokens ?? providerMetadata?.usage?.totalTokens ?? null,
-        errorCode: providerError?.code ?? null,
+        errorCode: providerError?.code ?? providerMetadata?.attempts?.at?.(-1)?.errorCode ?? null,
+        failureStage: providerError?.llmStage ?? null,
       },
     });
     const coerced = coercePlanWithConversation(parsed, { text, conversation, paymentMethods });
@@ -244,7 +253,10 @@ export class LLMPlanner {
     // product request. Running product inference for it both adds latency and
     // can erase the one-turn `continue_checkout` signal before checkout sees
     // it. The context LLM makes this decision from the history and state.
-    const productIntent = context.pendingAction !== 'continue_checkout' && (
+    const removalOnly = context.lineUpdates?.length > 0
+      && context.lineUpdates.every((update) => update.operation === 'remove')
+      && context.productRequestDetected !== true;
+    const productIntent = context.pendingAction !== 'continue_checkout' && !removalOnly && (
       context.productRequestDetected === true
       || ['delivery_order', 'order_clarification', 'catalog_query'].includes(context.intent)
     );
@@ -294,7 +306,7 @@ export class LLMPlanner {
         collectionComplete: products.orderSignals?.collectionComplete ?? null,
         paymentMethod: products.orderSignals?.paymentMethod ?? null,
       },
-      lineUpdates: products.lineUpdates?.length ? products.lineUpdates : context.lineUpdates,
+      lineUpdates: mergeLineUpdates(context.lineUpdates, products.lineUpdates),
       candidateItems: products.items,
       missingInfo: products.missingInfo,
       // Keep explanatory product-inference text out of the checkout state.
@@ -322,9 +334,15 @@ export class LLMPlanner {
     };
     const apiKey = resolveSecret(stageConfig.apiKeyRef, defaultKeyNames(stageConfig.provider));
     if (!apiKey) throw new Error(`missing API key env ${stageConfig.apiKeyRef ?? defaultKeyNames(stageConfig.provider).join('/')}`);
-    return stageConfig.provider === 'google'
-      ? callGeminiStructuredJson({ config: stageConfig, apiKey, prompt })
-      : callChatStructuredJson({ config: stageConfig, apiKey, prompt });
+    try {
+      return stageConfig.provider === 'google'
+        ? await callGeminiStructuredJson({ config: stageConfig, apiKey, prompt })
+        : await callChatStructuredJson({ config: stageConfig, apiKey, prompt });
+    } catch (error) {
+      error.llmStage = stage;
+      error.code ??= error.providerMetadata?.attempts?.at?.(-1)?.errorCode ?? 'provider_request_failed';
+      throw error;
+    }
   }
 
   async apiStructuredParse({ text, customerProfile, conversation, config, products, paymentMethods, tenantCatalogVocabulary }) {
@@ -1426,36 +1444,82 @@ async function callChatStructuredJson({ config, apiKey, prompt }) {
     : 'https://api.deepseek.com/chat/completions');
   const model = config.model ?? defaultModel(provider);
   const startedAt = Date.now();
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      temperature: Number(config.temperature ?? 0),
-      max_tokens: Number(config.maxTokens ?? 450),
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'Responde exclusivamente JSON valido para el contrato de adjudicacion solicitado.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  }, Number(config.timeoutMs ?? 8000));
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
-  const payload = JSON.parse(text || '{}');
-  const raw = payload.choices?.[0]?.message?.content;
-  if (!raw) throw new SyntaxError('Catalog adjudication response is empty');
-  return {
-    value: JSON.parse(stripJson(raw)),
-    providerMetadata: {
-      provider,
-      model,
-      endpoint: redactedEndpoint(url),
-      durationMs: Date.now() - startedAt,
-      requestCount: 1,
-      usage: payload.usage ?? null,
-    },
-  };
+  const timeoutMs = Number(config.timeoutMs ?? 8000);
+  const attempts = [];
+  const metadata = () => ({
+    provider,
+    model,
+    endpoint: redactedEndpoint(url),
+    durationMs: Date.now() - startedAt,
+    attempts,
+    requestCount: attempts.length,
+    usage: sumChatUsage(attempts.map((attempt) => attempt.usage)),
+  });
+  try {
+    for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+      const remainingMs = timeoutMs - (Date.now() - startedAt);
+      if (remainingMs <= 0) throw new Error(`LLM API timeout after ${timeoutMs}ms`);
+      const maxTokens = attemptIndex === 0
+        ? Number(config.maxTokens ?? 450)
+        : Math.max(Number(config.maxTokens ?? 450), Number(config.jsonRetryMaxTokens ?? 1800));
+      const attempt = { maxTokens, finishReason: null, usage: null };
+      attempts.push(attempt);
+      let payload;
+      try {
+        const response = await fetchWithTimeout(url, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            temperature: Number(config.temperature ?? 0),
+            max_tokens: maxTokens,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: 'Responde exclusivamente JSON válido para el contrato estructurado solicitado.' },
+              { role: 'user', content: prompt },
+              ...(attemptIndex ? [{ role: 'system', content: 'La respuesta anterior no fue un JSON completo. Genera de nuevo el contrato completo, compacto y sin explicaciones.' }] : []),
+            ],
+          }),
+        }, remainingMs);
+        const text = await response.text();
+        if (!response.ok) throw new Error(`${provider} API ${response.status}: ${shorten(text)}`);
+        payload = JSON.parse(text || '{}');
+      } catch (error) {
+        attempt.errorCode = /timeout/i.test(error.message) ? 'timeout' : 'provider_request_failed';
+        const canRetryTransientFailure = attemptIndex === 0
+          && isRetryableProviderFailure(error)
+          && timeoutMs - (Date.now() - startedAt) >= 500;
+        if (canRetryTransientFailure) continue;
+        error.code ??= attempt.errorCode;
+        throw error;
+      }
+      attempt.usage = payload.usage ?? null;
+      attempt.finishReason = payload.choices?.[0]?.finish_reason ?? null;
+      try {
+        if (attempt.finishReason === 'length') throw new SyntaxError('LLM structured response reached its output token limit');
+        const raw = payload.choices?.[0]?.message?.content;
+        if (!raw?.trim()) throw new SyntaxError('Catalog adjudication response is empty');
+        const value = JSON.parse(stripJson(raw));
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SyntaxError('LLM structured response is not an object');
+        return { value, providerMetadata: metadata() };
+      } catch (error) {
+        attempt.errorCode = attempt.finishReason === 'length' ? 'output_truncated' : 'invalid_json';
+        if (attemptIndex === 0 && Date.now() - startedAt < timeoutMs) continue;
+        throw error;
+      }
+    }
+  } catch (error) {
+    error.providerMetadata = metadata();
+    throw error;
+  }
+}
+
+function isRetryableProviderFailure(error) {
+  const message = String(error?.message ?? '');
+  // Retry only transient transport/provider failures. Configuration and
+  // authorization errors need operator action and should remain visible.
+  if (/\b(400|401|403|404|422)\b/.test(message)) return false;
+  return /\b(408|409|429|5\d\d)\b|timeout|abort|fetch|network|socket|reset|temporar/i.test(message);
 }
 
 async function callGeminiStructuredJson({ config, apiKey, prompt }) {
@@ -1679,6 +1743,7 @@ function normalizeProviderPlan(plan) {
 }
 
 function coercePlanWithConversation(plan, { text, conversation, paymentMethods }) {
+  if (plan?.intent === 'provider_unavailable') return plan;
   const normalized = normalize(text);
   if (isComplaintOrDeliveryIssue(normalized)) {
     return {
@@ -1941,6 +2006,7 @@ function normalizeLineUpdates(value) {
   if (!Array.isArray(value)) return [];
   return value.map((update) => {
     const lineId = String(update?.lineId ?? '').trim().slice(0, 160);
+    const operation = ['update', 'clarify', 'replace', 'remove'].includes(update?.operation) ? update.operation : 'update';
     const quantity = normalizeUnitQuantity(update?.quantity);
     const requestedMeasure = normalizeRequestedMeasure(update ?? {});
     const requestedWeight = normalizeWeightRequest(update?.requestedWeight);
@@ -1949,17 +2015,32 @@ function normalizeLineUpdates(value) {
       : null;
     return {
       lineId,
+      operation,
       quantity,
       quantityExplicit: update?.quantityExplicit === true && quantity !== null,
       requestedMeasure,
       requestedWeight,
       requestedAttributes,
     };
-  }).filter((update) => update.lineId && (update.quantity !== null || update.requestedMeasure || update.requestedWeight || update.requestedAttributes));
+  }).filter((update) => update.lineId && (update.operation !== 'update' || update.quantity !== null || update.requestedMeasure || update.requestedWeight || update.requestedAttributes));
+}
+
+function mergeLineUpdates(contextUpdates = [], productUpdates = []) {
+  const merged = new Map(contextUpdates.map((update) => [update.lineId, update]));
+  for (const update of productUpdates) {
+    const context = merged.get(update.lineId);
+    const supplied = Object.fromEntries(Object.entries(update).filter(([, value]) => value !== null && value !== undefined));
+    merged.set(update.lineId, { ...context, ...supplied,
+      operation: context?.operation && context.operation !== 'update' ? context.operation : update.operation,
+      quantityExplicit: update.quantity !== null ? update.quantityExplicit : context?.quantityExplicit,
+    });
+  }
+  return [...merged.values()];
 }
 
 function normalizeProviderIntent(intent) {
   const normalized = normalize(intent);
+  if (normalized === 'provider_unavailable') return 'provider_unavailable';
   if (normalized === 'greeting') return 'greeting';
   if (containsAny(normalized, ['delivery_order', 'pedido', 'domicilio', 'orden'])) return 'delivery_order';
   if (containsAny(normalized, ['order_clarification', 'clarificacion', 'aclaracion'])) return 'order_clarification';
@@ -2161,9 +2242,11 @@ function buildCodexReasoningNotes({ text, plan, customerProfile }) {
   return notes;
 }
 
-function providerUnavailableHandoffPlan({ text, conversation }) {
+function providerUnavailablePlan({ text, conversation }) {
   return {
-    intent: 'human_handoff',
+    // A provider reachability failure is operational, not a request for a
+    // human. Keep the customer in the automated conversation for retry.
+    intent: 'provider_unavailable',
     reasoningMode: 'shopkeeper_guided_sale',
     customerUnderstanding: {
       rawNeed: String(text ?? '').trim(),
@@ -2171,9 +2254,9 @@ function providerUnavailableHandoffPlan({ text, conversation }) {
       delivery: Boolean(conversation?.orderDraft?.delivery),
     },
     order: conversation?.orderDraft ?? { delivery: false, items: [] },
-    recommendedTools: ['human_handoff', 'whatsapp_business_messaging'],
+    recommendedTools: ['whatsapp_business_messaging'],
     missingFields: [],
-    responseStrategy: 'handoff',
+    responseStrategy: 'guide',
     confidence: 0,
   };
 }

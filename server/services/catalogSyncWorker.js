@@ -89,6 +89,17 @@ export class CatalogSyncWorker {
           details: persisted,
         });
       }
+      // A successful publication is the handoff from the tenant-owned Google
+      // sheet to the operational PostgreSQL catalog. Persist it on the
+      // tenant so legacy configurations cannot silently keep live Drive reads
+      // in the WhatsApp request path.
+      this.store.mutate?.((state) => {
+        const current = state.tenants?.find((item) => item.id === tenantId);
+        if (!current) return;
+        current.config ??= {};
+        current.config.catalog = { ...(current.config.catalog ?? {}), readSource: 'postgres' };
+      }, { snapshot: false, domain: 'tenant_catalog', operation: 'publish_postgres_source' });
+      await this.store.persistTenantCritical?.(tenantId);
       const result = {
         status: 'published',
         tenantId,
@@ -97,6 +108,7 @@ export class CatalogSyncWorker {
         range,
         catalogVersion: index?.catalogVersion ?? null,
         rowCount: rows.length,
+        operationalSource: 'postgres',
         durationMs: Number((performance.now() - startedAt).toFixed(2)),
       };
       this.events?.emit({ type: 'catalog.sync.worker_completed', tenantId, detail: 'Catalog sync worker published a version', metadata: result });

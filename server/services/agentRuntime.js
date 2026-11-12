@@ -8,6 +8,7 @@ import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsap
 import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
 import { CatalogResolutionService } from './catalogResolutionService.js';
 import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
+import { VARIABLE_PRICE_NOTICE, basketHasVariablePricing } from '../domain/variablePricing.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null, catalogResolver = null }) {
@@ -138,7 +139,13 @@ export class AgentRuntime {
         this.events.emit({ type: 'agent.completed', tenantId, conversationId: conversation.id, detail: result.summary, metadata: { traceId: normalized.traceId, messageId: normalized.messageId } });
         return { duplicate: false, conversation: await this.getConversation(conversation.id), result };
       }
-      if (hasOpenHumanRequest(this.store.getState(), conversation.id)) {
+      const orderChangeConfirmation = isOrderChangeConfirmationInteraction(
+        this.store.getState(),
+        normalized.interactive?.optionId,
+        tenantId,
+        conversation.id,
+      );
+      if (hasOpenHumanRequest(this.store.getState(), conversation.id) && !orderChangeConfirmation) {
         await this.patchConversation(conversation.id, {
           need: normalized.text || `[${normalized.messageType}]`,
           nextStep: 'El equipo de la tienda debe resolver la solicitud humana abierta antes de reanudar el agente.',
@@ -217,6 +224,14 @@ export class AgentRuntime {
       await this.patchConversation(conversationId, { customer: customerProfile.name, avatar: initials(customerProfile.name) });
     }
 
+    // A connection requirement is an operational condition, not an LLM
+    // interpretation task. Handle it before invoking the provider so a
+    // catalog/profile integration outage cannot consume a model call or hide
+    // the actionable recovery state behind a planner failure.
+    if (customerLookup.status === 'connection_required') {
+      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan: null });
+    }
+
     const currentConversation = await this.getConversation(conversationId);
     const planned = await this.planner.plan({ tenantId, conversationId, normalized, customerProfile, conversation: currentConversation });
     const plan = suppressImplicitProductHandoff(planned, currentConversation);
@@ -245,6 +260,10 @@ export class AgentRuntime {
       }),
     });
 
+    if (plan.intent === 'provider_unavailable') {
+      return this.handleProviderUnavailable({ tenantId, conversationId, normalized, plan });
+    }
+
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan,
       items: plan.order?.items?.length ? plan.order.items : currentConversation?.orderDraft?.items ?? [] });
     if (commerceResult) return commerceResult;
@@ -258,10 +277,6 @@ export class AgentRuntime {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
         reason: 'Quedaron únicamente los productos permitidos. Usa «Continuar sin ellos» para revisarlos o «Cancelar solicitud».' });
     }
-    if (customerLookup.status === 'connection_required') {
-      return this.handleGoogleUnavailable({ tenantId, conversationId, normalized, plan });
-    }
-
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
         reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente'
@@ -524,6 +539,37 @@ export class AgentRuntime {
     return { summary: handoff.reused ? 'Google unavailable; human handoff already pending' : 'Google unavailable; human handoff requested', plan };
   }
 
+  async handleProviderUnavailable({ tenantId, conversationId, normalized, plan }) {
+    const message = 'Tuve una dificultad temporal para entender la solicitud. Por favor intenta de nuevo en un momento; conservaré esta conversación para continuar sin perder el contexto.';
+    await this.patchConversation(conversationId, {
+      stage: 'planning',
+      zone: 'agent',
+      status: 'waiting',
+      value: 'Esperando reintento',
+      progress: 20,
+      need: normalized.text,
+      nextStep: 'Reintentar interpretación contextual cuando el proveedor de IA esté disponible.',
+      humanReason: '',
+      lastTool: 'llm_core',
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: message,
+    });
+    this.events.emit({
+      type: 'llm.provider_unavailable',
+      tenantId,
+      conversationId,
+      detail: 'No se abrió atención humana por una falla transitoria del proveedor LLM.',
+      metadata: {
+        traceId: normalized.traceId ?? null,
+        executionMode: plan.executionMode,
+      },
+    });
+    return { summary: 'LLM provider unavailable; customer asked to retry', plan };
+  }
+
   async resolveDriveContext({ tenantId, conversationId, selectedRows = [], reason } = {}) {
     const fileIds = [...new Set(selectedRows.map((row) => row?.driveFileId).filter(Boolean))];
     if (!fileIds.length) {
@@ -668,7 +714,7 @@ export class AgentRuntime {
     return { summary: selected ? 'Catalog quote sent' : 'Catalog search needs review', plan };
   }
 
-  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, replaceDraft = false }) {
+  async handleDeliveryOrder({ tenantId, conversationId, normalized, plan, customerProfile, replaceDraft = false, catalogTargetLineIds = null }) {
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan });
     if (commerceResult) return commerceResult;
     const tenant = await this.getTenant(tenantId);
@@ -692,12 +738,26 @@ export class AgentRuntime {
       catalogSearchesFromPlan(plan, plan.order?.items ?? [], normalized.text)
         .map((search) => [search.candidateIndex, search]),
     );
+    const searchedIndexes = new Set();
     const orderItemsFromCatalog = await Promise.all((plan.order?.items ?? []).map(async (item, index) => {
+      // A clarification operates on the saved basket. Catalog facts already
+      // selected for an unchanged line are not new resolution tasks.
+      if (isRemovedOrderItem(item)) return normalizeOperationalOrderItem(item);
+      const saved = currentConversation?.orderDraft?.items?.find((line) => line.lineId && line.lineId === item.lineId);
+      if (saved && catalogTargetLineIds?.length && !catalogTargetLineIds.includes(item.lineId)) {
+        return normalizeOperationalOrderItem(item);
+      }
+      if (!replaceDraft && plan.intent === 'order_clarification' && saved?.product
+        && item.product?.sku === saved.product.sku && isPositiveAmount(item.product.price)
+        && (!item.requestedPresentation || productMatchesRequestedPresentation(item.product, item.requestedPresentation))) {
+        return normalizeOperationalOrderItem({ ...item, selectionStatus: 'selected' });
+      }
       const search = searchesByCandidateIndex.get(index) ?? {
         query: catalogQueryWithPresentation(item.catalogQuery ?? item.rawName, item.requestedPresentation ?? item.presentationHint),
         filters: {},
         retrievalHints: retrievalHintsForCatalogItem(item),
       };
+      searchedIndexes.add(index);
       const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
         query: search.query,
         semanticQuery: search.semanticQuery,
@@ -751,10 +811,13 @@ export class AgentRuntime {
         conversationId,
         normalized,
         conversation: currentConversation,
-        items: orderItemsFromCatalog,
+        items: orderItemsFromCatalog.filter((_, index) => searchedIndexes.has(index)),
       })
-      : { items: orderItemsFromCatalog, status: 'legacy_fallback' };
-    const orderItems = resolution.items.map((item) => normalizeOperationalOrderItem(item));
+      : { items: orderItemsFromCatalog.filter((_, index) => searchedIndexes.has(index)), status: 'legacy_fallback' };
+    let resolvedIndex = 0;
+    const orderItems = orderItemsFromCatalog.map((item, index) => normalizeOperationalOrderItem(
+      searchedIndexes.has(index) ? resolution.items[resolvedIndex++] : item,
+    ));
     const previousDraft = currentConversation?.orderDraft;
     const effectiveOrderItems = (previousDraft && !replaceDraft && isAdditiveOrderText(normalized.text)
       ? mergeOrderItems(previousDraft.items ?? [], orderItems)
@@ -764,11 +827,15 @@ export class AgentRuntime {
         intent: plan.intent,
         replaceDraft,
       })).map((item) => normalizeOperationalOrderItem(item));
+    // Removed items remain in the draft for traceability, but are not active
+    // commercial lines. They cannot cause catalog resolution, a missing field,
+    // a human handoff, or a checkout blockage.
+    const activeOrderItems = effectiveOrderItems.filter((item) => !isRemovedOrderItem(item));
 
-    const resolvedCommerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: effectiveOrderItems });
+    const resolvedCommerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: activeOrderItems });
     if (resolvedCommerceResult) return resolvedCommerceResult;
 
-    const selectedRows = effectiveOrderItems.map((item) => item.product).filter(Boolean);
+    const selectedRows = activeOrderItems.map((item) => item.product).filter(Boolean);
     const drive = await this.resolveDriveContext({
       tenantId,
       conversationId,
@@ -785,12 +852,13 @@ export class AgentRuntime {
       ...(!replaceDraft && isAdditiveOrderText(normalized.text) ? previousDraft?.missingFields ?? [] : []),
       ...(plan.missingFields ?? []),
     ]);
+    missingFields = reconcileLineResolutionGaps(missingFields, effectiveOrderItems, previousDraft?.items);
     const selectedPaymentMethod = resolvePaymentMethod(normalized.text, paymentMethods)
       ?? resolvePaymentMethod(plan.order?.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(previousDraft?.paymentMethod, paymentMethods)
       ?? resolvePaymentMethod(collected.paymentMethod, paymentMethods);
-    if (!effectiveOrderItems.length) missingFields.push('order_items');
-    for (const item of effectiveOrderItems) {
+    if (!activeOrderItems.length) missingFields.push('order_items');
+    for (const item of activeOrderItems) {
       if (item.amountSaleUnavailable || item.weightSaleUnavailable) {
         missingFields.push(`commercial_review:${item.lineId ?? item.catalogQuery}`);
         continue;
@@ -815,7 +883,7 @@ export class AgentRuntime {
       }
     }
     const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
-    const subtotal = effectiveOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    const subtotal = activeOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
     // Customer details belong to checkout only after the buyer accepts the
     // completed basket. Before then we keep the conversation focused on
     // products and the review action, regardless of an omitted LLM field.
@@ -824,26 +892,36 @@ export class AgentRuntime {
       customerProfile: nextProfile,
       paymentMethod: selectedPaymentMethod?.id ?? null,
       checkoutAccepted: checkoutBasketAccepted({
-        draft: { items: effectiveOrderItems, subtotal, delivery: isDelivery },
+        draft: { items: activeOrderItems, subtotal, delivery: isDelivery },
         previous: previousDraft?.checkout,
         collectionComplete: plan.order?.collectionComplete,
       }),
     });
     const checkout = checkoutProgress({
-      draft: { items: effectiveOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
+      draft: { items: activeOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
       previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete,
     });
     const clarificationState = deriveClarificationState({
       previous: previousDraft?.clarificationState ?? currentConversation?.clarificationState,
-      items: effectiveOrderItems,
+      items: activeOrderItems,
       missingFields,
       maxAttempts: this.clarificationMaxAttempts(),
+      attemptedLineIds: orderItems.filter((_, index) => searchedIndexes.has(index)).map((item) => item.lineId ?? item.catalogQuery),
+      replacedLineIds: (plan.lineUpdates ?? []).filter((update) => update.operation === 'replace').map((update) => update.lineId),
     });
-    const requiresHumanResolution = needsHumanProductResolution(missingFields, clarificationState);
+    const requiresHumanResolution = needsMandatoryHumanProductResolution(missingFields);
+    const awaitsPartialOrderDecision = !requiresHumanResolution
+      && hasUnresolvedProductMissingField(missingFields)
+      && clarificationState?.exhausted === true;
+    const manualProductReview = awaitsPartialOrderDecision
+      ? buildManualProductReview({ previous: previousDraft?.manualProductReview, items: activeOrderItems, missingFields, clarificationState })
+      : retainActiveManualReview(previousDraft?.manualProductReview, effectiveOrderItems);
     const reply = requiresHumanResolution
-      ? buildHumanResolutionReply({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile })
+      ? buildHumanResolutionReply({ orderItems: activeOrderItems, missingFields, customerProfile: nextProfile })
+      : awaitsPartialOrderDecision
+        ? buildPartialOrderDecisionReply({ orderItems: activeOrderItems, missingFields })
       : buildOrderReply({
-        orderItems: effectiveOrderItems,
+        orderItems: activeOrderItems,
         missingFields,
         customerProfile: nextProfile,
         subtotal,
@@ -852,18 +930,23 @@ export class AgentRuntime {
         checkout,
       });
     const canQuote = checkout.phase === 'confirmation';
-    const checkoutOffer = !requiresHumanResolution
+    const checkoutOffer = !requiresHumanResolution && !awaitsPartialOrderDecision
       ? await this.createCheckoutOffer({ tenantId, conversationId, paymentMethods, checkout })
       : null;
-    const catalogSelectionOffer = !requiresHumanResolution
-      ? await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout, items: effectiveOrderItems })
+    const catalogSelectionOffer = !requiresHumanResolution && !awaitsPartialOrderDecision
+      ? await this.createCatalogSelectionOffer({ tenantId, conversationId, checkout, items: activeOrderItems })
+      : null;
+    const partialOrderDecisionOffer = awaitsPartialOrderDecision
+      ? await this.createPartialOrderDecisionOffer({ tenantId, conversationId, checkout, items: activeOrderItems })
       : null;
     const checkoutDataCapture = isCheckoutDataCollectionPhase(checkout, missingFields);
     // A WhatsApp list represents exactly one pending catalog line. Its body
     // is the focused question produced during catalog adjudication; letting a
     // later broad reply-composition pass replace it causes the customer to
     // see questions for other pending lines without their corresponding list.
-    const customerReply = catalogSelectionOffer?.interactive?.body ?? await this.composeCustomerReply({
+    const customerReplyBase = catalogSelectionOffer?.interactive?.body
+      ?? partialOrderDecisionOffer?.interactive?.body
+      ?? await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
@@ -871,13 +954,15 @@ export class AgentRuntime {
         kind: canQuote ? 'order_quote' : 'order_clarification',
         checkoutPhase: checkout.phase,
         checkoutDataCapture,
-        products: checkoutDataCapture ? [] : effectiveOrderItems.map((item) => item.product ?? item),
+        products: checkoutDataCapture ? [] : activeOrderItems.map((item) => item.product ?? item),
         subtotal: checkoutDataCapture ? null : subtotal,
-        clarification: clarificationFacts(clarificationState, effectiveOrderItems),
+        clarification: clarificationFacts(clarificationState, activeOrderItems),
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
-    const interactiveOffer = catalogSelectionOffer ?? checkoutOffer;
+    const variablePricingNotice = shouldSendVariablePricingNotice({ previous: previousDraft, draft: { items: effectiveOrderItems, paymentMethod: selectedPaymentMethod?.id }, checkout });
+    const customerReply = variablePricingNotice ? `${customerReplyBase}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyBase;
+    const interactiveOffer = catalogSelectionOffer ?? partialOrderDecisionOffer ?? checkoutOffer;
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
       : undefined;
@@ -889,7 +974,11 @@ export class AgentRuntime {
       value: subtotal > 0 ? formatCurrency(subtotal) : 'Pendiente',
       progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
       need: normalized.text,
-      nextStep: requiresHumanResolution ? 'Humano valida disponibilidad, sustituto o decision comercial.' : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
+      nextStep: requiresHumanResolution
+        ? 'Humano valida disponibilidad, sustituto o decision comercial.'
+        : awaitsPartialOrderDecision
+          ? 'Esperar si el cliente continúa con el pedido parcial, aporta más datos o pide hablar con la tienda.'
+          : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
       lastTool: collected.name || collected.defaultAddress
         ? 'google_sheets_customer_profile_upsert'
         : drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
@@ -910,7 +999,9 @@ export class AgentRuntime {
         driveStatus: drive.status,
         catalogResolution: resolution.status,
         clarificationState,
+        manualProductReview,
         checkout,
+        variablePricingNoticeSentAt: variablePricingNotice ? new Date().toISOString() : previousDraft?.variablePricingNoticeSentAt ?? null,
       },
     });
 
@@ -924,6 +1015,7 @@ export class AgentRuntime {
           exhausted: clarificationState.exhausted,
           unresolvedCount: clarificationState.unresolvedLineIds.length,
           escalated: requiresHumanResolution,
+          awaitingPartialOrderDecision: awaitsPartialOrderDecision,
         },
       });
     }
@@ -934,8 +1026,8 @@ export class AgentRuntime {
         urgency: 'Alta',
         assigned_team: 'ventas',
         context_snapshot: {
-          summary: buildHumanResolutionSummary({ orderItems: effectiveOrderItems, missingFields, customerProfile: nextProfile, text: normalized.text }),
-          orderItems: effectiveOrderItems,
+          summary: buildHumanResolutionSummary({ orderItems: activeOrderItems, missingFields, customerProfile: nextProfile, text: normalized.text }),
+          orderItems: activeOrderItems,
           missingFields: [...new Set(missingFields)],
           customerProfile: nextProfile,
           driveStatus: drive.status,
@@ -963,7 +1055,14 @@ export class AgentRuntime {
       interactive: checkoutInteractive,
     });
 
-    return { summary: requiresHumanResolution ? 'Structured order escalated to human' : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification', plan };
+    return {
+      summary: requiresHumanResolution
+        ? 'Structured order escalated to human'
+        : awaitsPartialOrderDecision
+          ? 'Structured order awaiting partial decision'
+          : canQuote ? 'Structured order quote sent' : 'Structured order needs clarification',
+      plan,
+    };
   }
 
   async upsertCapturedCustomerProfile({ tenantId, conversationId, normalized, customerProfile, customerDetails, delivery }) {
@@ -988,7 +1087,8 @@ export class AgentRuntime {
   async handleOrderConfirmation({ tenantId, conversationId, normalized, plan, customerProfile }) {
     const existing = await this.getConversation(conversationId);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan,
-      items: existing?.orderDraft?.items?.length ? existing.orderDraft.items : plan.order?.items ?? [] });
+      items: (existing?.orderDraft?.items?.length ? existing.orderDraft.items : plan.order?.items ?? [])
+        .filter((item) => !isRemovedOrderItem(item)) });
     if (commerceResult) return commerceResult;
     if (existing?.commercePolicy?.awaitingContinuation) return this.continueAllowedOrder({ tenantId, conversationId, normalized, customerProfile });
     await this.usage?.assertCanRecordDelivery(tenantId, { conversationId });
@@ -1003,8 +1103,9 @@ export class AgentRuntime {
     );
     // Old/sparse drafts may have lost their catalog snapshot. Requote before
     // accepting confirmation; never turn a missing amount into a free order.
-    const quotedTotal = (orderDraft.items ?? []).reduce((sum, item) => sum + (quotedLineTotal(item) ?? 0), 0);
-    if (!orderDraft.items?.length || orderDraft.items.some((item) => quotedLineTotal(item) === null)
+    const activeOrderItems = (orderDraft.items ?? []).filter((item) => !isRemovedOrderItem(item));
+    const quotedTotal = activeOrderItems.reduce((sum, item) => sum + (quotedLineTotal(item) ?? 0), 0);
+    if (!activeOrderItems.length || activeOrderItems.some((item) => quotedLineTotal(item) === null)
       || Number(orderDraft.subtotal) !== quotedTotal) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile,
         plan: { ...plan, intent: 'delivery_order', order: orderDraft, missingFields: orderDraft.missingFields ?? [] },
@@ -1037,7 +1138,7 @@ export class AgentRuntime {
       wa_id: normalized.waId,
       customer_name: customerProfile?.name ?? normalized.profileName ?? normalized.waId,
       delivery_address: customerProfile?.defaultAddress,
-      items: (orderDraft.items ?? []).map((item) => ({
+      items: activeOrderItems.map((item) => ({
         sku: item.product?.sku ?? item.skuHint,
         name: item.product?.name ?? item.catalogQuery,
         quantity: item.quantity,
@@ -1050,8 +1151,11 @@ export class AgentRuntime {
         lineTotal: item.lineTotal ?? null,
       })),
       subtotal: orderDraft.subtotal,
+      delivery: orderDraft.delivery !== false,
+      pricing: orderDraft.pricing ?? null,
       payment_method: orderDraft.paymentMethod,
       payment_method_label: paymentLabel,
+      manual_product_review: orderDraft.manualProductReview ?? null,
       status: 'pending_human_preparation',
     });
 
@@ -1074,6 +1178,7 @@ export class AgentRuntime {
         items: confirmedItems,
         paymentMethod: orderDraft.paymentMethod,
         paymentMethodLabel: paymentLabel,
+        manualProductReview: order.order.manualProductReview ?? null,
       },
     });
 
@@ -1109,7 +1214,7 @@ export class AgentRuntime {
       conversationId,
       orderId: order.order.id,
       subtotal: confirmedSubtotal,
-      itemCount: orderDraft.items?.length ?? 0,
+      itemCount: activeOrderItems.length,
     });
 
     return { summary: 'Confirmed order registered and handed off', plan };
@@ -1117,12 +1222,20 @@ export class AgentRuntime {
 
   async handleOrderClarification({ tenantId, conversationId, normalized, plan, customerProfile, preserveProductAmbiguity = false, preserveExistingCatalogSelections = false }) {
     const conversation = await this.getConversation(conversationId);
-    const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order);
+    // Interactive callbacks supply an authoritative runtime-built basket (for
+    // example, moving unavailable lines to manual review). Model deltas do not.
+    const draft = restoreClarificationDraft(conversation?.orderDraft, plan.order, !preserveExistingCatalogSelections);
     // The LLM may understand a short contextual reply (for example, "una de
     // cada una") as updates to several previously selected lines. It may only
     // update existing line identifiers; product, price and stock remain facts
     // owned by the catalog/runtime.
     draft.items = applyStructuredLineUpdates(draft.items ?? [], plan.lineUpdates ?? []);
+    draft.missingFields = reconcileLineResolutionGaps(draft.missingFields, draft.items, conversation?.orderDraft?.items);
+    draft.manualProductReview = retainActiveManualReview(draft.manualProductReview, draft.items);
+    const catalogTargetLineIds = [...new Set([
+      ...(plan.order?.items ?? []).map((item) => item.lineId),
+      ...(plan.lineUpdates ?? []).map((update) => update.lineId),
+    ].filter(Boolean))];
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, plan, items: draft.items });
     if (commerceResult) return commerceResult;
     const paymentMethods = paymentMethodsForTenant(await this.getTenant(tenantId));
@@ -1146,15 +1259,16 @@ export class AgentRuntime {
         item.quantity = collected.quantity;
       }
     }
-    if (collected.removeProductQuery) {
+    if (collected.removeProductQuery && !(plan.lineUpdates ?? []).some((update) => update.operation === 'remove')) {
       draft.items = (draft.items ?? []).filter((item) => !matchesRemovalQuery(item, collected.removeProductQuery));
     }
 
     // New/replaced products must pass through the catalog resolver. Existing
     // products keep their verified price even when the LLM returns only SKUs.
-    if (!preserveExistingCatalogSelections && draft.items.some((item) => !item.product || !isPositiveAmount(item.product.price)
-      || (item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation)))) {
-      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
+    if (!preserveExistingCatalogSelections && draft.items.some((item) => !isRemovedOrderItem(item) && (!item.product || !isPositiveAmount(item.product.price)
+      || (item.requestedPresentation && !productMatchesRequestedPresentation(item.product, item.requestedPresentation))))) {
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile,
+        catalogTargetLineIds,
         plan: { ...plan, order: draft, missingFields: draft.missingFields ?? [] },
       });
     }
@@ -1167,10 +1281,23 @@ export class AgentRuntime {
       if (field.startsWith('quantity:')) {
         const query = field.replace('quantity:', '');
         const item = (draft.items ?? []).find((candidate) => candidate.catalogQuery === query);
-        return !isPositiveUnitQuantity(item?.quantity) && !isWeightSaleRequest(item);
+        return Boolean(item?.product)
+          && !isPositiveUnitQuantity(item.quantity)
+          && !isWeightSaleRequest(item);
+      }
+      if (field.startsWith('stock:')) {
+        const query = field.replace('stock:', '');
+        const item = (draft.items ?? []).find((candidate) => candidate.catalogQuery === query);
+        return Boolean(item?.product)
+          && (isPositiveUnitQuantity(item.quantity) || isWeightSaleRequest(item))
+          && item.available === false;
       }
       if (field.startsWith('presentation:')) {
         return preserveProductAmbiguity || !confirmsPresentation(normalized.text, field.replace('presentation:', ''));
+      }
+      if (field.startsWith('product:')) {
+        const query = field.replace('product:', '');
+        return !(draft.items ?? []).some((item) => isRemovedOrderItem(item) && item.catalogQuery === query);
       }
       return true;
     });
@@ -1187,8 +1314,13 @@ export class AgentRuntime {
         if (item.lineId) removeMissingField(draft.missingFields, `selection:${item.lineId}`);
       }
     }
-    if (!draft.items.length) draft.missingFields.push('order_items');
+    if (!draft.items.some((item) => !isRemovedOrderItem(item))) draft.missingFields.push('order_items');
     for (const item of draft.items) {
+      if (isRemovedOrderItem(item)) continue;
+      // A product that has no catalog reference is a product-resolution gap.
+      // Its requested quantity is already a semantic fact and inventory cannot
+      // be assessed until an actual catalog reference is selected.
+      if (!item.product) continue;
       if (item.lineTotal === null && !isWeightSaleRequest(item)) draft.missingFields.push(`quantity:${item.catalogQuery}`);
       // Stock can only be evaluated after a numeric unit quantity is known.
       // A semantic measure is an interpretation fact, not a stock shortage.
@@ -1196,7 +1328,8 @@ export class AgentRuntime {
     }
     draft.missingFields = normalizeOperationalMissingFields(draft.missingFields);
     if ((hasUnresolvedProductMissingField(draft.missingFields) || needsMandatoryHumanProductResolution(draft.missingFields)) && !preserveExistingCatalogSelections) {
-      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile, replaceDraft: true,
+      return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile,
+        catalogTargetLineIds,
         plan: { ...plan, order: draft, missingFields: draft.missingFields },
       });
     }
@@ -1212,6 +1345,12 @@ export class AgentRuntime {
       }),
     });
     draft.checkout = checkoutProgress({ draft, previous: conversation?.orderDraft?.checkout, collectionComplete: plan.order?.collectionComplete });
+    if (!(draft.items ?? []).some((item) => !isRemovedOrderItem(item) && !item.product)) {
+      const previousClarification = draft.clarificationState ?? conversation?.clarificationState;
+      draft.clarificationState = previousClarification
+        ? { ...previousClarification, status: 'closed', exhausted: false, unresolvedLineIds: [], closedAt: new Date().toISOString() }
+        : null;
+    }
     delete draft.collectionComplete; // A semantic signal belongs only to this turn, not future additions.
 
     const canQuote = draft.checkout.phase === 'confirmation';
@@ -1229,7 +1368,7 @@ export class AgentRuntime {
     const checkoutDataCapture = isCheckoutDataCollectionPhase(draft.checkout, draft.missingFields);
     // Keep the list's question scoped to its selected pending line. This
     // continuation path is reached after a prior interactive choice.
-    const customerReply = catalogSelectionOffer?.interactive?.body ?? await this.composeCustomerReply({
+    const customerReplyBase = catalogSelectionOffer?.interactive?.body ?? await this.composeCustomerReply({
       tenantId,
       conversationId,
       fallbackText: reply,
@@ -1237,11 +1376,20 @@ export class AgentRuntime {
         kind: canQuote ? 'order_quote' : 'order_clarification',
         checkoutPhase: draft.checkout.phase,
         checkoutDataCapture,
-        products: checkoutDataCapture ? [] : draft.items ?? [],
+        // Selection evidence remains on the draft for auditability, but it is
+        // historical once a catalog option was consumed. Passing the entire
+        // item here leaked its previous selection question into DeepSeek's
+        // reply prompt, making it ask again for already-selected variants.
+        // Selected lines therefore expose only their verified catalog fact;
+        // unresolved lines keep their full pending evidence.
+        products: checkoutDataCapture ? [] : (draft.items ?? []).map((item) => item.product ?? item),
         subtotal: checkoutDataCapture ? null : draft.subtotal,
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
+    const variablePricingNotice = shouldSendVariablePricingNotice({ previous: conversation?.orderDraft, draft, checkout: draft.checkout });
+    if (variablePricingNotice) draft.variablePricingNoticeSentAt = new Date().toISOString();
+    const customerReply = variablePricingNotice ? `${customerReplyBase}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyBase;
     const interactiveOffer = catalogSelectionOffer ?? checkoutOffer;
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
@@ -1261,6 +1409,7 @@ export class AgentRuntime {
         capturedAt: collected.name || collected.defaultAddress ? new Date().toISOString() : null,
       },
       orderDraft: draft,
+      clarificationState: draft.clarificationState ?? null,
     });
 
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
@@ -1812,9 +1961,10 @@ export class AgentRuntime {
     // even when there are only two or three variants.
     const candidates = item.catalogCandidates.slice(0, 10);
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const optionTitles = catalogListOptionTitles(candidates);
     const options = candidates.map((candidate, index) => ({
       id: `vi:${offerId}:${index + 1}`,
-      title: catalogListOptionTitle(candidate),
+      title: optionTitles[index],
       description: catalogListOptionDescription(candidate),
       action: 'select_catalog_product',
       value: JSON.stringify({ basketKey: checkout.basketKey, lineId: item.lineId, sku: candidate.sku }),
@@ -1835,6 +1985,47 @@ export class AgentRuntime {
         buttonLabel: 'Ver opciones',
         sectionTitle: catalogListSectionTitle(item),
         rows: options.map(({ id, title, description }) => ({ id, title, description })),
+      },
+    };
+  }
+
+  async createPartialOrderDecisionOffer({ tenantId, conversationId, checkout, items }) {
+    if (!this.store.createInteractionOffer) return null;
+    const unresolvedItems = unresolvedProductItems(items);
+    if (!unresolvedItems.length) return null;
+    const hasResolvedItems = (items ?? []).some((item) => item.product && !isRemovedOrderItem(item));
+    const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const basket = checkout?.basketKey ?? basketKey({ items });
+    const options = [
+      ...(hasResolvedItems ? [{
+        id: `vi:${offerId}:1`, title: 'Continuar parcial', action: 'continue_partial_order', value: basket,
+      }] : []),
+      {
+        id: `vi:${offerId}:${hasResolvedItems ? 2 : 1}`,
+        title: 'Seguir aclarando',
+        action: 'continue_clarifying_products',
+        value: basket,
+      },
+      {
+        id: `vi:${offerId}:${hasResolvedItems ? 3 : 2}`,
+        title: 'Hablar con tienda',
+        action: 'human_handoff',
+      },
+    ];
+    const offer = await this.store.createInteractionOffer({
+      id: offerId,
+      tenantId,
+      conversationId,
+      purpose: 'partial_order_decision',
+      options,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+    return {
+      offer,
+      interactive: {
+        kind: 'button',
+        body: buildPartialOrderDecisionReply({ orderItems: items, missingFields: unresolvedItems.map((item) => `product:${item.catalogQuery}`) }),
+        buttons: options.map(({ id, title }) => ({ id, title })),
       },
     };
   }
@@ -1885,6 +2076,9 @@ export class AgentRuntime {
     }
     if (result.option?.action === 'cancel_request') return this.cancelConversation({ tenantId, conversationId, normalized });
     if (result.option?.action === 'continue_allowed_order') return this.continueAllowedOrder({ tenantId, conversationId, normalized });
+    if (result.option?.action === 'confirm_order_change') {
+      return this.confirmOrderChangeFromInteraction({ tenantId, conversationId, normalized, option: result.option });
+    }
     const current = await this.getConversation(conversationId);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, items: current?.orderDraft?.items ?? [] });
     if (commerceResult) return commerceResult;
@@ -1906,14 +2100,34 @@ export class AgentRuntime {
           // Candidate arrays belong only to pending selection state; retaining
           // them leaks the already-resolved alternatives into the next LLM
           // composition pass and can make it ask the same question again.
-          ? normalizeAmountSaleItem({
-            ...item,
-            product: selectedProduct,
-            selectionStatus: 'selected',
-            selectionQuestion: null,
-            catalogCandidates: [],
-            presentationOptions: [],
-          })
+          ? (() => {
+            // Selecting a catalog row is an explicit customer decision, but
+            // its commercial meaning still comes from the preserved line and
+            // the selected catalog contract.  A fixed package chosen from the
+            // list is one package when the customer had not already stated a
+            // unit quantity; it must not remain as "cantidad pendiente".
+            // Conversely, amount and configured weight sales retain their
+            // original commercial instruction rather than becoming units.
+            const requestedWeight = normalizeRequestedWeight(item.requestedWeight);
+            const keepsWeightSale = Boolean(requestedWeight && supportsWeightSale(selectedProduct));
+            const keepsAmountSale = isPositiveAmount(item.budgetAmount);
+            const quantity = keepsWeightSale || keepsAmountSale
+              ? null
+              : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : 1;
+            return normalizeOperationalOrderItem({
+              ...item,
+              product: selectedProduct,
+              quantity,
+              // A packaged reference explicitly selected by the customer is
+              // not silently treated as a bulk sale merely because the
+              // original wording mentioned a measure such as "media".
+              requestedWeight: keepsWeightSale ? requestedWeight : null,
+              selectionStatus: 'selected',
+              selectionQuestion: null,
+              catalogCandidates: [],
+              presentationOptions: [],
+            });
+          })()
           : item),
       };
       const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
@@ -1923,7 +2137,7 @@ export class AgentRuntime {
         preserveExistingCatalogSelections: true,
         plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] } });
     }
-    if (['continue_checkout', 'confirm_order'].includes(result.option?.action)
+    if (['continue_checkout', 'confirm_order', 'continue_partial_order', 'continue_clarifying_products'].includes(result.option?.action)
       && result.option.value !== basketKey(current?.orderDraft)) {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
         reason: 'El pedido cambió desde ese resumen. Revisa el último total y usa sus opciones para continuar.' });
@@ -1938,6 +2152,12 @@ export class AgentRuntime {
         // omitted the literal delivery intent while it recognized the basket;
         // that omission must not bypass customer, address and payment capture.
         plan: { intent: 'order_clarification', order: { collectionComplete: true, delivery: true } } });
+    }
+    if (result.option?.action === 'continue_partial_order') {
+      return this.continuePartialOrder({ tenantId, conversationId, normalized, option: result.option });
+    }
+    if (result.option?.action === 'continue_clarifying_products') {
+      return this.continueClarifyingProducts({ tenantId, conversationId, normalized, option: result.option });
     }
     if (result.option?.action === 'confirm_order') {
       return this.confirmOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
@@ -1960,6 +2180,130 @@ export class AgentRuntime {
     await this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
       plan: { intent: 'order_clarification', order: { paymentMethod: result.option.value } } });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async confirmOrderChangeFromInteraction({ tenantId, conversationId, normalized, option }) {
+    if (!this.orders) throw Object.assign(new Error('El servicio de pedidos no está disponible.'), { code: 'order_service_unavailable', statusCode: 503 });
+    let reference;
+    try {
+      reference = JSON.parse(String(option?.value ?? ''));
+    } catch {
+      reference = null;
+    }
+    if (!reference?.orderId || !Number.isSafeInteger(Number(reference.version))) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: 'Ese resumen ya no identifica una versión válida del pedido. Pide a la tienda que lo actualice.' });
+    }
+    const confirmed = await this.orders.confirmVariablePricing({
+      orderId: reference.orderId,
+      tenantId,
+      input: { expectedVersion: Number(reference.version) },
+      actorId: `customer:${normalized.waId}`,
+    });
+    const text = `Confirmaste el resumen actualizado del pedido ${confirmed.order.id}. La tienda ya puede continuar con el alistamiento.`;
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+    });
+    return { summary: 'Customer confirmed updated order', order: confirmed.order };
+  }
+
+  async continuePartialOrder({ tenantId, conversationId, normalized, option }) {
+    const current = await this.getConversation(conversationId);
+    const draft = structuredClone(current?.orderDraft ?? {});
+    const unresolved = unresolvedProductItems(draft.items ?? []);
+    const resolvedItems = (draft.items ?? []).filter((item) => !unresolved.includes(item) && !isRemovedOrderItem(item));
+    if (!unresolved.length || !resolvedItems.length) {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: 'El pedido cambió. Necesito que aclaremos al menos un producto antes de continuar.',
+      });
+    }
+    const manualProductReview = buildManualProductReview({
+      previous: draft.manualProductReview,
+      items: draft.items,
+      missingFields: draft.missingFields ?? [],
+      clarificationState: draft.clarificationState ?? current?.clarificationState,
+      status: 'pending',
+    });
+    const unresolvedKeys = new Set(unresolved.flatMap((item) => [item.lineId, item.catalogQuery].filter(Boolean).map(String)));
+    const missingFields = normalizeOperationalMissingFields(draft.missingFields ?? []).filter((field) => (
+      !missingFieldTargetsAny(field, unresolvedKeys)
+    ));
+    const closedClarification = draft.clarificationState
+      ? { ...draft.clarificationState, status: 'closed', exhausted: false, closedAt: new Date().toISOString() }
+      : null;
+    const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+      wa_id: normalized.waId,
+      profile_name: normalized.profileName,
+    });
+    return this.handleOrderClarification({
+      tenantId,
+      conversationId,
+      normalized,
+      customerProfile: lookup.profile,
+      preserveExistingCatalogSelections: true,
+      plan: {
+        intent: 'order_clarification',
+        order: {
+          ...draft,
+          items: resolvedItems,
+          missingFields,
+          manualProductReview,
+          clarificationState: closedClarification,
+          collectionComplete: true,
+        },
+      },
+    });
+  }
+
+  async continueClarifyingProducts({ tenantId, conversationId, normalized, option }) {
+    const current = await this.getConversation(conversationId);
+    const draft = structuredClone(current?.orderDraft ?? {});
+    const unresolved = unresolvedProductItems(draft.items ?? []);
+    if (!unresolved.length) {
+      return this.replyToInvalidInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        reason: 'El pedido cambió y ya no hay productos pendientes por aclarar.',
+      });
+    }
+    const now = new Date().toISOString();
+    const clarificationState = {
+      ...(draft.clarificationState ?? current?.clarificationState ?? {}),
+      status: 'open',
+      attempts: 0,
+      exhausted: false,
+      reopenedAt: now,
+      updatedAt: now,
+    };
+    const manualProductReview = buildManualProductReview({
+      previous: draft.manualProductReview,
+      items: draft.items,
+      missingFields: draft.missingFields ?? [],
+      clarificationState,
+      status: 'clarifying',
+    });
+    await this.patchConversation(conversationId, {
+      stage: 'clarification',
+      zone: 'agent',
+      status: 'live',
+      progress: 42,
+      nextStep: 'Esperar información adicional sobre el producto no identificado.',
+      clarificationState,
+      orderDraft: { ...draft, clarificationState, manualProductReview },
+    });
+    const names = unresolved.map((item) => requestedProductName(item, item.catalogQuery)).filter(Boolean);
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text: `Cuéntame un detalle más de ${joinSpanish(names)} —por ejemplo marca, tipo o presentación— y vuelvo a buscarlo sin perder los demás productos.`,
+    });
+    return { summary: 'Product clarification reopened', interaction: option };
   }
 
   async confirmOrderFromInteraction({ tenantId, conversationId, normalized, option }) {
@@ -2357,12 +2701,12 @@ function mergeOrderItems(previousItems = [], nextItems = []) {
  * instruction.
  */
 function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = [], intent, replaceDraft = false }) {
-  if (replaceDraft || intent !== 'order_clarification' || !previousItems.some((item) => item?.selectionStatus === 'pending')) {
+  if (replaceDraft || intent !== 'order_clarification') {
     return incomingItems;
   }
   const unmatchedPrevious = [...previousItems];
   const reconciled = incomingItems.map((incoming) => {
-    const matchedIndex = findPendingSelectionMatch(unmatchedPrevious, incoming);
+    const matchedIndex = findClarificationSelectionMatch(unmatchedPrevious, incoming);
     if (matchedIndex < 0) return incoming;
     const previous = unmatchedPrevious.splice(matchedIndex, 1)[0];
     const incomingExpressesAmount = incoming?.budgetAmountExplicit === true || isPositiveAmount(incoming?.budgetAmount);
@@ -2379,7 +2723,8 @@ function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = []
     const quantity = isPositiveAmount(budgetAmount)
       ? null
       : preserveQuantity ? Number(previous.quantity) : isPositiveUnitQuantity(incoming.quantity) ? Number(incoming.quantity) : null;
-    const product = incoming.product ?? previous.product ?? null;
+    const product = isRemovedOrderItem(incoming) ? null
+      : Object.hasOwn(incoming, 'product') ? incoming.product : previous.product ?? null;
     return {
       ...previous,
       ...incoming,
@@ -2399,7 +2744,17 @@ function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = []
   return [...reconciled, ...unmatchedPrevious];
 }
 
-function findPendingSelectionMatch(previousItems, incoming) {
+function findClarificationSelectionMatch(previousItems, incoming) {
+  // `lineId` is the conversation-state identity emitted by the interpreter.
+  // A corrected natural-language query can legitimately have no SKU yet;
+  // matching that correction by its stable line identifier preserves both its
+  // pending selection and the unrelated products already in the basket.
+  if (incoming?.lineId) {
+    const byLineId = previousItems
+      .map((candidate, index) => ({ candidate, index }))
+      .filter(({ candidate }) => candidate?.lineId === incoming.lineId);
+    if (byLineId.length === 1) return byLineId[0].index;
+  }
   const incomingSkus = new Set([
     incoming?.product?.sku,
     incoming?.skuHint,
@@ -2407,7 +2762,7 @@ function findPendingSelectionMatch(previousItems, incoming) {
   if (!incomingSkus.size) return -1;
   const matches = previousItems
     .map((candidate, index) => ({ candidate, index }))
-    .filter(({ candidate }) => candidate?.selectionStatus === 'pending')
+    .filter(({ candidate }) => candidate?.selectionStatus === 'pending' || candidate?.selectionStatus === 'handoff')
     .filter(({ candidate }) => {
       const candidateSkus = [candidate?.product?.sku, candidate?.skuHint, ...(candidate?.catalogCandidates ?? []).map((product) => product?.sku)]
         .filter(Boolean).map(String);
@@ -2644,10 +2999,18 @@ function isAcceptableOrderProduct(product, item = {}) {
   const query = normalizeText([item.rawName, item.catalogQuery, item.requestedPresentation].filter(Boolean).join(' '));
   const productText = normalizeText([product.name, product.brand, product.category, product.presentation, ...(product.aliases ?? [])].filter(Boolean).join(' '));
   if (item.requestedPresentation && !productMatchesRequestedPresentation(product, item.requestedPresentation)) return false;
-  // An explicit attribute is part of the customer's request, not merely a
-  // ranking hint. Semantic retrieval may remain broad, but a conflicting
-  // product must not enter the basket through an inferred SKU or candidate.
-  if (item.requestedAttributes && !matchesRequestedCatalogAttributes(product, item.requestedAttributes)) return false;
+  // The interpreter's attributes are retrieval evidence, not literal catalog
+  // predicates. Values such as "manaza", "pequeñas", "2 paquetes" or
+  // "media libra" describe the customer's wording and can be absent from an
+  // otherwise compatible catalog row. The catalog index already uses those
+  // hints to rank direct, semantic and graph candidates; treating them as an
+  // all-or-nothing string match here erased that evidence before the LLM
+  // could ask the customer to select a real alternative. We preserve one
+  // narrow guard: when a request names a *structured* catalog attribute and
+  // the candidate exposes that same primitive attribute with a different
+  // value, it cannot silently become the selected item ("seda" must not
+  // select a row whose material is "algodón").
+  if (hasConflictingStructuredCatalogAttribute(product, item.explicitAttributes ?? item.requestedAttributes)) return false;
   if (containsAny(query, ['cerveza', 'club colombia', 'sixpack', 'six pack']) && !containsAny(productText, ['cerveza', 'club colombia'])) return false;
   if (containsAny(query, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos']) && !containsAny(productText, ['marlboro', 'malboro', 'cigarrillo', 'cigarrillos'])) return false;
   if (containsAny(query, ['salchichon', 'salchicha']) && !containsAny(productText, ['salchicha', 'salchichon', 'carnes frias'])) return false;
@@ -2683,27 +3046,33 @@ function isAcceptableOrderProduct(product, item = {}) {
   return true;
 }
 
-function matchesRequestedCatalogAttributes(product, requestedAttributes = {}) {
-  if (!requestedAttributes || typeof requestedAttributes !== 'object' || Array.isArray(requestedAttributes)) return true;
-  const actual = normalizeText([
-    product.brand,
-    product.category,
-    product.presentation,
-    product.productFamily,
-    product.description,
-    ...(product.aliases ?? []),
-    ...(product.tags ?? []),
-    typeof product.attributes === 'object' ? JSON.stringify(product.attributes) : product.attributes,
-  ].filter(Boolean).join(' '));
-  return Object.entries(requestedAttributes).every(([key, value]) => {
-    if (value === null || value === undefined || value === '') return true;
-    const expected = normalizeText(`${key} ${value}`);
-    return actual.includes(normalizeText(value)) || actual.includes(expected);
+function hasConflictingStructuredCatalogAttribute(product, requestedAttributes = {}) {
+  if (!requestedAttributes || typeof requestedAttributes !== 'object' || Array.isArray(requestedAttributes)) return false;
+  const catalogAttributes = product?.attributes;
+  if (!catalogAttributes || typeof catalogAttributes !== 'object' || Array.isArray(catalogAttributes)) return false;
+  return Object.entries(requestedAttributes).some(([requestedKey, requestedValue]) => {
+    if (requestedValue === null || requestedValue === undefined || requestedValue === '') return false;
+    const entry = Object.entries(catalogAttributes).find(([catalogKey]) => (
+      normalizeText(catalogKey) === normalizeText(requestedKey)
+    ));
+    if (!entry) return false;
+    const actualValue = entry[1];
+    // Measurements and nested metadata are semantic evidence. Only compare
+    // directly comparable catalog facts such as material, flavor code or
+    // an explicitly modeled boolean flag.
+    if (actualValue === null || typeof actualValue === 'object' || Array.isArray(actualValue)) return false;
+    if (typeof requestedValue === 'object') return false;
+    return normalizeText(actualValue) !== normalizeText(requestedValue);
   });
 }
 
 function requestedProductIdentityTokens(item = {}) {
-  const source = [item.rawName, item.catalogQuery, item.productHypothesis]
+  // `productHypothesis` is the LLM's explanatory inference. It often has
+  // diagnostic language (for example, "possible correction of pantajado")
+  // that is not an attribute the customer asked for and cannot be expected
+  // in a catalog row. Ground identity only in the customer phrase/query;
+  // the hypothesis remains available to retrieval and observability.
+  const source = [item.rawName, item.catalogQuery]
     .filter(Boolean)
     .join(' ');
   return [...new Set(normalizeText(source)
@@ -2908,6 +3277,10 @@ function normalizeAmountSaleItem(item = {}) {
 }
 
 function normalizeOperationalOrderItem(item = {}) {
+  if (isRemovedOrderItem(item)) {
+    return { ...item, product: null, selectionStatus: 'removed', removedByCustomer: true,
+      lineTotal: null, available: null, catalogCandidates: [], presentationOptions: [], selectionQuestion: null };
+  }
   if (isWeightSaleRequest(item)) {
     const product = supportsWeightSale(item.product) ? item.product : null;
     const quote = product ? quoteWeightSale(product, item.requestedWeight) : null;
@@ -2927,6 +3300,17 @@ function normalizeOperationalOrderItem(item = {}) {
   return normalizeAmountSaleItem(item);
 }
 
+function isRemovedOrderItem(item = {}) {
+  return item?.removedByCustomer === true || item?.selectionStatus === 'removed';
+}
+
+function retainActiveManualReview(review, items = []) {
+  if (!review) return null;
+  const removedIds = new Set(items.filter(isRemovedOrderItem).map((item) => item.lineId).filter(Boolean));
+  const lines = (review.lines ?? []).filter((line) => !removedIds.has(line.lineId));
+  return lines.length ? { ...review, lines } : null;
+}
+
 function applyStructuredLineUpdates(items = [], updates = []) {
   const byLineId = new Map((updates ?? [])
     .filter((update) => update?.lineId)
@@ -2934,11 +3318,19 @@ function applyStructuredLineUpdates(items = [], updates = []) {
   return items.map((item) => {
     const update = byLineId.get(String(item?.lineId ?? ''));
     if (!update) return normalizeOperationalOrderItem(item);
+    if (update.operation === 'remove') {
+      return normalizeOperationalOrderItem({ ...item, removedByCustomer: true, selectionStatus: 'removed' });
+    }
+    // Only a contextual product clarification/replacement releases the saved
+    // catalog selection. Quantity-only updates retain verified product facts.
+    const changesProduct = ['clarify', 'replace'].includes(update.operation);
     const quantity = isPositiveUnitQuantity(update.quantity)
       ? Number(update.quantity)
       : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : null;
     return normalizeOperationalOrderItem({
       ...item,
+      ...(changesProduct ? { product: null, catalogCandidates: [], presentationOptions: [],
+        selectionStatus: 'not_found', removedByCustomer: false, selectionEvidence: null } : {}),
       quantity,
       quantityExplicit: update.quantityExplicit === true || item.quantityExplicit === true,
       requestedMeasure: update.requestedMeasure ?? semanticMeasureFromLegacyQuantity(item),
@@ -2948,9 +3340,10 @@ function applyStructuredLineUpdates(items = [], updates = []) {
   });
 }
 
-function restoreClarificationDraft(saved = {}, planned = {}) {
+function restoreClarificationDraft(saved = {}, planned = {}, retainOmitted = true) {
   const previous = saved ?? {};
   const update = planned ?? {};
+  const retained = new Set();
   const items = update.items?.length ? update.items : previous.items ?? [];
   // `collectionComplete` is a contextual acceptance of the current basket.
   // It must not keep narrative gaps produced in an earlier turn, nor let the
@@ -2967,11 +3360,13 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
     ),
     items: items.map((item) => {
       const sku = item.skuHint ?? item.product?.sku;
-      const matches = (previous.items ?? []).filter((candidate) => sku
+      const matches = (previous.items ?? []).filter((candidate) => item.lineId && candidate.lineId === item.lineId);
+      if (!matches.length) matches.push(...(previous.items ?? []).filter((candidate) => sku
         ? [candidate.product?.sku, candidate.skuHint].includes(sku)
         : [candidate.catalogQuery, candidate.rawName, candidate.product?.name].filter(Boolean)
-          .some((name) => [item.catalogQuery, item.rawName].filter(Boolean).some((query) => normalizeText(name) === normalizeText(query))));
+          .some((name) => [item.catalogQuery, item.rawName].filter(Boolean).some((query) => normalizeText(name) === normalizeText(query)))));
       const known = matches.length === 1 ? matches[0] : null;
+      if (known) retained.add(known);
       const plannedProduct = item.product ?? null;
       const knownProduct = known?.product ?? null;
       const plannedSku = item.skuHint ?? plannedProduct?.sku ?? null;
@@ -2979,7 +3374,9 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
         ? knownProduct
         : plannedProduct;
       return { ...known, ...item,
-        quantity: isPositiveUnitQuantity(item.quantity) ? Number(item.quantity)
+        lineId: known?.lineId ?? item.lineId,
+        quantity: retainOmitted && known && item.quantityExplicit === false && isPositiveUnitQuantity(known.quantity) ? Number(known.quantity)
+          : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity)
           : isPositiveUnitQuantity(known?.quantity) ? Number(known.quantity) : null,
         requestedMeasure: item.requestedMeasure ?? semanticMeasureFromLegacyQuantity(item)
           ?? known?.requestedMeasure ?? semanticMeasureFromLegacyQuantity(known),
@@ -2988,7 +3385,26 @@ function restoreClarificationDraft(saved = {}, planned = {}) {
         product,
         lineTotal: null,
       };
-    }),
+    }).concat(retainOmitted ? (previous.items ?? []).filter((item) => !retained.has(item)) : []),
+  });
+}
+
+// Query wording may change while the commercial line remains the same. Link
+// historical gaps through lineId, then keep only gaps supported by its current
+// state. Global checkout/policy requirements are left to their existing owners.
+function reconcileLineResolutionGaps(fields = [], items = [], previousItems = []) {
+  return normalizeOperationalMissingFields(fields).flatMap((field) => {
+    const match = /^(product|selection|quantity|stock|price|presentation|commercial_review):(.+)$/.exec(field);
+    if (!match) return [field];
+    const [, kind, key] = match;
+    const previous = previousItems.find((item) => [item.lineId, item.catalogQuery, item.rawName].includes(key));
+    const line = (previous?.lineId ? items.find((item) => item.lineId === previous.lineId) : null)
+      ?? items.find((item) => [item.lineId, item.catalogQuery, item.rawName].includes(key));
+    if (!line) return [field];
+    if (isRemovedOrderItem(line)) return [];
+    if (['product', 'selection'].includes(kind) && line.product) return [];
+    if (kind === 'product') return [`product:${line.catalogQuery}`];
+    return [field];
   });
 }
 
@@ -3058,7 +3474,12 @@ function buildOrderReply({ orderItems, missingFields, customerProfile, subtotal,
       else asks.push(`aclarar el producto ${item?.catalogQuery ?? lineId}`);
     }
     for (const missing of uniqueMissing.filter((item) => item.startsWith('product:'))) {
-      asks.push(`una referencia mas clara para ${missing.replace('product:', '')}`);
+      const query = missing.replace('product:', '');
+      const handoffItem = orderItems.find((candidate) => candidate.catalogQuery === query
+        && candidate.selectionStatus === 'handoff'
+        && candidate.selectionQuestion);
+      if (handoffItem) presentationNotes.push(handoffItem.selectionQuestion);
+      else asks.push(`una referencia mas clara para ${query}`);
     }
     for (const missing of uniqueMissing.filter((item) => item.startsWith('stock:'))) {
       asks.push(`confirmar alternativa para ${missing.replace('stock:', '')}`);
@@ -3124,6 +3545,65 @@ function needsHumanProductResolution(missingFields, clarificationState = null) {
   return hasUnresolvedProductMissingField(missingFields) && clarificationState?.exhausted === true;
 }
 
+function unresolvedProductItems(items = []) {
+  return (items ?? []).filter((item) => !isRemovedOrderItem(item) && !item?.product);
+}
+
+function buildPartialOrderDecisionReply({ orderItems = [], missingFields = [] }) {
+  const unresolvedQueries = new Set((missingFields ?? [])
+    .filter((field) => field.startsWith('product:'))
+    .map((field) => normalizeText(field.slice('product:'.length))));
+  const unresolved = unresolvedProductItems(orderItems)
+    .filter((item) => !unresolvedQueries.size || unresolvedQueries.has(normalizeText(item.catalogQuery)))
+    .map((item) => requestedProductName(item, item.catalogQuery))
+    .filter(Boolean);
+  const resolvedCount = (orderItems ?? []).filter((item) => item?.product && !isRemovedOrderItem(item)).length;
+  const missingLabel = unresolved.length ? joinSpanish(unresolved) : 'el producto pendiente';
+  const partialText = resolvedCount
+    ? 'Puedes continuar con los productos encontrados; la tienda revisará manualmente lo faltante antes de alistar.'
+    : 'Todavía no hay productos confirmados en la canasta.';
+  return `No pude confirmar en el catálogo: ${missingLabel}. ${partialText} También puedes darme más detalles o hablar con la tienda.`;
+}
+
+function buildManualProductReview({ previous = null, items = [], missingFields = [], clarificationState = null, status = 'awaiting_customer' }) {
+  const priorLines = new Map((previous?.lines ?? []).map((line) => [String(line.lineId ?? line.catalogQuery), line]));
+  const unresolved = unresolvedProductItems(items).filter((item) => (
+    (missingFields ?? []).includes(`product:${item.catalogQuery}`)
+  ));
+  const lines = unresolved.map((item) => {
+    const key = String(item.lineId ?? item.catalogQuery);
+    const prior = priorLines.get(key) ?? {};
+    return {
+      ...prior,
+      id: prior.id ?? key,
+      lineId: item.lineId ?? prior.lineId ?? null,
+      rawName: item.rawName ?? prior.rawName ?? item.catalogQuery,
+      catalogQuery: item.catalogQuery ?? prior.catalogQuery ?? item.rawName,
+      requestedQuantity: item.quantity ?? prior.requestedQuantity ?? null,
+      requestedMeasure: item.requestedMeasure ?? prior.requestedMeasure ?? null,
+      requestedWeight: item.requestedWeight ?? prior.requestedWeight ?? null,
+      budgetAmount: item.budgetAmount ?? prior.budgetAmount ?? null,
+      status,
+      reason: 'catalog_product_not_found',
+      clarificationAttempts: Number(clarificationState?.attempts ?? prior.clarificationAttempts ?? 0),
+      updatedAt: new Date().toISOString(),
+    };
+  });
+  return {
+    version: 1,
+    status,
+    lines,
+    createdAt: previous?.createdAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function missingFieldTargetsAny(field, targets) {
+  const separator = String(field ?? '').indexOf(':');
+  if (separator < 0) return false;
+  return targets.has(String(field).slice(separator + 1));
+}
+
 function needsMandatoryHumanProductResolution(missingFields = []) {
   return missingFields.some((field) => field.startsWith('price:') || field.startsWith('stock:'));
 }
@@ -3132,23 +3612,22 @@ function hasUnresolvedProductMissingField(missingFields = []) {
   return missingFields.some((field) => field.startsWith('product:'));
 }
 
-function deriveClarificationState({ previous, items = [], missingFields = [], maxAttempts = 2 }) {
+function deriveClarificationState({ previous, items = [], missingFields = [], maxAttempts = 2, attemptedLineIds = null, replacedLineIds = [] }) {
   const unresolvedItems = items.filter((item) => !item.product && missingFields.includes(`product:${item.catalogQuery}`));
   if (!unresolvedItems.length) return null;
 
   const unresolvedLineIds = unresolvedItems.map((item) => item.lineId ?? item.catalogQuery).filter(Boolean);
-  const scopeKey = unresolvedItems
-    .map((item) => normalizeText(item.catalogQuery ?? item.rawName ?? item.lineId))
-    .filter(Boolean)
-    .sort()
-    .join('|');
-  const sameScope = previous?.kind === 'catalog_ambiguity'
-    && previous?.status === 'open'
-    && previous?.scopeKey === scopeKey;
-  const attempts = (sameScope ? Number(previous?.attempts ?? 0) : 0) + 1;
+  const scopeKey = [...unresolvedLineIds].sort().join('|');
+  const continuing = previous?.kind === 'catalog_ambiguity' && ['open', 'exhausted'].includes(previous?.status);
+  const attemptsByLineId = Object.fromEntries(unresolvedLineIds.map((lineId) => [lineId,
+    (continuing && !replacedLineIds.includes(lineId) ? Number(previous?.attemptsByLineId?.[lineId]
+      ?? (previous?.unresolvedLineIds?.includes(lineId) ? previous.attempts : 0)) || 0 : 0)
+      + (attemptedLineIds === null || attemptedLineIds.includes(lineId) ? 1 : 0),
+  ]));
+  const attempts = Math.min(...Object.values(attemptsByLineId));
   const normalizedMaxAttempts = Math.max(1, Number(maxAttempts) || 2);
   return {
-    version: 1,
+    version: 2,
     status: attempts > normalizedMaxAttempts ? 'exhausted' : 'open',
     kind: 'catalog_ambiguity',
     scopeKey,
@@ -3156,6 +3635,7 @@ function deriveClarificationState({ previous, items = [], missingFields = [], ma
     maxAttempts: normalizedMaxAttempts,
     exhausted: attempts > normalizedMaxAttempts,
     unresolvedLineIds,
+    attemptsByLineId,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -3271,13 +3751,101 @@ function describeProductOption(product) {
   return `${product.name}${presentation} (${formatCurrency(product.price)})`;
 }
 
-function catalogListOptionTitle(product) {
+function catalogListOptionTitles(candidates = []) {
+  const commonNameTokens = sharedCatalogOptionNameTokens(candidates);
+  let titles = candidates.map((candidate) => catalogListOptionTitle(candidate, commonNameTokens));
+  const duplicateIndexes = duplicateCatalogOptionTitleIndexes(titles);
+  if (!duplicateIndexes.size) return titles;
+  // Catalogs can contain two rows whose customer-facing labels are identical.
+  // The stable SKU suffix is used only as a last UI disambiguator; selection
+  // continues to use the opaque interaction id and catalog SKU.
+  titles = titles.map((title, index) => (
+    duplicateIndexes.has(index)
+      ? appendCatalogOptionReference(title, candidates[index]?.sku, index + 1)
+      : title
+  ));
+  return titles;
+}
+
+function catalogListOptionTitle(product, commonNameTokens = new Set()) {
   const name = String(product?.name ?? product?.brand ?? 'Producto').trim();
-  const presentation = String(product?.presentation ?? '').trim();
-  const text = presentation && !normalizeText(name).includes(normalizeText(presentation))
-    ? `${name} ${presentation}`
-    : name;
-  return truncateWhatsAppText(text, 24, 'Producto');
+  const brand = String(product?.brand ?? '').trim();
+  const presentation = compactCatalogListText(product?.presentation ?? '');
+  const residualName = compactCatalogOptionName(name, commonNameTokens);
+  // If every candidate shares the same product name, repeating it uses the
+  // entire WhatsApp title budget. The brand remains a truthful compact label;
+  // the presentation then distinguishes the actual selectable variants.
+  const compactBrand = compactCatalogListText(brand);
+  const base = residualName
+    ? (compactBrand && !normalizeText(residualName).includes(normalizeText(compactBrand))
+      ? `${compactBrand} ${residualName}`
+      : residualName)
+    : (compactBrand || compactCatalogListText(name));
+  return joinCatalogOptionTitle(base, presentation);
+}
+
+function sharedCatalogOptionNameTokens(candidates = []) {
+  if (candidates.length < 2) return new Set();
+  const sets = candidates.map((candidate) => new Set(catalogOptionNameTokens(candidate?.name)));
+  return new Set([...sets[0]].filter((token) => sets.every((tokens) => tokens.has(token))));
+}
+
+function catalogOptionNameTokens(value) {
+  return normalizeText(value)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2);
+}
+
+function compactCatalogOptionName(value, commonTokens) {
+  const words = String(value ?? '').trim().split(/\s+/).filter(Boolean);
+  const residual = words.filter((word) => {
+    const token = normalizeText(word).replace(/[^a-z0-9]+/g, '');
+    return token && !commonTokens.has(token);
+  }).join(' ');
+  return compactCatalogListText(residual);
+}
+
+function compactCatalogListText(value) {
+  return String(value ?? '')
+    // These substitutions affect only the constrained WhatsApp list label.
+    // They neither change the catalog record nor the text passed to the LLM.
+    .replace(/\blitro\s+y\s+medio\b/gi, '1.5 L')
+    .replace(/\bnaturales?\b/gi, 'Nat.')
+    .replace(/\boriginal\b/gi, 'Orig.')
+    .replace(/\bintegral\b/gi, 'Int.')
+    .replace(/\bfamiliar\b/gi, 'Fam.')
+    .replace(/\bpersonal\b/gi, 'Pers.')
+    .replace(/\bmediano\b/gi, 'Med.')
+    .replace(/\bgrande\b/gi, 'Gde.')
+    .replace(/\bsabor\s+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function joinCatalogOptionTitle(base, presentation) {
+  const suffix = presentation ? ` · ${presentation}` : '';
+  const available = 24 - suffix.length;
+  if (available <= 0) return truncateWhatsAppText(presentation, 24, 'Producto');
+  if (base.length <= available) return `${base}${suffix}`;
+  const shortened = available <= 3
+    ? base.slice(0, available)
+    : `${base.slice(0, available - 3).trim()}...`;
+  return `${shortened}${suffix}`;
+}
+
+function duplicateCatalogOptionTitleIndexes(titles = []) {
+  const groups = new Map();
+  titles.forEach((title, index) => {
+    const key = normalizeText(title);
+    groups.set(key, [...(groups.get(key) ?? []), index]);
+  });
+  return new Set([...groups.values()].filter((indexes) => indexes.length > 1).flat());
+}
+
+function appendCatalogOptionReference(title, sku, index) {
+  const rawReference = String(sku ?? index).replace(/[^a-z0-9]/gi, '').slice(-4) || String(index);
+  const suffix = ` #${rawReference}`;
+  return `${String(title).slice(0, Math.max(1, 24 - suffix.length)).trim()}${suffix}`;
 }
 
 function catalogListOptionDescription(product) {
@@ -3307,6 +3875,15 @@ function parseCatalogSelectionValue(value) {
   } catch {
     return null;
   }
+}
+
+function isOrderChangeConfirmationInteraction(state, optionId, tenantId, conversationId) {
+  const offerId = String(optionId ?? '').match(/^vi:(io-[a-z0-9]+):\d+$/i)?.[1];
+  if (!offerId) return false;
+  const offer = state.interactionOffersById?.[offerId];
+  if (!offer || offer.status !== 'active' || offer.purpose !== 'order_change_confirmation') return false;
+  if (offer.tenantId !== tenantId || offer.conversationId !== conversationId) return false;
+  return offer.options?.some(option => option.id === optionId && option.action === 'confirm_order_change') === true;
 }
 
 function requestedProductName(item, fallback) {
@@ -3487,6 +4064,14 @@ function confirmsPresentation(text, productName) {
   if (containsAny(normalized, ['si', 'sirve', 'esa', 'ese', 'correcto', 'confirmo'])) return true;
   const size = normalizeText(productName).match(/\b\d+\s*(ml|l|litro|litros|g|gr|kg)\b/)?.[0];
   return Boolean(size && normalized.includes(size));
+}
+
+function shouldSendVariablePricingNotice({ previous, draft, checkout }) {
+  return previous?.checkout?.phase === 'payment'
+    && checkout?.phase === 'confirmation'
+    && Boolean(draft?.paymentMethod)
+    && basketHasVariablePricing(draft?.items ?? [])
+    && !previous?.variablePricingNoticeSentAt;
 }
 
 function formatCurrency(value) {

@@ -93,9 +93,24 @@ try {
 
   const third = await sendAmbiguous(3);
   conversation = store.getState().conversations.find((item) => item.id === conversationId);
-  assert.equal(third.summary, 'Structured order escalated to human');
-  assert.equal(conversation.status, 'blocked');
+  assert.equal(third.summary, 'Structured order awaiting partial decision');
+  assert.equal(conversation.status, 'live');
   assert.equal(conversation.clarificationState?.attempts, 3);
+  assert.equal((store.getState().pendingRequests ?? []).filter((item) => (
+    item.conversationId === conversationId && item.type === 'human_handoff' && item.status === 'pending'
+  )).length, 0);
+  const decisionOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.purpose === 'partial_order_decision' && item.status === 'active');
+  assert.ok(decisionOffer, 'Exhausted clarification must become an explicit customer decision');
+  const humanOption = decisionOffer.options.find((item) => item.action === 'human_handoff');
+  assert.ok(humanOption);
+  await runtime.handleInteractiveReply({
+    tenantId,
+    conversationId,
+    normalized: { waId, text: humanOption.title, interactive: { optionId: humanOption.id } },
+  });
+  conversation = store.getState().conversations.find((item) => item.id === conversationId);
+  assert.equal(conversation.status, 'blocked');
   assert.ok((store.getState().pendingRequests ?? []).some((item) => (
     item.conversationId === conversationId && item.type === 'human_handoff' && item.status === 'pending'
   )));

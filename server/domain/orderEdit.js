@@ -13,7 +13,7 @@ export function assertOrderEditVersion(order, expectedVersion) {
 }
 
 export function orderCommercialFields(order) {
-  return Object.fromEntries(['items', 'subtotal', 'pricing', 'delivery', 'customerName', 'deliveryAddress', 'paymentMethod', 'paymentMethodLabel']
+  return Object.fromEntries(['items', 'subtotal', 'pricing', 'delivery', 'customerName', 'deliveryAddress', 'paymentMethod', 'paymentMethodLabel', 'customerReconfirmation', 'manualProductReview']
     .map(key => [key, structuredClone(order?.[key] ?? null)]));
 }
 
@@ -57,7 +57,14 @@ export function refreshOrderConversation(conversation, order, catalogProducts = 
       requestedAmount: line.requestedAmount ?? null,
       requestedWeightGrams: line.requestedWeightGrams ?? null,
       unitPricePerKg: line.unitPricePerKg ?? null,
-      budgetAmount: null,
+      estimatedWeightGrams: line.estimatedWeightGrams ?? null,
+      estimatedUnitPricePerKg: line.estimatedUnitPricePerKg ?? null,
+      estimatedLineTotal: line.estimatedLineTotal ?? line.lineTotal ?? null,
+      actualWeightGrams: line.actualWeightGrams ?? null,
+      actualUnitPricePerKg: line.actualUnitPricePerKg ?? null,
+      actualLineTotal: line.actualLineTotal ?? null,
+      fulfillmentAdjustments: structuredClone(line.fulfillmentAdjustments ?? []),
+      budgetAmount: line.requestedAmount ?? null,
       lineTotal: line.lineTotal,
       product,
       available: true,

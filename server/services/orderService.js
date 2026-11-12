@@ -4,6 +4,8 @@ import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing,
 import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
 import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
+import { applyVariableFulfillmentAdjustment, effectiveLineTotal, initializeVariableEstimate } from '../domain/variablePricing.js';
+import { summarizeCustomerOrderChange, summarizeVariablePricingChange } from '../domain/orderCustomerChange.js';
 
 export class OrderService {
   constructor({ store, events, tools, outbox = null }) {
@@ -122,14 +124,14 @@ export class OrderService {
       if (!Number.isInteger(product.price) || product.price <= 0 || !Number.isFinite(product.stock) || (!amountSale && !weightSale && product.stock < quantity)) throw Object.assign(new Error(`Revisa el precio o las existencias de ${product.name}.`), { code: 'invalid_order_product', statusCode: 422 });
       if (!weightSale && line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw Object.assign(new Error(`Cambió el precio de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
       if (weightSale && line.unitPricePerKg !== undefined && Number(line.unitPricePerKg) !== weightQuote.pricePerKg) throw Object.assign(new Error(`Cambió el precio por kilo de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
-      return {
+      return initializeVariableEstimate({
         sku: product.sku, name: product.name, presentation: product.presentation, quantity,
         saleMode: weightSale ? 'weight' : amountSale ? 'amount' : 'units', requestedAmount,
         requestedWeightGrams: weightSale ? weightQuote.grams : null,
         unitPricePerKg: weightSale ? weightQuote.pricePerKg : null,
         unitPrice: product.price, lineTotal: weightSale ? weightQuote.lineTotal : amountSale ? requestedAmount : product.price * quantity,
         allowsSaleByAmount: product.allowsSaleByAmount === true,
-      };
+      });
     });
     assertCommerceOrderAllowed(items, products);
     const policy = deliveryPolicyForTenant(tenant);
@@ -150,24 +152,316 @@ export class OrderService {
       throw Object.assign(new Error('El total cambió. Revisa el desglose antes de guardar.'), { code: 'order_total_changed', statusCode: 409 });
     }
     const now = new Date().toISOString();
-    const order = { ...structuredClone(current), customerName, deliveryAddress, delivery, items, subtotal, pricing,
+    const candidate = { ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing,
+      paymentMethod: payment.id, paymentMethodLabel: payment.label };
+    const customerChangeSummary = summarizeCustomerOrderChange(current, candidate, { reason: editReason || exceptionReason });
+    const order = { ...structuredClone(current), ...candidate,
       paymentMethod: payment.id, paymentMethodLabel: payment.label, version: Number(current.version ?? 0) + 1, updatedAt: now,
+      customerChangeSummary: customerChangeSummary.hasChanges ? customerChangeSummary : null,
       sheetSyncStatus: this.outbox ? 'pending' : 'not_queued', editHistory: [...(current.editHistory ?? []), {
         at: now, actorId, reason: editReason || exceptionReason || 'Ajuste manual antes de alistamiento', version: Number(current.version ?? 0) + 1,
         before: orderCommercialFields(current), after: orderCommercialFields({ ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing, paymentMethod: payment.id, paymentMethodLabel: payment.label }),
       }] };
     const entries = [this.outbox?.createEntry({ tenantId, kind: 'order.sheet_edit', aggregateType: 'order', aggregateId: orderId,
       idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`, payload: { tenantId, orderId, version: order.version } }),
-    this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
-      idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version } })].filter(Boolean);
+    customerChangeSummary.hasChanges && this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
+      idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version, stage: 'updated' } })].filter(Boolean);
     await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries, catalogProducts: products });
     return { order, notification: entries.some(entry => entry.kind === 'order.summary_notification') ? 'queued' : 'not_queued' };
+  }
+
+  async adjustVariablePricing({ orderId, tenantId, input, actorId = 'local-owner' }) {
+    const key = `${tenantId}:${orderId}`;
+    const previous = this.transitionLocks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const chain = previous.then(() => gate);
+    this.transitionLocks.set(key, chain);
+    await previous;
+    try {
+      const current = this.store.getOrder
+        ? await this.store.getOrder(tenantId, orderId)
+        : this.findOrder(orderId, tenantId);
+      assertOrderEditVersion(current && { ...current, status: this.effectiveStatus(current) }, input?.expectedVersion);
+      const lineKey = String(input?.sku ?? '').trim();
+      const lineIndex = (current.items ?? []).findIndex(line => line.sku === lineKey);
+      if (lineIndex < 0) throw Object.assign(new Error('No encontramos ese producto dentro del pedido.'), { code: 'order_line_not_found', statusCode: 404 });
+      const now = new Date().toISOString();
+      const beforeTotal = Number(current.pricing?.total ?? current.subtotal ?? 0);
+      const adjustedLine = applyVariableFulfillmentAdjustment(current.items[lineIndex], input, { actorId, at: now });
+      const adjustment = adjustedLine.fulfillmentAdjustments?.at(-1);
+      const items = current.items.map((line, index) => index === lineIndex ? adjustedLine : line);
+      const subtotal = items.reduce((sum, line) => sum + effectiveLineTotal(line), 0);
+      const tenant = this.store.getTenant
+        ? await this.store.getTenant(tenantId)
+        : this.store.getState().tenants.find(item => item.id === tenantId);
+      assertOrderEditPolicy(tenant, current);
+      const evaluated = evaluateDeliveryPolicy({
+        tenant,
+        items,
+        delivery: current.delivery !== false,
+        draftVersion: Number(current.version ?? 0) + 1,
+        resolution: current.pricing?.resolution ?? current.minimumException ?? null,
+      });
+      // A real weighing can legitimately reduce a previously valid basket below
+      // the current threshold. Fulfillment must still record the true amount;
+      // it must not erase the delivery agreement already made with the client.
+      const deliveryFee = Number(current.pricing?.deliveryFee ?? evaluated.deliveryFee ?? 0);
+      const pricing = { ...evaluated, deliveryFee, total: subtotal + deliveryFee };
+      const totalDelta = pricing.total - beforeTotal;
+      const methods = paymentMethodsForTenant(tenant);
+      const payment = resolvePaymentMethod(current.paymentMethod, methods);
+      const prepaid = payment?.paymentTiming === 'prepaid' || current.paymentStatus === 'paid';
+      const candidateBeforeReconfirmation = { ...current, items, subtotal, pricing };
+      const commercialChange = summarizeVariablePricingChange(current, candidateBeforeReconfirmation, { sku: adjustedLine.sku, reason: adjustment?.reason });
+      const customerReconfirmation = !commercialChange.hasChanges
+        ? current.customerReconfirmation ?? null
+        : totalDelta > 0 && prepaid
+        ? { status: 'required', reason: 'variable_price_increase', previousTotal: beforeTotal, total: pricing.total, difference: totalDelta, requestedAt: now }
+        : current.customerReconfirmation?.status === 'confirmed'
+          ? current.customerReconfirmation
+          : null;
+      const candidate = { ...current, items, subtotal, pricing, customerReconfirmation };
+      const customerChangeSummary = summarizeVariablePricingChange(current, candidate, { sku: adjustedLine.sku, reason: adjustment?.reason });
+      const order = {
+        ...structuredClone(current), items, subtotal, pricing, customerReconfirmation,
+        version: Number(current.version ?? 0) + 1, updatedAt: now,
+        customerChangeSummary: customerChangeSummary.hasChanges ? customerChangeSummary : null,
+        sheetSyncStatus: this.outbox ? 'pending' : 'not_queued',
+        variablePricingAdjustments: [...(current.variablePricingAdjustments ?? []), {
+          at: now, actorId, sku: adjustedLine.sku, name: adjustedLine.name,
+          beforeLineTotal: Number(current.items[lineIndex].lineTotal ?? 0), afterLineTotal: adjustedLine.lineTotal,
+          previousTotal: beforeTotal, total: pricing.total, difference: totalDelta,
+          reason: adjustment?.reason ?? null,
+        }],
+        editHistory: [...(current.editHistory ?? []), {
+          at: now, actorId, reason: 'Ajuste real de peso o valor durante alistamiento', version: Number(current.version ?? 0) + 1,
+          before: orderCommercialFields(current), after: orderCommercialFields({ ...current, items, subtotal, pricing, customerReconfirmation }),
+        }],
+      };
+      const entries = [this.outbox?.createEntry({ tenantId, kind: 'order.sheet_edit', aggregateType: 'order', aggregateId: orderId,
+        idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`, payload: { tenantId, orderId, version: order.version } }),
+      customerChangeSummary.hasChanges && this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
+        idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version, stage: 'updated' } })].filter(Boolean);
+      await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries });
+      this.events?.emit?.({ type: 'order.variable_pricing_adjusted', tenantId, conversationId: order.conversationId,
+        detail: `Se ajustó el valor real de ${adjustedLine.name} durante el alistamiento.`,
+        metadata: { orderId, sku: adjustedLine.sku, totalDelta, customerReconfirmation: customerReconfirmation?.status ?? 'not_required' } });
+      return { order, notification: entries.some(entry => entry.kind === 'order.summary_notification') ? 'queued' : 'not_queued', customerReconfirmationRequired: customerReconfirmation?.status === 'required' };
+    } finally {
+      release();
+      if (this.transitionLocks.get(key) === chain) this.transitionLocks.delete(key);
+    }
+  }
+
+  async confirmVariablePricing({ orderId, tenantId, input, actorId = 'local-owner' }) {
+    const current = this.store.getOrder
+      ? await this.store.getOrder(tenantId, orderId)
+      : this.findOrder(orderId, tenantId);
+    assertOrderEditVersion(current && { ...current, status: this.effectiveStatus(current) }, input?.expectedVersion);
+    if (current.customerReconfirmation?.status !== 'required') {
+      throw Object.assign(new Error('Este pedido no tiene una confirmación de ajuste pendiente.'), { code: 'customer_reconfirmation_not_required', statusCode: 409 });
+    }
+    const now = new Date().toISOString();
+    const manualProductReview = current.manualProductReview?.status === 'awaiting_customer_confirmation'
+      ? { ...current.manualProductReview, status: 'resolved', resolvedAt: now, updatedAt: now }
+      : current.manualProductReview ?? null;
+    const order = { ...structuredClone(current), version: Number(current.version ?? 0) + 1, updatedAt: now,
+      customerReconfirmation: { ...current.customerReconfirmation, status: 'confirmed', confirmedAt: now, actorId },
+      manualProductReview,
+      editHistory: [...(current.editHistory ?? []), { at: now, actorId, reason: 'Cliente confirmó el ajuste del pedido antes del alistamiento', version: Number(current.version ?? 0) + 1,
+        before: orderCommercialFields(current), after: orderCommercialFields({ ...current, manualProductReview, customerReconfirmation: { ...current.customerReconfirmation, status: 'confirmed', confirmedAt: now, actorId } }) }],
+    };
+    await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion });
+    return { order };
+  }
+
+  async resolveManualProductFound({ orderId, tenantId, lineId, input, actorId = 'local-owner' }) {
+    return this.resolveManualProductReview({ orderId, tenantId, lineId, input, actorId, outcome: 'found' });
+  }
+
+  async resolveManualProductUnavailable({ orderId, tenantId, lineId, input, actorId = 'local-owner' }) {
+    return this.resolveManualProductReview({ orderId, tenantId, lineId, input, actorId, outcome: 'unavailable' });
+  }
+
+  async resolveManualProductReview({ orderId, tenantId, lineId, input = {}, actorId = 'local-owner', outcome }) {
+    const key = `${tenantId}:${orderId}`;
+    const previous = this.transitionLocks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const chain = previous.then(() => gate);
+    this.transitionLocks.set(key, chain);
+    await previous;
+    try {
+      const current = this.store.getOrder
+        ? await this.store.getOrder(tenantId, orderId)
+        : this.findOrder(orderId, tenantId);
+      assertOrderEditVersion(current && { ...current, status: this.effectiveStatus(current) }, input?.expectedVersion);
+      const review = structuredClone(current.manualProductReview ?? {});
+      const lines = Array.isArray(review.lines) ? review.lines : [];
+      const reviewIndex = lines.findIndex(line => String(line.id ?? line.lineId) === String(lineId));
+      if (reviewIndex < 0) throw Object.assign(new Error('No encontramos ese producto dentro de la revisión manual.'), { code: 'manual_product_review_line_not_found', statusCode: 404 });
+      if (!['pending', 'awaiting_customer'].includes(lines[reviewIndex].status)) {
+        throw Object.assign(new Error('Ese producto ya fue resuelto. Actualiza el pedido antes de continuar.'), { code: 'manual_product_review_already_resolved', statusCode: 409 });
+      }
+
+      const now = new Date().toISOString();
+      const reason = String(input.reason ?? '').trim()
+        || (outcome === 'found' ? 'Producto encontrado por la tienda durante la revisión manual.' : 'Producto no disponible después de la revisión manual.');
+      let items = structuredClone(current.items ?? []);
+      let products = [];
+      let resolution;
+      if (outcome === 'found') {
+        products = await this.catalogForEditing(tenantId);
+        const product = products.find(item => String(item.sku) === String(input.sku));
+        if (!product) throw Object.assign(new Error('Selecciona un producto disponible del catálogo.'), { code: 'manual_product_catalog_item_not_found', statusCode: 422 });
+        const addedLine = buildManualReviewOrderLine({ product, reviewLine: lines[reviewIndex], input });
+        items = mergeManualReviewOrderLine(items, addedLine);
+        assertCommerceOrderAllowed(items, products);
+        resolution = {
+          status: 'found',
+          sku: product.sku,
+          name: product.name,
+          presentation: product.presentation ?? '',
+          addedLine: structuredClone(addedLine),
+        };
+      } else if (outcome === 'unavailable') {
+        resolution = { status: 'unavailable' };
+      } else {
+        throw Object.assign(new Error('Resultado de revisión no soportado.'), { code: 'manual_product_review_invalid_outcome', statusCode: 422 });
+      }
+
+      const updatedLines = lines.map((line, index) => index === reviewIndex
+        ? { ...line, ...resolution, reason, resolvedAt: now, resolvedBy: actorId, updatedAt: now }
+        : line);
+      const pendingLines = updatedLines.filter(line => ['pending', 'awaiting_customer'].includes(line.status));
+      const subtotal = items.reduce((sum, line) => sum + effectiveLineTotal(line), 0);
+      const tenant = this.store.getTenant
+        ? await this.store.getTenant(tenantId)
+        : this.store.getState().tenants.find(item => item.id === tenantId);
+      const evaluated = evaluateDeliveryPolicy({
+        tenant,
+        items,
+        delivery: current.delivery !== false,
+        draftVersion: Number(current.version ?? 0) + 1,
+        resolution: current.pricing?.resolution ?? current.minimumException ?? null,
+      });
+      const deliveryFee = Number(current.pricing?.deliveryFee ?? evaluated.deliveryFee ?? 0);
+      const pricing = { ...evaluated, deliveryFee, total: subtotal + deliveryFee };
+      const previousTotal = Number(current.pricing?.total ?? current.subtotal ?? 0);
+      const totalDelta = pricing.total - previousTotal;
+      const customerReconfirmation = outcome === 'found'
+        ? {
+          status: 'required',
+          reason: 'manual_product_found',
+          previousTotal,
+          total: pricing.total,
+          difference: totalDelta,
+          requestedAt: now,
+        }
+        : current.customerReconfirmation ?? null;
+      const reviewStatus = pendingLines.length
+        ? 'pending'
+        : customerReconfirmation?.status === 'required'
+          ? 'awaiting_customer_confirmation'
+          : 'resolved';
+      const manualProductReview = {
+        ...review,
+        status: reviewStatus,
+        lines: updatedLines,
+        lastResolution: {
+          lineId: lines[reviewIndex].id ?? lines[reviewIndex].lineId,
+          productName: outcome === 'found'
+            ? resolution.name
+            : lines[reviewIndex].rawName ?? lines[reviewIndex].catalogQuery ?? 'Producto solicitado',
+          outcome,
+          reason,
+          at: now,
+          actorId,
+        },
+        updatedAt: now,
+        resolvedAt: reviewStatus === 'resolved' ? now : null,
+      };
+      const candidate = { ...current, items, subtotal, pricing, customerReconfirmation, manualProductReview };
+      const customerChangeSummary = outcome === 'found'
+        ? summarizeCustomerOrderChange(current, candidate, { reason })
+        : {
+          hasChanges: true,
+          reason,
+          itemChanges: [],
+          deliveryFee: null,
+          paymentChanged: false,
+          deliveryChanged: false,
+          previousTotal,
+          total: pricing.total,
+          unavailableProduct: lines[reviewIndex].rawName ?? lines[reviewIndex].catalogQuery ?? 'Producto solicitado',
+        };
+      const order = {
+        ...structuredClone(current),
+        items,
+        subtotal,
+        pricing,
+        customerReconfirmation,
+        manualProductReview,
+        customerChangeSummary,
+        version: Number(current.version ?? 0) + 1,
+        updatedAt: now,
+        sheetSyncStatus: this.outbox ? 'pending' : 'not_queued',
+        editHistory: [...(current.editHistory ?? []), {
+          at: now,
+          actorId,
+          reason,
+          version: Number(current.version ?? 0) + 1,
+          before: orderCommercialFields(current),
+          after: orderCommercialFields(candidate),
+          manualProductReview: { lineId: lines[reviewIndex].id ?? lines[reviewIndex].lineId, outcome },
+        }],
+      };
+      const stage = outcome === 'found' ? 'manual_review_found' : 'manual_review_unavailable';
+      const entries = [
+        this.outbox?.createEntry({
+          tenantId,
+          kind: 'order.sheet_edit',
+          aggregateType: 'order',
+          aggregateId: orderId,
+          idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`,
+          payload: { tenantId, orderId, version: order.version },
+        }),
+        this.outbox?.createEntry({
+          tenantId,
+          kind: 'order.summary_notification',
+          aggregateType: 'order',
+          aggregateId: orderId,
+          idempotencyKey: `order-summary:${orderId}:${order.version}`,
+          payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version, stage },
+        }),
+      ].filter(Boolean);
+      await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries, catalogProducts: products });
+      this.events?.emit?.({
+        type: `order.manual_product_${outcome}`,
+        tenantId,
+        conversationId: order.conversationId,
+        detail: outcome === 'found'
+          ? `La tienda agregó ${resolution.name} al pedido ${orderId}.`
+          : `La tienda marcó como no disponible ${lines[reviewIndex].rawName ?? lines[reviewIndex].catalogQuery}.`,
+        metadata: { orderId, lineId, outcome, version: order.version, pendingReviewCount: pendingLines.length },
+      });
+      return {
+        order,
+        notification: this.outbox ? 'queued' : 'not_queued',
+        customerReconfirmationRequired: customerReconfirmation?.status === 'required',
+      };
+    } finally {
+      release();
+      if (this.transitionLocks.get(key) === chain) this.transitionLocks.delete(key);
+    }
   }
 
   effectiveStatus(order, requests = this.store.getState().pendingRequests ?? []) {
     if (!order) return null;
     const status = order.status ?? ORDER_STATUSES.PENDING_HUMAN_PREPARATION;
     if (status !== ORDER_STATUSES.PENDING_HUMAN_PREPARATION) return status;
+    if (manualProductReviewBlocksPreparation(order)) return status;
     const decision = requests.find((request) => (
       request.tenantId === order.tenantId
       && deliveryRequestMatchesOrder(request, order)
@@ -227,6 +521,22 @@ export class OrderService {
       const error = new Error('Este pedido tiene una tarea pendiente. Tómalo desde esa tarjeta.');
       error.statusCode = 409;
       error.code = 'order_pending_human_request';
+      throw error;
+    }
+    if (nextStatus === ORDER_STATUSES.PREPARING && manualProductReviewBlocksPreparation(order)) {
+      const error = new Error(order.customerReconfirmation?.status === 'required'
+        ? 'El cliente debe confirmar el resumen actualizado antes de iniciar el alistamiento.'
+        : 'Resuelve primero los productos pendientes de revisión manual.');
+      error.statusCode = 409;
+      error.code = order.customerReconfirmation?.status === 'required'
+        ? 'order_customer_reconfirmation_required'
+        : 'order_manual_product_review_pending';
+      throw error;
+    }
+    if (nextStatus === ORDER_STATUSES.DISPATCHED && order.customerReconfirmation?.status === 'required') {
+      const error = new Error('Registra primero la confirmación del cliente para el ajuste de valor antes de enviar el pedido.');
+      error.statusCode = 409;
+      error.code = 'order_customer_reconfirmation_required';
       throw error;
     }
 
@@ -348,6 +658,91 @@ export class OrderService {
       },
     });
   }
+}
+
+function buildManualReviewOrderLine({ product, reviewLine = {}, input = {} }) {
+  const requestedWeight = normalizeRequestedWeight(
+    input.requestedWeight
+      ?? reviewLine.requestedWeight
+      ?? (input.requestedWeightGrams != null ? { amount: input.requestedWeightGrams, unit: 'g' } : null),
+  );
+  const requestedAmount = Number(input.requestedAmount ?? reviewLine.budgetAmount ?? 0);
+  if (Number.isSafeInteger(requestedAmount) && requestedAmount > 0 && product.allowsSaleByAmount === true) {
+    return initializeVariableEstimate({
+      sku: product.sku,
+      name: product.name,
+      presentation: product.presentation,
+      saleMode: 'amount',
+      quantity: null,
+      requestedAmount,
+      unitPrice: product.price,
+      lineTotal: requestedAmount,
+      allowsSaleByAmount: true,
+    });
+  }
+  if (requestedWeight && supportsWeightSale(product)) {
+    const quote = quoteWeightSale(product, requestedWeight);
+    if (!quote?.available) {
+      throw Object.assign(new Error(`No hay existencias suficientes para el peso solicitado de ${product.name}.`), { code: 'manual_product_weight_unavailable', statusCode: 422 });
+    }
+    return initializeVariableEstimate({
+      sku: product.sku,
+      name: product.name,
+      presentation: product.presentation,
+      saleMode: 'weight',
+      quantity: null,
+      requestedWeightGrams: quote.grams,
+      unitPricePerKg: quote.pricePerKg,
+      unitPrice: product.price,
+      lineTotal: quote.lineTotal,
+      allowsSaleByAmount: product.allowsSaleByAmount === true,
+    });
+  }
+  const quantity = Number(input.quantity ?? reviewLine.requestedQuantity ?? 1);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999) {
+    throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'manual_product_invalid_quantity', statusCode: 422 });
+  }
+  if (!Number.isSafeInteger(Number(product.price)) || Number(product.price) < 1) {
+    throw Object.assign(new Error(`Revisa el precio de ${product.name}.`), { code: 'manual_product_invalid_price', statusCode: 422 });
+  }
+  if (!Number.isFinite(Number(product.stock)) || Number(product.stock) < quantity) {
+    throw Object.assign(new Error(`No hay existencias suficientes de ${product.name}.`), { code: 'manual_product_stock_unavailable', statusCode: 422 });
+  }
+  return initializeVariableEstimate({
+    sku: product.sku,
+    name: product.name,
+    presentation: product.presentation,
+    saleMode: 'units',
+    quantity,
+    unitPrice: Number(product.price),
+    lineTotal: Number(product.price) * quantity,
+    allowsSaleByAmount: product.allowsSaleByAmount === true,
+  });
+}
+
+function mergeManualReviewOrderLine(items, addedLine) {
+  const index = items.findIndex(line => String(line.sku) === String(addedLine.sku));
+  if (index < 0) return [...items, addedLine];
+  const existing = items[index];
+  if ((existing.saleMode ?? 'units') !== 'units' || addedLine.saleMode !== 'units') {
+    throw Object.assign(new Error('Ese producto ya está en el pedido con otra modalidad de venta.'), { code: 'manual_product_duplicate_sale_mode', statusCode: 409 });
+  }
+  const quantity = Number(existing.quantity ?? 0) + Number(addedLine.quantity ?? 0);
+  const merged = initializeVariableEstimate({
+    ...existing,
+    quantity,
+    lineTotal: Number(existing.unitPrice) * quantity,
+  });
+  return items.map((line, itemIndex) => itemIndex === index ? merged : line);
+}
+
+function manualProductReviewBlocksPreparation(order) {
+  const review = order?.manualProductReview;
+  if (!review) return false;
+  const hasPendingLine = (review.lines ?? []).some(line => ['pending', 'awaiting_customer'].includes(line.status));
+  return hasPendingLine
+    || review.status === 'awaiting_customer_confirmation'
+    || order.customerReconfirmation?.status === 'required';
 }
 
 function requestSnapshot(request) {

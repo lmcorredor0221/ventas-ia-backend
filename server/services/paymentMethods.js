@@ -4,18 +4,21 @@ const BASE_PAYMENT_METHODS = [
     label: 'Efectivo',
     aliases: ['efectivo', 'cash'],
     enabled: true,
+    paymentTiming: 'on_delivery',
   },
   {
     id: 'card_terminal',
     label: 'Tarjeta',
     aliases: ['tarjeta', 'tarjeta debito', 'tarjeta débito', 'tarjeta credito', 'tarjeta crédito', 'datafono', 'datáfono', 'card_terminal'],
     enabled: true,
+    paymentTiming: 'unspecified',
   },
   {
     id: 'breb',
     label: 'Bre-B',
     aliases: ['bre-b', 'bre b', 'breb'],
     enabled: true,
+    paymentTiming: 'unspecified',
   },
 ];
 
@@ -50,6 +53,9 @@ export function normalizePaymentMethods(value) {
       aliases: uniqueStrings([...(base?.aliases ?? []), ...aliases]),
       // Efectivo, tarjeta y Bre-B siempre se mantienen disponibles como base.
       enabled: base ? true : rawMethod.enabled !== false,
+      // Do not infer that a transfer/card is paid in advance. A tenant can
+      // explicitly configure it when its collection flow requires it.
+      paymentTiming: normalizePaymentTiming(rawMethod.paymentTiming ?? base?.paymentTiming),
     });
   }
 
@@ -80,6 +86,10 @@ export function paymentMethodOptionsLabel(methods = DEFAULT_PAYMENT_METHODS) {
 
 function cloneMethod(method) {
   return { ...method, aliases: [...(method.aliases ?? [])] };
+}
+
+function normalizePaymentTiming(value) {
+  return ['prepaid', 'on_delivery', 'unspecified'].includes(value) ? value : 'unspecified';
 }
 
 function normalizeId(value) {
