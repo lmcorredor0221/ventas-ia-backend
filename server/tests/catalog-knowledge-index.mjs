@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { buildCatalogKnowledgeIndex, searchCatalogKnowledgeIndex } from '../services/catalogKnowledgeIndex.js';
+import {
+  buildCatalogKnowledgeIndex,
+  CATALOG_GRAPH_SCHEMA_VERSION,
+  prepareCatalogKnowledgeRuntime,
+  searchCatalogKnowledgeIndex,
+} from '../services/catalogKnowledgeIndex.js';
 
 const rows = [
   { sku: 'COKE-15-ORIG', name: 'Coca-Cola original', brand: 'Coca-Cola', category: 'gaseosas', presentation: '1.5 L', normalizedPresentation: '1500 ml', productFamily: 'Coca-Cola', price: 7200, stock: 8, aliases: ['coca cola litro y medio'], tags: ['gaseosa'], attributes: { variante: 'Original' }, active: true },
@@ -13,8 +18,11 @@ const index = buildCatalogKnowledgeIndex({ tenantId: 'tenant-a', rows, sourceRef
 assert.equal(index.status, 'published');
 assert.equal(index.rowCount, rows.length);
 assert.ok(index.catalogVersion);
-assert.ok(index.relations.some((relation) => relation.type === 'PRODUCT_ALTERNATIVE_OF'));
+assert.equal(index.graphSchemaVersion, CATALOG_GRAPH_SCHEMA_VERSION);
+assert.equal(index.alternativeStrategy, 'family_compatible_runtime');
+assert.ok(!index.relations.some((relation) => relation.type === 'PRODUCT_ALTERNATIVE_OF'), 'Las alternativas no deben multiplicar el grafo persistido.');
 assert.equal(index.searchDocuments.length, rows.length);
+assert.equal(prepareCatalogKnowledgeRuntime(index), prepareCatalogKnowledgeRuntime(index), 'El artefacto de búsqueda se prepara una sola vez por snapshot.');
 
 const exactPresentation = searchCatalogKnowledgeIndex(index, {
   query: 'Coca Cola litro y medio',

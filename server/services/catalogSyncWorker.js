@@ -1,4 +1,5 @@
 import { effectiveCatalogRange } from '../domain/catalogSource.js';
+import { buildCatalogKnowledgeIndex } from './catalogKnowledgeIndex.js';
 
 export class CatalogSyncWorker {
   constructor({ store, tools, config, events, telemetry } = {}) {
@@ -68,13 +69,30 @@ export class CatalogSyncWorker {
           mimeType: 'application/vnd.google-apps.document',
           summary: `${row.name}. Categoria: ${row.category}. Marca: ${row.brand ?? 'N/D'}. Presentacion: ${row.presentation ?? 'N/D'}. Precio: ${row.price}. Stock: ${row.stock}.`,
         }));
-      const index = await this.tools.catalogSearch?.sync({
-        tenantId,
-        rows,
-        sourceRef: live.spreadsheetId,
-        range,
-        persist: false,
-      });
+      // A native projection needs the immutable document only as rollback
+      // evidence.  Do not hydrate that multi-megabyte document into the
+      // Render request cache or app-state while publishing a PostgreSQL-native
+      // serving model.
+      const nativePublication = this.config?.catalogNativeSearchEnabled === true
+        && typeof this.store.persistCatalogSnapshot === 'function';
+      const previousMetadata = nativePublication
+        ? await this.store.getPublishedCatalogKnowledgeIndexMetadata?.(tenantId)
+        : null;
+      const index = nativePublication
+        ? buildCatalogKnowledgeIndex({
+          tenantId,
+          rows,
+          sourceRef: live.spreadsheetId,
+          range,
+          previousVersion: previousMetadata?.catalogVersion ?? null,
+        })
+        : await this.tools.catalogSearch?.sync({
+          tenantId,
+          rows,
+          sourceRef: live.spreadsheetId,
+          range,
+          persist: false,
+        });
       if (!index?.catalogVersion) {
         throw Object.assign(new Error('No se pudo construir una versión del índice del catálogo.'), {
           code: 'catalog_index_not_built',
@@ -98,6 +116,24 @@ export class CatalogSyncWorker {
         if (!current) return;
         current.config ??= {};
         current.config.catalog = { ...(current.config.catalog ?? {}), readSource: 'postgres' };
+        if (nativePublication) {
+          // An older in-memory snapshot could otherwise keep several MB of
+          // graph data resident even though every operational read is native.
+          delete state.catalogKnowledgeIndexesByTenant?.[tenantId];
+        }
+        state.catalogIndexStatusByTenant ??= {};
+        state.catalogIndexStatusByTenant[tenantId] = {
+          status: 'published',
+          catalogVersion: index.catalogVersion,
+          sourceHash: index.sourceHash,
+          rowCount: index.rowCount,
+          nodeCount: index.nodeCount,
+          relationCount: index.relationCount,
+          vectorCount: index.vectorCount,
+          graphSchemaVersion: index.graphSchemaVersion,
+          syncedAt: index.syncedAt,
+          nativeProjection: nativePublication,
+        };
       }, { snapshot: false, domain: 'tenant_catalog', operation: 'publish_postgres_source' });
       await this.store.persistTenantCritical?.(tenantId);
       const result = {
@@ -109,6 +145,8 @@ export class CatalogSyncWorker {
         catalogVersion: index?.catalogVersion ?? null,
         rowCount: rows.length,
         operationalSource: 'postgres',
+        nativeProjection: nativePublication,
+        nativeProjectionRows: persisted?.nativeProjection?.productCount ?? null,
         durationMs: Number((performance.now() - startedAt).toFixed(2)),
       };
       this.events?.emit({ type: 'catalog.sync.worker_completed', tenantId, detail: 'Catalog sync worker published a version', metadata: result });

@@ -13,6 +13,11 @@ import { ensureUsageState } from '../services/usageService.js';
 import { ensureSecretState } from '../services/secretVault.js';
 import { ensurePlatformState } from '../services/platformService.js';
 import { exponentialBackoff } from '../services/integrationOutbox.js';
+import {
+  buildCatalogNativeProjection,
+  buildCatalogNativeSearchTerms,
+  compactCatalogVocabularyFromRows,
+} from '../services/catalogNativeSearch.js';
 import { CLOSED_CONVERSATION_STATUSES } from '../domain/conversationStatus.js';
 import { applyOrderEdit, assertOrderEditVersion, assertOrderEditPolicy, refreshOrderConversation, refreshPreparationRequest } from '../domain/orderEdit.js';
 
@@ -242,6 +247,297 @@ export class PostgresStore {
     } : null;
   }
 
+  /**
+   * Metadata for the compact operational projection.  The immutable JSON
+   * knowledge index remains available as a rollback artefact, but request
+   * paths can use this check without transferring that document to Node.
+   */
+  async getPublishedCatalogNativeSearchMetadata(tenantId) {
+    try {
+      const result = await this.pool.query(
+        `WITH published AS (
+           SELECT tenant_id, catalog_version, source_hash, row_count, published_at
+             FROM catalog_knowledge_indexes
+            WHERE tenant_id = $1 AND status = 'published'
+            ORDER BY published_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+         )
+         SELECT published.*, COUNT(products.sku)::int AS projection_row_count
+           FROM published
+           LEFT JOIN catalog_search_products AS products
+             ON products.tenant_id = published.tenant_id
+            AND products.catalog_version = published.catalog_version
+          GROUP BY published.tenant_id, published.catalog_version,
+                   published.source_hash, published.row_count, published.published_at`,
+        [tenantId],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const expectedRowCount = Number(row.row_count ?? 0);
+      const projectionRowCount = Number(row.projection_row_count ?? 0);
+      return {
+        tenantId: row.tenant_id,
+        catalogVersion: row.catalog_version,
+        sourceHash: row.source_hash,
+        rowCount: expectedRowCount,
+        projectionRowCount,
+        publishedAt: row.published_at?.toISOString?.() ?? row.published_at ?? null,
+        // Publication is transactional, but make an interrupted/manual
+        // migration fail closed: native reads are enabled only when every
+        // active row in the published snapshot is represented locally.
+        available: expectedRowCount > 0 && projectionRowCount === expectedRowCount,
+      };
+    } catch (error) {
+      // A deployment can briefly run against a database which has not applied
+      // migration 017 yet.  Returning null lets the explicitly retained
+      // legacy read path keep serving requests during a gradual rollout.
+      if (error?.code === '42P01') return null;
+      throw error;
+    }
+  }
+
+  async getPublishedCatalogVocabulary(tenantId) {
+    const metadata = await this.getPublishedCatalogNativeSearchMetadata(tenantId);
+    if (!metadata?.available) return null;
+    const result = await this.pool.query(
+      `SELECT DISTINCT
+              COALESCE(NULLIF(product_family, ''), name) AS product_family,
+              brand
+         FROM catalog_search_products
+        WHERE tenant_id = $1
+          AND catalog_version = $2
+          AND active = TRUE
+        ORDER BY product_family NULLS LAST, brand NULLS LAST`,
+      [tenantId, metadata.catalogVersion],
+    );
+    return compactCatalogVocabularyFromRows({
+      catalogVersion: metadata.catalogVersion,
+      rows: result.rows,
+    });
+  }
+
+  async getPublishedCatalogProductsBySkus(tenantId, skus = []) {
+    const metadata = await this.getPublishedCatalogNativeSearchMetadata(tenantId);
+    if (!metadata?.available) return { available: false, metadata, rows: [] };
+    const requestedSkus = [...new Set((Array.isArray(skus) ? skus : [])
+      .map((sku) => String(sku ?? '').trim())
+      .filter(Boolean))];
+    if (!requestedSkus.length) return { available: true, metadata, rows: [] };
+    const result = await this.pool.query(
+      `SELECT sku, payload
+         FROM catalog_search_products
+        WHERE tenant_id = $1
+          AND catalog_version = $2
+          AND sku = ANY($3::text[])
+        ORDER BY array_position($3::text[], sku)`,
+      [tenantId, metadata.catalogVersion, requestedSkus],
+    );
+    return {
+      available: true,
+      metadata,
+      catalogVersion: metadata.catalogVersion,
+      rows: result.rows.map((row) => ({ ...row.payload, sku: row.sku })),
+    };
+  }
+
+  /**
+   * Executes the existing direct/contextual/relation retrieval strategy where
+   * the data lives.  Interpreter hints are deliberately rank evidence only:
+   * explicit SKU is the sole hard predicate.
+   */
+  async searchPublishedCatalogNative(tenantId, payload = {}) {
+    const startedAt = performance.now();
+    const metadata = await this.getPublishedCatalogNativeSearchMetadata(tenantId);
+    if (!metadata?.available) return emptyNativeCatalogResult(metadata);
+    const terms = buildCatalogNativeSearchTerms(payload);
+    const limit = clampNativeCatalogLimit(payload.limit, 40);
+    const stageDurations = {};
+    const measureStage = async (stage, work) => {
+      const stageStartedAt = performance.now();
+      try {
+        return await work();
+      } finally {
+        stageDurations[stage] = Number((performance.now() - stageStartedAt).toFixed(2));
+      }
+    };
+
+    if (terms.explicitSku) {
+      const exact = await measureStage('exactSku', () => this.getPublishedCatalogProductsBySkus(tenantId, [terms.explicitSku]));
+      const rows = exact.rows.map((product) => nativeCandidate(product, {
+        matchScore: 100,
+        matchType: 'postgres_exact_sku',
+        lexicalEvidence: true,
+        retrievalHintEvidence: terms.evidenceTokens,
+      }));
+      const result = nativeCatalogResult({
+        metadata,
+        rows,
+        retrieval: nativeRetrievalMetadata({ terms, exactSku: true, directCandidateCount: rows.length, stageDurations }),
+      });
+      this.recordNativeCatalogSearchTelemetry({ tenantId, startedAt, metadata, result, stageDurations });
+      return result;
+    }
+
+    const [direct, contextual, relational] = await Promise.all([
+      measureStage('direct', () => queryNativeProductCandidates(this.pool, {
+        tenantId,
+        catalogVersion: metadata.catalogVersion,
+        queryText: terms.queryText,
+        queryTokens: terms.queryTokens,
+        limit,
+      })),
+      terms.semanticText && terms.semanticText !== terms.queryText
+        ? measureStage('contextual', () => queryNativeProductCandidates(this.pool, {
+          tenantId,
+          catalogVersion: metadata.catalogVersion,
+          queryText: terms.semanticText,
+          queryTokens: terms.semanticTokens,
+          limit,
+        }))
+        : Promise.resolve([]),
+      measureStage('relations', () => queryNativeRelationCandidates(this.pool, {
+        tenantId,
+        catalogVersion: metadata.catalogVersion,
+        relationKeys: terms.relationKeys,
+        evidenceTokens: terms.evidenceTokens,
+        limit,
+      })),
+    ]);
+
+    const bySku = new Map();
+    const merge = (candidate, stage) => {
+      const sku = String(candidate?.sku ?? candidate?.payload?.sku ?? '');
+      if (!sku) return;
+      const existing = bySku.get(sku);
+      const score = nativeStageScore(candidate.score, stage);
+      const next = nativeCandidate({ ...candidate.payload, sku }, {
+        matchScore: score,
+        matchType: stage === 'direct' ? 'postgres_direct'
+          : stage === 'contextual' ? 'postgres_contextual'
+            : 'postgres_relation',
+        lexicalEvidence: stage === 'direct',
+        semanticEvidence: stage === 'contextual',
+        graphEvidence: stage === 'relation' ? {
+          relationTypes: candidate.relationTypes ?? [],
+          anchors: candidate.anchors ?? [],
+          score: Number(candidate.score ?? 0),
+        } : existing?.graphEvidence ?? null,
+        semanticScore: stage === 'contextual' ? Number(candidate.score ?? 0) : existing?.semanticScore ?? 0,
+        retrievalHintEvidence: terms.evidenceTokens,
+      });
+      if (!existing || Number(next.matchScore) > Number(existing.matchScore)) {
+        bySku.set(sku, { ...existing, ...next, graphEvidence: next.graphEvidence ?? existing?.graphEvidence ?? null });
+      } else if (next.graphEvidence && !existing.graphEvidence) {
+        existing.graphEvidence = next.graphEvidence;
+      }
+    };
+    direct.forEach((candidate) => merge(candidate, 'direct'));
+    contextual.forEach((candidate) => merge(candidate, 'contextual'));
+    relational.forEach((candidate) => merge(candidate, 'relation'));
+
+    const rows = [...bySku.values()]
+      .sort((left, right) => Number(right.matchScore ?? 0) - Number(left.matchScore ?? 0)
+        || Number(right.stock ?? 0) - Number(left.stock ?? 0)
+        || String(left.name ?? '').localeCompare(String(right.name ?? ''), 'es'))
+      .slice(0, limit);
+    const relationRows = rows
+      .filter((row) => row.graphEvidence)
+      .map((row) => ({ sku: row.sku, ...row.graphEvidence }));
+    const result = nativeCatalogResult({
+      metadata,
+      rows,
+      relations: relationRows,
+      retrieval: nativeRetrievalMetadata({
+        terms,
+        directCandidateCount: direct.length,
+        semanticCandidateCount: contextual.length,
+        graphCandidateCount: relational.length,
+        candidateCount: bySku.size,
+        graphPaths: relationRows,
+        stageDurations,
+      }),
+    });
+    this.recordNativeCatalogSearchTelemetry({ tenantId, startedAt, metadata, result, stageDurations });
+    return result;
+  }
+
+  recordNativeCatalogSearchTelemetry({ tenantId, startedAt, metadata, result, stageDurations }) {
+    this.telemetry?.record('catalog', 'native_search', {
+      durationMs: performance.now() - startedAt,
+      status: 'ok',
+      tenantId,
+      metadata: {
+        catalogVersion: metadata?.catalogVersion ?? null,
+        returnedCandidateCount: result?.rows?.length ?? 0,
+        directCandidateCount: result?.retrieval?.directCandidateCount ?? 0,
+        semanticCandidateCount: result?.retrieval?.semanticCandidateCount ?? 0,
+        graphCandidateCount: result?.retrieval?.graphCandidateCount ?? 0,
+        stageDurations,
+        // No full immutable graph or catalog document crosses the Postgres →
+        // Render boundary in the native path; only bounded candidates do.
+        fullCatalogPayloadBytes: 0,
+        candidatePayloadBytes: Buffer.byteLength(JSON.stringify(result?.rows ?? []), 'utf8'),
+      },
+    });
+  }
+
+  async pagePublishedCatalogNative(tenantId, payload = {}) {
+    const metadata = await this.getPublishedCatalogNativeSearchMetadata(tenantId);
+    if (!metadata?.available) return { ...emptyNativeCatalogResult(metadata), totalCount: 0, returnedCount: 0, nextCursor: null };
+    const terms = buildCatalogNativeSearchTerms(payload);
+    const limit = clampNativeCatalogLimit(payload.limit, 25, 100);
+    const offset = decodeNativeCatalogCursor(payload.cursor, metadata.catalogVersion);
+
+    if (terms.explicitSku) {
+      const exact = await this.getPublishedCatalogProductsBySkus(tenantId, [terms.explicitSku]);
+      return {
+        available: true,
+        metadata,
+        catalogVersion: metadata.catalogVersion,
+        totalCount: exact.rows.length,
+        returnedCount: exact.rows.length,
+        rows: exact.rows,
+        nextCursor: null,
+        retrieval: nativeRetrievalMetadata({ terms, exactSku: true, directCandidateCount: exact.rows.length }),
+      };
+    }
+
+    const queryText = terms.queryText || terms.semanticText;
+    const result = await queryNativeCatalogPage(this.pool, {
+      tenantId,
+      catalogVersion: metadata.catalogVersion,
+      queryText,
+      queryTokens: terms.evidenceTokens,
+      limit,
+      offset,
+    });
+    const totalCount = Number(result.rows[0]?.total_count ?? 0);
+    const rows = result.rows.map((row) => ({
+      ...row.payload,
+      sku: row.sku,
+      ...(queryText ? {
+        matchScore: nativeStageScore(row.score, 'direct'),
+        matchType: 'postgres_manual_search',
+        lexicalEvidence: true,
+      } : {}),
+    }));
+    const nextOffset = offset + rows.length;
+    return {
+      available: true,
+      metadata,
+      catalogVersion: metadata.catalogVersion,
+      totalCount,
+      returnedCount: rows.length,
+      rows,
+      nextCursor: nextOffset < totalCount ? encodeNativeCatalogCursor(metadata.catalogVersion, nextOffset) : null,
+      retrieval: nativeRetrievalMetadata({
+        terms,
+        directCandidateCount: rows.length,
+        candidateCount: totalCount,
+      }),
+    };
+  }
+
   async persistCatalogKnowledgeIndex(index) {
     if (!index?.tenantId || !index?.catalogVersion) return;
     return this.queueWrite(async () => {
@@ -255,10 +551,26 @@ export class PostgresStore {
             LIMIT 1`,
           [index.tenantId],
         );
-        if (current.rows[0]?.source_hash === index.sourceHash) {
-          return { status: 'unchanged', tenantId: index.tenantId, catalogVersion: current.rows[0].catalog_version };
-        }
         await client.query('BEGIN');
+        if (current.rows[0]?.source_hash === index.sourceHash) {
+          const nativeProjection = await ensureNativeCatalogProjection(client, {
+            tenantId: index.tenantId,
+            index,
+            products: Object.values(index.products ?? {}),
+          });
+          await client.query('COMMIT');
+          return {
+            status: 'unchanged',
+            tenantId: index.tenantId,
+            catalogVersion: current.rows[0].catalog_version,
+            nativeProjection,
+          };
+        }
+        const nativeProjection = await persistNativeCatalogProjection(client, {
+          tenantId: index.tenantId,
+          index,
+          products: Object.values(index.products ?? {}),
+        });
         await client.query(
           `UPDATE catalog_knowledge_indexes
            SET status = 'superseded'
@@ -299,6 +611,12 @@ export class PostgresStore {
           ],
         );
         await client.query('COMMIT');
+        return {
+          status: 'published',
+          tenantId: index.tenantId,
+          catalogVersion: index.catalogVersion,
+          nativeProjection,
+        };
       } catch (error) {
         await client.query('ROLLBACK');
         throw error;
@@ -341,10 +659,17 @@ export class PostgresStore {
           [tenantId],
         );
         if (current.rows[0]?.source_hash === index.sourceHash) {
+          const nativeProjection = await ensureNativeCatalogProjection(client, { tenantId, index, products });
           await client.query('COMMIT');
-          return { status: 'unchanged', tenantId, catalogVersion: current.rows[0].catalog_version };
+          return {
+            status: 'unchanged',
+            tenantId,
+            catalogVersion: current.rows[0].catalog_version,
+            nativeProjection,
+          };
         }
         await persistChangedCatalogRows(client, tenantId, products, driveFiles);
+        const nativeProjection = await persistNativeCatalogProjection(client, { tenantId, index, products });
         await client.query(
           `UPDATE catalog_knowledge_indexes
               SET status = 'superseded'
@@ -384,7 +709,7 @@ export class PostgresStore {
           ],
         );
         await client.query('COMMIT');
-        return { status: 'published', tenantId, catalogVersion: index.catalogVersion };
+        return { status: 'published', tenantId, catalogVersion: index.catalogVersion, nativeProjection };
       } catch (error) {
         await client.query('ROLLBACK');
         throw error;
@@ -2290,6 +2615,343 @@ async function upsertGoogleWorkspace(client, tenantId, workspace) {
       workspace.provisionedAt ?? null,
     ],
   );
+}
+
+/**
+ * Publishes the compact operational search projection in the same transaction
+ * as the immutable knowledge snapshot.  A request therefore sees either the
+ * previous complete catalog or the next complete catalog, never a partially
+ * synchronized graph.
+ */
+async function persistNativeCatalogProjection(client, { tenantId, index, products = [] } = {}) {
+  const projection = buildCatalogNativeProjection({
+    tenantId,
+    catalogVersion: index.catalogVersion,
+    products,
+  });
+
+  // Keep exactly one live projection per tenant.  The immutable JSON document
+  // remains the rollback artefact; this table is only the low-latency serving
+  // model and must not retain old catalog versions indefinitely.
+  await client.query('DELETE FROM catalog_search_relations WHERE tenant_id = $1', [tenantId]);
+  await client.query('DELETE FROM catalog_search_products WHERE tenant_id = $1', [tenantId]);
+
+  for (const batch of chunk(projection.products, 250)) {
+    const values = [];
+    const placeholders = batch.map((product, indexInBatch) => {
+      const offset = indexInBatch * 15;
+      values.push(
+        product.tenantId,
+        product.catalogVersion,
+        product.sku,
+        product.name,
+        product.category,
+        product.brand,
+        product.presentation,
+        product.normalizedPresentation,
+        product.productFamily,
+        product.price,
+        product.stock,
+        product.active,
+        product.searchText,
+        product.searchTokens,
+        JSON.stringify(product.payload),
+      );
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5},
+        $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10},
+        $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}::text[],
+        to_tsvector('simple', $${offset + 13}), $${offset + 15}::jsonb)`;
+    });
+    await client.query(
+      `INSERT INTO catalog_search_products (
+        tenant_id, catalog_version, sku, name, category, brand, presentation,
+        normalized_presentation, product_family, price, stock, active,
+        search_text, search_tokens, search_tsv, payload
+      ) VALUES ${placeholders.join(', ')}`,
+      values,
+    );
+  }
+
+  for (const batch of chunk(projection.relations, 500)) {
+    const values = [];
+    const placeholders = batch.map((relation, indexInBatch) => {
+      const offset = indexInBatch * 7;
+      values.push(
+        relation.tenantId,
+        relation.catalogVersion,
+        relation.productSku,
+        relation.relationType,
+        relation.anchorKey,
+        relation.anchorTokens,
+        JSON.stringify(relation.metadata ?? {}),
+      );
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5},
+        $${offset + 6}::text[], $${offset + 7}::jsonb)`;
+    });
+    await client.query(
+      `INSERT INTO catalog_search_relations (
+        tenant_id, catalog_version, product_sku, relation_type, anchor_key,
+        anchor_tokens, metadata
+      ) VALUES ${placeholders.join(', ')}`,
+      values,
+    );
+  }
+
+  return {
+    available: true,
+    catalogVersion: projection.catalogVersion,
+    productCount: projection.products.length,
+    relationCount: projection.relations.length,
+  };
+}
+
+async function ensureNativeCatalogProjection(client, { tenantId, index, products = [] } = {}) {
+  const projection = buildCatalogNativeProjection({
+    tenantId,
+    catalogVersion: index.catalogVersion,
+    products,
+  });
+  const current = await client.query(
+    `SELECT
+       (SELECT COUNT(*)::int
+          FROM catalog_search_products
+         WHERE tenant_id = $1 AND catalog_version = $2) AS product_count,
+       (SELECT COUNT(*)::int
+          FROM catalog_search_relations
+         WHERE tenant_id = $1 AND catalog_version = $2) AS relation_count`,
+    [tenantId, index.catalogVersion],
+  );
+  const productCount = Number(current.rows[0]?.product_count ?? 0);
+  const relationCount = Number(current.rows[0]?.relation_count ?? 0);
+  if (productCount === projection.products.length && relationCount === projection.relations.length) {
+    return {
+      available: true,
+      catalogVersion: index.catalogVersion,
+      productCount: projection.products.length,
+      relationCount: projection.relations.length,
+      rebuilt: false,
+    };
+  }
+  const persisted = await persistNativeCatalogProjection(client, { tenantId, index, products });
+  return { ...persisted, rebuilt: true };
+}
+
+function chunk(items = [], size = 250) {
+  const batches = [];
+  for (let start = 0; start < items.length; start += size) batches.push(items.slice(start, start + size));
+  return batches;
+}
+
+function emptyNativeCatalogResult(metadata = null) {
+  return {
+    available: false,
+    metadata: metadata ?? null,
+    catalogVersion: metadata?.catalogVersion ?? null,
+    rows: [],
+    relations: [],
+    retrieval: null,
+  };
+}
+
+function clampNativeCatalogLimit(value, fallback = 40, maximum = 80) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(maximum, Math.max(1, Math.floor(parsed)));
+}
+
+function nativeCandidate(product, evidence = {}) {
+  return {
+    ...product,
+    matchScore: Number(evidence.matchScore ?? 0),
+    matchType: evidence.matchType ?? 'postgres_candidate',
+    lexicalEvidence: evidence.lexicalEvidence === true,
+    semanticEvidence: evidence.semanticEvidence === true,
+    semanticScore: Number(evidence.semanticScore ?? 0),
+    graphEvidence: evidence.graphEvidence ?? null,
+    retrievalHintEvidence: evidence.retrievalHintEvidence ?? [],
+  };
+}
+
+function nativeCatalogResult({ metadata, rows = [], relations = [], retrieval = null } = {}) {
+  return {
+    available: true,
+    metadata,
+    catalogVersion: metadata?.catalogVersion ?? null,
+    rows,
+    relations,
+    retrieval,
+  };
+}
+
+function nativeStageScore(score, stage) {
+  const base = stage === 'direct' ? 4 : stage === 'contextual' ? 3 : 2;
+  return Math.round((base + Math.max(0, Number(score ?? 0))) * 100) / 100;
+}
+
+function nativeRetrievalMetadata({
+  terms = {},
+  exactSku = false,
+  directCandidateCount = 0,
+  semanticCandidateCount = 0,
+  graphCandidateCount = 0,
+  candidateCount = 0,
+  graphPaths = [],
+  stageDurations = {},
+} = {}) {
+  return {
+    provider: 'postgres_fts_trgm_relations',
+    strategy: exactSku ? 'exact_sku' : 'direct_contextual_relation',
+    exactSku,
+    directCandidateCount,
+    semanticCandidateCount,
+    graphCandidateCount,
+    candidateCount,
+    graphPaths,
+    stageDurations,
+    retrievalHintKeys: terms.relationKeys ?? [],
+    queryTokens: terms.queryTokens ?? [],
+    semanticTokens: terms.semanticTokens ?? [],
+  };
+}
+
+async function queryNativeProductCandidates(pool, {
+  tenantId,
+  catalogVersion,
+  queryText,
+  queryTokens = [],
+  limit,
+} = {}) {
+  if (!queryText && !queryTokens.length) return [];
+  const result = await pool.query(
+    `WITH candidates AS (
+       SELECT p.sku,
+              p.payload,
+              p.stock,
+              (
+                COALESCE(ts_rank_cd(p.search_tsv, websearch_to_tsquery('simple', $3)), 0) * 24
+                + GREATEST(similarity(p.search_text, $3), word_similarity($3, p.search_text)) * 10
+                + CASE WHEN p.search_tokens && $4::text[] THEN 3 ELSE 0 END
+              ) AS score
+         FROM catalog_search_products AS p
+        WHERE p.tenant_id = $1
+          AND p.catalog_version = $2
+          AND p.active = TRUE
+          AND (
+            p.search_tsv @@ websearch_to_tsquery('simple', $3)
+            OR p.search_text % $3
+            OR p.search_tokens && $4::text[]
+          )
+     )
+     SELECT sku, payload, stock, score
+       FROM candidates
+      ORDER BY score DESC, stock DESC NULLS LAST, sku ASC
+      LIMIT $5`,
+    [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, limit],
+  );
+  return result.rows;
+}
+
+async function queryNativeRelationCandidates(pool, {
+  tenantId,
+  catalogVersion,
+  relationKeys = [],
+  evidenceTokens = [],
+  limit,
+} = {}) {
+  if (!relationKeys.length && !evidenceTokens.length) return [];
+  const result = await pool.query(
+    `WITH relevant_relations AS (
+       SELECT r.product_sku,
+              MAX(
+                CASE WHEN r.anchor_key = ANY($3::text[]) THEN 8 ELSE 0 END
+                + CASE WHEN r.anchor_tokens && $4::text[] THEN 3 ELSE 0 END
+              ) AS score,
+              array_agg(DISTINCT r.relation_type) AS relation_types,
+              array_agg(DISTINCT r.anchor_key) AS anchors
+         FROM catalog_search_relations AS r
+        WHERE r.tenant_id = $1
+          AND r.catalog_version = $2
+          AND (
+            r.anchor_key = ANY($3::text[])
+            OR r.anchor_tokens && $4::text[]
+          )
+        GROUP BY r.product_sku
+        ORDER BY score DESC, r.product_sku
+        LIMIT $5
+     )
+     SELECT p.sku,
+            p.payload,
+            relevant_relations.score,
+            relevant_relations.relation_types AS "relationTypes",
+            relevant_relations.anchors
+       FROM relevant_relations
+       JOIN catalog_search_products AS p
+         ON p.tenant_id = $1
+        AND p.catalog_version = $2
+        AND p.sku = relevant_relations.product_sku
+      WHERE p.active = TRUE
+      ORDER BY relevant_relations.score DESC, p.sku ASC`,
+    [tenantId, catalogVersion, relationKeys, evidenceTokens, limit],
+  );
+  return result.rows;
+}
+
+async function queryNativeCatalogPage(pool, {
+  tenantId,
+  catalogVersion,
+  queryText = '',
+  queryTokens = [],
+  limit,
+  offset,
+} = {}) {
+  const hasQuery = Boolean(queryText || queryTokens.length);
+  const pageLimitParameter = hasQuery ? '$5' : '$3';
+  const pageOffsetParameter = hasQuery ? '$6' : '$4';
+  const values = hasQuery
+    ? [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, limit, offset]
+    : [tenantId, catalogVersion, limit, offset];
+  const result = await pool.query(
+    `WITH candidates AS (
+       SELECT p.sku,
+              p.payload,
+              ${hasQuery ? `(
+                COALESCE(ts_rank_cd(p.search_tsv, websearch_to_tsquery('simple', $3)), 0) * 24
+                + GREATEST(similarity(p.search_text, $3), word_similarity($3, p.search_text)) * 10
+                + CASE WHEN p.search_tokens && $4::text[] THEN 3 ELSE 0 END
+              )` : '0'} AS score
+         FROM catalog_search_products AS p
+        WHERE p.tenant_id = $1
+          AND p.catalog_version = $2
+          AND p.active = TRUE
+          ${hasQuery ? `AND (
+            p.search_tsv @@ websearch_to_tsquery('simple', $3)
+            OR p.search_text % $3
+            OR p.search_tokens && $4::text[]
+          )` : ''}
+     )
+     SELECT sku, payload, score, COUNT(*) OVER()::int AS total_count
+       FROM candidates
+      ORDER BY ${hasQuery ? 'score DESC,' : ''} sku ASC
+      LIMIT ${pageLimitParameter} OFFSET ${pageOffsetParameter}`,
+    values,
+  );
+  return result;
+}
+
+function decodeNativeCatalogCursor(cursor, expectedCatalogVersion) {
+  if (!cursor) return 0;
+  try {
+    const decoded = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    if (decoded?.catalogVersion !== expectedCatalogVersion) return 0;
+    const offset = Number(decoded.offset ?? 0);
+    return Number.isInteger(offset) && offset > 0 ? offset : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function encodeNativeCatalogCursor(catalogVersion, offset) {
+  return Buffer.from(JSON.stringify({ catalogVersion, offset }), 'utf8').toString('base64url');
 }
 
 async function persistChangedCatalogRows(client, tenantId, products, driveFiles) {

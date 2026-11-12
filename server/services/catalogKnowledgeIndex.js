@@ -9,6 +9,16 @@ import {
 } from '../domain/catalogRelations.js';
 
 const VECTOR_DIMENSIONS = 96;
+// Snapshot v2 keeps the graph compact. Product alternatives are derivable
+// from their family/brand/presentation relations and therefore must not be
+// materialized as an O(n²) relation for every family.
+export const CATALOG_GRAPH_SCHEMA_VERSION = 2;
+
+// Runtime lookup structures are deliberately not serialized to PostgreSQL.
+// A published snapshot remains portable JSON; each Node process prepares these
+// maps once per tenant/version and releases them when the bounded tenant cache
+// evicts the corresponding snapshot.
+const runtimeByIndex = new WeakMap();
 
 /**
  * Builds a tenant-local, immutable catalog snapshot.
@@ -30,7 +40,6 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
   const relations = [];
   const relationKeys = new Set();
   const productsBySku = {};
-  const familyProducts = new Map();
 
   const addNode = (type, value, payload = {}) => {
     const id = nodeKey(type, value);
@@ -75,30 +84,6 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
       }
     }
     productsBySku[product.sku] = { ...product, family, nodeId: productNode };
-    familyProducts.set(familyKey(family), [...(familyProducts.get(familyKey(family)) ?? []), product]);
-  }
-
-  // Alternatives are relation data, not family-specific business rules.
-  for (const productsInFamily of familyProducts.values()) {
-    for (const product of productsInFamily) {
-      for (const alternative of productsInFamily) {
-        if (product.sku === alternative.sku) continue;
-        const samePresentation = normalizedValue(product.normalizedPresentation)
-          && normalizedValue(product.normalizedPresentation) === normalizedValue(alternative.normalizedPresentation);
-        const sameBrand = normalizedValue(product.brand) && normalizedValue(product.brand) === normalizedValue(alternative.brand);
-        const sameCategory = normalizedValue(product.category) && normalizedValue(product.category) === normalizedValue(alternative.category);
-        if (samePresentation || (sameBrand && sameCategory)) {
-          addRelation(
-            relations,
-            CATALOG_RELATION_TYPES.alternativeOf,
-            nodeKey(CATALOG_NODE_TYPES.product, product.sku),
-            nodeKey(CATALOG_NODE_TYPES.product, alternative.sku),
-            { samePresentation, sameBrand, sameCategory },
-            relationKeys,
-          );
-        }
-      }
-    }
   }
 
   const searchDocuments = products.map((product) => {
@@ -109,12 +94,17 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
       catalogVersion,
       text,
       tokens: tokenize(text),
+      // Computed during explicit catalog sync, never during the customer's
+      // message path. Keeping this compact fingerprint avoids a cold tenant
+      // spending CPU hashing every product before its first reply.
       vector: hashedVector(text),
     };
   });
 
   return {
     tenantId,
+    graphSchemaVersion: CATALOG_GRAPH_SCHEMA_VERSION,
+    alternativeStrategy: 'family_compatible_runtime',
     catalogVersion,
     sourceHash,
     sourceRef,
@@ -134,7 +124,168 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
   };
 }
 
-export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery = '', recommendation = false, filters = {}, retrievalHints = {}, limit = 25 } = {}) {
+/**
+ * Converts a legacy snapshot into the compact graph representation in memory.
+ *
+ * Catalog snapshots published before schema v2 materialized every compatible
+ * alternative as a relation. Loading one of those documents must not make a
+ * tenant pay the old memory/CPU cost until its owner explicitly synchronizes
+ * the catalog again. The source document remains untouched here; `sync()` is
+ * still the only path that persists the compact v2 snapshot.
+ */
+export function compactCatalogKnowledgeIndex(index) {
+  if (!index?.products || Number(index.graphSchemaVersion ?? 1) >= CATALOG_GRAPH_SCHEMA_VERSION) return index;
+  const relations = (index.relations ?? []).filter((relation) => relation.type !== CATALOG_RELATION_TYPES.alternativeOf);
+  return {
+    ...index,
+    graphSchemaVersion: CATALOG_GRAPH_SCHEMA_VERSION,
+    alternativeStrategy: 'family_compatible_runtime',
+    relationCount: relations.length,
+    relations,
+    compactedFromGraphSchemaVersion: Number(index.graphSchemaVersion ?? 1),
+  };
+}
+
+/**
+ * Builds process-local lookup structures for an immutable catalog snapshot.
+ *
+ * These artifacts intentionally hold references to the snapshot instead of
+ * copies of it. They make token, node and relation lookups O(relevant data)
+ * rather than rebuilding maps and hashing every product on each message.
+ */
+export function prepareCatalogKnowledgeRuntime(index) {
+  if (!index?.products) return null;
+  const cached = runtimeByIndex.get(index);
+  if (cached) return cached;
+
+  const startedAt = performance.now();
+  const products = Object.values(index.products);
+  const documentsBySku = new Map((index.searchDocuments ?? []).map((document) => [document.sku, document]));
+  const productDataBySku = new Map();
+  const productSkusByToken = new Map();
+  const productVocabulary = new Set();
+  const productsByFamily = new Map();
+
+  const addProductToken = (token, sku) => {
+    if (!token) return;
+    productVocabulary.add(token);
+    const skus = productSkusByToken.get(token) ?? new Set();
+    skus.add(sku);
+    productSkusByToken.set(token, skus);
+  };
+
+  for (const product of products) {
+    const document = documentsBySku.get(product.sku);
+    const text = document?.text ?? productSearchText(product);
+    const allTokens = document?.tokens ?? tokenize(text);
+    const nameTokens = tokenize([product.name, product.brand].filter(Boolean).join(' '));
+    const aliasTokens = tokenize([product.sku, product.productFamily, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+    const supportingTokens = tokenize([
+      product.category,
+      product.presentation,
+      product.normalizedPresentation,
+      product.description,
+      attributesSearchText(product.attributes),
+      ...(product.tags ?? []),
+    ].filter(Boolean).join(' '));
+    const coreTokens = tokenize([
+      product.name,
+      product.brand,
+      product.productFamily,
+      product.category,
+      product.presentation,
+      product.normalizedPresentation,
+      ...(product.aliases ?? []),
+      ...(product.tags ?? []),
+    ].filter(Boolean).join(' '));
+    for (const token of coreTokens) addProductToken(token, product.sku);
+    const family = product.family ?? product.productFamily ?? deriveFamily(product);
+    const inFamily = productsByFamily.get(familyKey(family)) ?? [];
+    inFamily.push(product);
+    productsByFamily.set(familyKey(family), inFamily);
+    productDataBySku.set(product.sku, {
+      text,
+      normalizedText: normalizedValue(text),
+      allTokens,
+      nameTokens,
+      aliasTokens,
+      supportingTokens,
+      vector: Array.isArray(document?.vector) ? document.vector : hashedVector(text),
+    });
+  }
+
+  const nodesById = new Map();
+  const anchorNodes = [];
+  const anchorNodeIdsByToken = new Map();
+  const anchorVocabulary = new Set();
+  for (const node of index.nodes ?? []) {
+    nodesById.set(node.id, node);
+    if (node.type === CATALOG_NODE_TYPES.product || node.type === CATALOG_NODE_TYPES.tenant) continue;
+    anchorNodes.push(node);
+    for (const token of tokenize(nodeSearchText(node))) {
+      anchorVocabulary.add(token);
+      const nodeIds = anchorNodeIdsByToken.get(token) ?? new Set();
+      nodeIds.add(node.id);
+      anchorNodeIdsByToken.set(token, nodeIds);
+    }
+  }
+
+  const reverseRelations = new Map();
+  const relationsByNode = new Map();
+  const storedAlternativeTargetsByProduct = new Map();
+  const addRelationForNode = (nodeId, relation) => {
+    const relations = relationsByNode.get(nodeId) ?? [];
+    relations.push(relation);
+    relationsByNode.set(nodeId, relations);
+  };
+  const addStoredAlternative = (productNodeId, targetNodeId, relation) => {
+    const targets = storedAlternativeTargetsByProduct.get(productNodeId) ?? [];
+    targets.push({ targetNodeId, relation });
+    storedAlternativeTargetsByProduct.set(productNodeId, targets);
+  };
+  for (const relation of index.relations ?? []) {
+    const reverse = reverseRelations.get(relation.to) ?? [];
+    reverse.push(relation);
+    reverseRelations.set(relation.to, reverse);
+    addRelationForNode(relation.from, relation);
+    addRelationForNode(relation.to, relation);
+    if (relation.type === CATALOG_RELATION_TYPES.alternativeOf) {
+      addStoredAlternative(relation.from, relation.to, relation);
+      addStoredAlternative(relation.to, relation.from, relation);
+    }
+  }
+
+  const runtime = {
+    products,
+    productsBySku: index.products,
+    productDataBySku,
+    productSkusByToken,
+    productVocabulary,
+    productsByFamily,
+    nodesById,
+    anchorNodes,
+    anchorNodeIdsByToken,
+    anchorVocabulary,
+    reverseRelations,
+    relationsByNode,
+    storedAlternativeTargetsByProduct,
+    generatedAlternativeTargetsByProduct: new Map(),
+    preparedAt: new Date().toISOString(),
+    preparationMs: Number((performance.now() - startedAt).toFixed(2)),
+  };
+  runtimeByIndex.set(index, runtime);
+  return runtime;
+}
+
+export function searchCatalogKnowledgeIndex(index, {
+  query = '',
+  semanticQuery = '',
+  recommendation = false,
+  filters = {},
+  retrievalHints = {},
+  limit = 25,
+  includeRelations = true,
+} = {}) {
   if (!index?.products) {
     return {
       catalogVersion: null,
@@ -147,15 +298,28 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   const normalizedSemanticQuery = normalizeText(semanticQuery);
   const queryTokens = tokenize(normalizedQuery);
   const semanticTokens = tokenize(normalizedSemanticQuery);
+  const runtime = prepareCatalogKnowledgeRuntime(index);
   // A semantic query is only additional evidence. It must not silently turn
   // an exact/product lookup into a recommendation search. The planner marks
   // recommendation intent explicitly so concrete requests keep their
   // presentation, attribute constraints and ranking behavior unchanged.
   const recommendationMode = Boolean(recommendation && semanticTokens.length);
-  const compatibleProducts = Object.values(index.products)
+  const compatibleProducts = runtime.products
     .filter((product) => productMatchesFilters(product, filters));
-  const directCandidates = compatibleProducts
-    .map((product) => scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens, recommendationMode, retrievalHints))
+  const directProducts = catalogDirectCandidates(runtime, {
+    queryTokens,
+    semanticTokens,
+    retrievalHints,
+    compatibleProducts,
+  });
+  const queryVector = normalizedQuery ? hashedVector(normalizedQuery) : null;
+  const semanticVector = semanticTokens.length ? hashedVector(semanticTokens.join(' ')) : null;
+  const directCandidates = directProducts
+    .map((product) => scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens, recommendationMode, retrievalHints, {
+      runtimeProduct: runtime.productDataBySku.get(product.sku),
+      queryVector,
+      semanticVector,
+    }))
     .filter((row) => {
       if (!queryTokens.length && !semanticTokens.length) return true;
       // A recommendation can be grounded by a catalog concept inferred by
@@ -178,7 +342,7 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   // or select a product on behalf of the LLM. It follows tenant-local family,
   // presentation, brand, category and attribute relations, then applies the
   // same explicit filters before returning candidates.
-  const graphEvidence = graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints);
+  const graphEvidence = graphCandidateEvidence(index, runtime, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints);
   const bySku = new Map(directCandidates.map((row) => [row.sku, row]));
   // When a concrete customer term already retrieved a product directly, a
   // category-only graph path (for example "arepa" -> panaderia -> pan
@@ -214,9 +378,11 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
   return {
     catalogVersion: index.catalogVersion,
     rows,
-    relations: relationEvidence(index, rows),
+    relations: includeRelations ? relationEvidence(index, rows, runtime) : [],
     retrieval: {
       directCandidateCount: directCandidates.length,
+      directScannedCount: directProducts.length,
+      compatibleProductCount: compatibleProducts.length,
       graphCandidateCount: graphEvidence.size,
       candidateCount: bySku.size,
       semanticCandidateCount: directCandidates.filter((row) => row.semanticEvidence || row.semanticScore > 0).length,
@@ -224,23 +390,29 @@ export function searchCatalogKnowledgeIndex(index, { query = '', semanticQuery =
       recommendation: recommendationMode,
       diversityApplied: recommendationMode && rows.length > 1,
       graphPaths: [...graphEvidence.values()].flatMap((evidence) => evidence.paths).slice(0, 100),
+      graphSchemaVersion: index.graphSchemaVersion ?? 1,
+      runtimePreparationMs: runtime.preparationMs,
     },
   };
 }
 
-function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens = [], recommendation = false, retrievalHints = {}) {
-  const text = productSearchText(product);
-  const tokens = tokenize(text);
-  const lexical = weightedTokenScore(queryTokens, product);
-  const semantic = weightedTokenScore(semanticTokens, product);
-  const vector = normalizedQuery ? cosineSimilarity(hashedVector(normalizedQuery), hashedVector(text)) : 0;
-  const semanticVector = semanticTokens.length
-    ? cosineSimilarity(hashedVector(semanticTokens.join(' ')), hashedVector(text))
+function scoreDirectCandidate(product, queryTokens, normalizedQuery, semanticTokens = [], recommendation = false, retrievalHints = {}, {
+  runtimeProduct = null,
+  queryVector = null,
+  semanticVector = null,
+} = {}) {
+  const text = runtimeProduct?.text ?? productSearchText(product);
+  const tokens = runtimeProduct?.allTokens ?? tokenize(text);
+  const lexical = weightedTokenScore(queryTokens, product, runtimeProduct);
+  const semantic = weightedTokenScore(semanticTokens, product, runtimeProduct);
+  const vector = queryVector ? cosineSimilarity(queryVector, runtimeProduct?.vector ?? hashedVector(text)) : 0;
+  const semanticVectorScore = semanticVector
+    ? cosineSimilarity(semanticVector, runtimeProduct?.vector ?? hashedVector(text))
     : 0;
   const baseScore = recommendation
-    ? (semantic * 0.65) + (semanticVector * 25 * 0.2) + (lexical * 0.15)
+    ? (semantic * 0.65) + (semanticVectorScore * 25 * 0.2) + (lexical * 0.15)
     : queryTokens.length ? (lexical * 0.75) + (vector * 25 * 0.25) : 0;
-  const hint = softRetrievalHintScore(product, retrievalHints);
+  const hint = softRetrievalHintScore(product, retrievalHints, runtimeProduct?.normalizedText ?? normalizedValue(text));
   // Hints are soft evidence from the interpreter. They help rank compatible
   // variants but never decide eligibility or suppress graph exploration.
   // In a recommendation, an LLM-derived concept is a stronger relevance
@@ -267,31 +439,36 @@ function graphEvidenceIsCategoryOnly(evidence = {}) {
   return paths.length > 0 && paths.every((path) => path.anchorType === CATALOG_NODE_TYPES.category);
 }
 
-function graphCandidateEvidence(index, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints = {}) {
-  const compatibleSkus = new Set(compatibleProducts.map((product) => product.sku));
-  const nodesById = new Map((index.nodes ?? []).map((node) => [node.id, node]));
+function catalogDirectCandidates(runtime, { queryTokens = [], semanticTokens = [], retrievalHints = {}, compatibleProducts = [] } = {}) {
+  const evidenceTokens = usefulRetrievalTokens([
+    ...queryTokens,
+    ...semanticTokens,
+    ...retrievalHintTokens(retrievalHints),
+  ]);
+  if (!evidenceTokens.length) return compatibleProducts;
+  const candidateSkus = candidateSkusForTokens(runtime.productSkusByToken, runtime.productVocabulary, evidenceTokens);
+  if (!candidateSkus.size) return compatibleProducts;
+  const compatibleSkuSet = new Set(compatibleProducts.map((product) => product.sku));
+  const candidates = [...candidateSkus]
+    .filter((sku) => compatibleSkuSet.has(sku))
+    .map((sku) => runtime.productsBySku[sku])
+    .filter(Boolean);
+  // A lexical index is only a fast shortlist. It must never be a destructive
+  // filter when its vocabulary has no compatible entry after tenant filters.
+  return candidates.length ? candidates : compatibleProducts;
+}
+
+function graphCandidateEvidence(index, runtime, queryTokens, semanticTokens, filters, compatibleProducts, retrievalHints = {}) {
+  const compatibleSkus = compatibleProducts.length === runtime.products.length
+    ? null
+    : new Set(compatibleProducts.map((product) => product.sku));
   const evidenceTokens = [...queryTokens, ...semanticTokens, ...filterEvidenceTokens(filters), ...retrievalHintTokens(retrievalHints)];
-  const anchors = (index.nodes ?? []).filter((node) => (
-    node.type !== CATALOG_NODE_TYPES.product
-    && node.type !== CATALOG_NODE_TYPES.tenant
-    && nodeMatchesEvidence(node, evidenceTokens)
-  ));
-  const reverseRelations = new Map();
-  const alternativesByProduct = new Map();
-  for (const relation of index.relations ?? []) {
-    const list = reverseRelations.get(relation.to) ?? [];
-    list.push(relation);
-    reverseRelations.set(relation.to, list);
-    if (relation.type === CATALOG_RELATION_TYPES.alternativeOf) {
-      alternativesByProduct.set(relation.from, [...(alternativesByProduct.get(relation.from) ?? []), relation]);
-      alternativesByProduct.set(relation.to, [...(alternativesByProduct.get(relation.to) ?? []), relation]);
-    }
-  }
+  const anchors = graphAnchorsForTokens(runtime, evidenceTokens);
   const attributeAnchors = anchors.filter((anchor) => anchor.type === CATALOG_NODE_TYPES.attribute);
   const restrictAlternativeExpansion = attributeAnchors.length > 0;
   const pathsBySku = new Map();
   const addPath = (sku, anchor, relations) => {
-    if (!compatibleSkus.has(sku)) return;
+    if (compatibleSkus && !compatibleSkus.has(sku)) return;
     const entry = pathsBySku.get(sku) ?? { anchorEvidence: true, anchorScore: 0, paths: [] };
     const anchorText = nodeSearchText(anchor);
     const anchorScore = evidenceTokens.length ? weightedTextTokenScore(evidenceTokens, tokenize(anchorText)) : 1;
@@ -309,27 +486,98 @@ function graphCandidateEvidence(index, queryTokens, semanticTokens, filters, com
   };
 
   for (const anchor of anchors) {
-    for (const relation of reverseRelations.get(anchor.id) ?? []) {
-      const productNode = nodesById.get(relation.from);
+    for (const relation of runtime.reverseRelations.get(anchor.id) ?? []) {
+      const productNode = runtime.nodesById.get(relation.from);
       if (productNode?.type !== CATALOG_NODE_TYPES.product) continue;
       addPath(productNode.payload?.sku ?? productNode.key, anchor, [relation]);
       // An explicit attribute match is already a precise anchor (for example
       // material=algodon or variante=Original). Do not fan it back out to
       // sibling alternatives that could contradict the customer's constraint.
       if (restrictAlternativeExpansion) continue;
-      for (const alternative of alternativesByProduct.get(productNode.id) ?? []) {
-        if (alternative.from === productNode.id) {
-          const target = nodesById.get(alternative.to);
-          addPath(target?.payload?.sku ?? target?.key, anchor, [relation, alternative]);
-        }
-        if (alternative.to === productNode.id) {
-          const source = nodesById.get(alternative.from);
-          addPath(source?.payload?.sku ?? source?.key, anchor, [relation, alternative]);
-        }
+      for (const alternative of alternativeTargetsForProduct(runtime, productNode)) {
+        const target = runtime.nodesById.get(alternative.targetNodeId);
+        addPath(target?.payload?.sku ?? target?.key, anchor, [relation, alternative.relation]);
       }
     }
   }
   return pathsBySku;
+}
+
+function graphAnchorsForTokens(runtime, evidenceTokens = []) {
+  const usefulTokens = usefulRetrievalTokens(evidenceTokens);
+  if (!usefulTokens.length) return [];
+  const candidateNodeIds = candidateSkusForTokens(runtime.anchorNodeIdsByToken, runtime.anchorVocabulary, usefulTokens);
+  const candidates = candidateNodeIds.size
+    ? [...candidateNodeIds].map((id) => runtime.nodesById.get(id)).filter(Boolean)
+    : runtime.anchorNodes;
+  return candidates.filter((node) => nodeMatchesEvidence(node, evidenceTokens));
+}
+
+function alternativeTargetsForProduct(runtime, productNode) {
+  const stored = runtime.storedAlternativeTargetsByProduct.get(productNode.id);
+  if (stored?.length) return stored;
+  const cached = runtime.generatedAlternativeTargetsByProduct.get(productNode.id);
+  if (cached) return cached;
+  const product = productNode.payload ?? runtime.productsBySku[productNode.key];
+  const family = product?.family ?? product?.productFamily ?? deriveFamily(product ?? {});
+  const alternatives = (runtime.productsByFamily.get(familyKey(family)) ?? [])
+    .filter((candidate) => candidate.sku !== product?.sku)
+    .filter((candidate) => {
+      const samePresentation = normalizedValue(product?.normalizedPresentation)
+        && normalizedValue(product?.normalizedPresentation) === normalizedValue(candidate.normalizedPresentation);
+      const sameBrand = normalizedValue(product?.brand) && normalizedValue(product?.brand) === normalizedValue(candidate.brand);
+      const sameCategory = normalizedValue(product?.category) && normalizedValue(product?.category) === normalizedValue(candidate.category);
+      return samePresentation || (sameBrand && sameCategory);
+    })
+    .map((candidate) => ({
+      targetNodeId: nodeKey(CATALOG_NODE_TYPES.product, candidate.sku),
+      relation: {
+        type: CATALOG_RELATION_TYPES.alternativeOf,
+        from: productNode.id,
+        to: nodeKey(CATALOG_NODE_TYPES.product, candidate.sku),
+        metadata: { generated: true },
+      },
+    }));
+  runtime.generatedAlternativeTargetsByProduct.set(productNode.id, alternatives);
+  return alternatives;
+}
+
+const RETRIEVAL_STOP_WORDS = new Set([
+  'a', 'al', 'con', 'de', 'del', 'el', 'en', 'la', 'las', 'lo', 'los', 'me',
+  'mi', 'para', 'por', 'que', 'un', 'una', 'uno', 'unos', 'unas', 'y', 'o',
+  'quiero', 'regalame', 'regala', 'dame', 'necesito', 'favor', 'pedido',
+]);
+
+function usefulRetrievalTokens(tokens = []) {
+  return [...new Set(tokens.filter((token) => token.length >= 3 && !RETRIEVAL_STOP_WORDS.has(token)))];
+}
+
+function candidateSkusForTokens(indexByToken, vocabulary, tokens = []) {
+  const candidates = new Set();
+  for (const token of tokens) {
+    const matchingTokens = matchingVocabularyTokens(vocabulary, token);
+    for (const matchingToken of matchingTokens) {
+      for (const candidate of indexByToken.get(matchingToken) ?? []) candidates.add(candidate);
+    }
+  }
+  return candidates;
+}
+
+function matchingVocabularyTokens(vocabulary, queryToken) {
+  if (vocabulary.has(queryToken)) return [queryToken];
+  const prefixMatches = [];
+  for (const candidate of vocabulary) {
+    if (candidate.length < 4 || queryToken.length < 4) continue;
+    if (candidate.startsWith(queryToken) || queryToken.startsWith(candidate)) prefixMatches.push(candidate);
+  }
+  if (prefixMatches.length) return prefixMatches;
+  if (queryToken.length < 6) return [];
+  const typoMatches = [];
+  for (const candidate of vocabulary) {
+    if (candidate.length < 6) continue;
+    if (levenshtein(candidate, queryToken) <= (candidate.length >= 8 && queryToken.length >= 8 ? 2 : 1)) typoMatches.push(candidate);
+  }
+  return typoMatches;
 }
 
 function diversifyRecommendationRows(rows, limit) {
@@ -400,12 +648,23 @@ function weightedTextTokenScore(queryTokens, productTokens) {
   return matched / queryTokens.length;
 }
 
-export function relationEvidence(index, rows = []) {
+export function relationEvidence(index, rows = [], runtime = prepareCatalogKnowledgeRuntime(index)) {
   const productNodeIds = new Set(rows.map((row) => nodeKey(CATALOG_NODE_TYPES.product, row.sku)));
-  const familyIds = new Set(
-    rows.map((row) => nodeKey(CATALOG_NODE_TYPES.family, row.family || row.productFamily || deriveFamily(row))),
-  );
-  return (index?.relations ?? []).filter((relation) => productNodeIds.has(relation.from) || familyIds.has(relation.from) || productNodeIds.has(relation.to) || familyIds.has(relation.to));
+  const evidence = [];
+  const seen = new Set();
+  for (const productNodeId of productNodeIds) {
+    for (const relation of runtime?.relationsByNode?.get(productNodeId) ?? []) {
+      // Pairwise legacy alternative edges can be extremely numerous. The
+      // selected product's direct family/brand/presentation edges are enough
+      // evidence for the LLM and keep a response bounded.
+      if (relation.type === CATALOG_RELATION_TYPES.alternativeOf) continue;
+      if (seen.has(relation.key)) continue;
+      seen.add(relation.key);
+      evidence.push(relation);
+      if (evidence.length >= 200) return evidence;
+    }
+  }
+  return evidence;
 }
 
 export function normalizeProduct(row) {
@@ -499,11 +758,11 @@ function tokenScore(queryTokens, productTokens) {
   return matched / queryTokens.length * 20;
 }
 
-function weightedTokenScore(queryTokens, product) {
+function weightedTokenScore(queryTokens, product, runtimeProduct = null) {
   if (!queryTokens.length) return 0;
-  const nameTokens = tokenize([product.name, product.brand].filter(Boolean).join(' '));
-  const aliasTokens = tokenize([product.sku, product.productFamily, ...(product.aliases ?? [])].filter(Boolean).join(' '));
-  const supportingTokens = tokenize([
+  const nameTokens = runtimeProduct?.nameTokens ?? tokenize([product.name, product.brand].filter(Boolean).join(' '));
+  const aliasTokens = runtimeProduct?.aliasTokens ?? tokenize([product.sku, product.productFamily, ...(product.aliases ?? [])].filter(Boolean).join(' '));
+  const supportingTokens = runtimeProduct?.supportingTokens ?? tokenize([
     product.category,
     product.presentation,
     product.normalizedPresentation,
@@ -551,9 +810,9 @@ function cosineSimilarity(a, b) {
   return Math.max(0, Math.min(1, a.reduce((total, value, index) => total + value * (b[index] ?? 0), 0)));
 }
 
-function softRetrievalHintScore(product, hints = {}) {
+function softRetrievalHintScore(product, hints = {}, normalizedProductText = null) {
   if (!hints || typeof hints !== 'object') return { score: 0, evidence: [] };
-  const text = normalizedValue([
+  const text = normalizedProductText ?? normalizedValue([
     product.name,
     product.brand,
     product.category,
@@ -598,7 +857,7 @@ function tokenOverlap(left, right) {
   return matches / leftTokens.size;
 }
 
-function productMatchesFilters(product, filters = {}) {
+export function productMatchesFilters(product, filters = {}) {
   for (const [key, value] of Object.entries(filters ?? {})) {
     if (value === undefined || value === null || value === '') continue;
     if (key === 'sku' && normalizedValue(product.sku) !== normalizedValue(value)) return false;

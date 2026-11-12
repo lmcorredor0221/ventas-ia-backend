@@ -684,14 +684,43 @@ export class LLMPlanner {
     const state = this.store.getState?.() ?? {};
     const stateIndex = state.catalogKnowledgeIndexesByTenant?.[tenantId] ?? null;
     const cached = this.catalogVocabularyCache.get(tenantId);
-    if (stateIndex) {
-      if (cached?.catalogVersion === stateIndex.catalogVersion) return cached.value;
-      const value = buildTenantProductVocabulary(stateIndex);
-      this.catalogVocabularyCache.set(tenantId, { catalogVersion: stateIndex.catalogVersion, value });
-      return value;
-    }
     if (cached && (Date.now() - cached.checkedAt) < 5_000) return cached.value;
     try {
+      // The LLM receives only compact family/name/brand grounding.  When the
+      // native projection is enabled, do not deserialize the full immutable
+      // graph merely to construct that vocabulary.
+      if (this.config?.catalogNativeSearchEnabled === true && this.store.getPublishedCatalogVocabulary) {
+        const nativeVocabulary = await this.store.getPublishedCatalogVocabulary(tenantId);
+        if (nativeVocabulary) {
+          this.catalogVocabularyCache.set(tenantId, {
+            catalogVersion: nativeVocabulary.catalogVersion ?? null,
+            checkedAt: Date.now(),
+            value: nativeVocabulary,
+          });
+          this.telemetry?.record('catalog', 'vocabulary', {
+            durationMs: 0,
+            status: 'ok',
+            tenantId,
+            metadata: {
+              catalogVersion: nativeVocabulary.catalogVersion ?? null,
+              productBrandCount: nativeVocabulary.products?.length ?? 0,
+              source: 'postgres_native_catalog',
+            },
+          });
+          return nativeVocabulary;
+        }
+      }
+      // Local/in-memory stores and tenants that have not yet published a
+      // native projection retain the original immutable-index fallback.
+      if (stateIndex) {
+        const value = buildTenantProductVocabulary(stateIndex);
+        this.catalogVocabularyCache.set(tenantId, {
+          catalogVersion: stateIndex.catalogVersion,
+          checkedAt: Date.now(),
+          value,
+        });
+        return value;
+      }
       const index = await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
       const value = buildTenantProductVocabulary(index);
       this.catalogVocabularyCache.set(tenantId, { catalogVersion: index?.catalogVersion ?? null, checkedAt: Date.now(), value });

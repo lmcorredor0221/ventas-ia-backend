@@ -83,6 +83,23 @@ export const RUNTIME_CONFIG = {
   // explicit rollback switch while the new contracts are validated locally.
   llmTwoStageInterpretationEnabled: process.env.LLM_TWO_STAGE_INTERPRETATION_ENABLED !== 'false',
   catalogKnowledgeIndexEnabled: process.env.CATALOG_KNOWLEDGE_INDEX_ENABLED !== 'false',
+  // PostgreSQL is the operational retrieval engine for published catalogs.
+  // Keep this opt-in until a tenant has been published into the native
+  // projection (FTS + trigram + relations); legacy graph snapshots remain a
+  // safe rollback path while the migration is rolled out.
+  catalogNativeSearchEnabled: process.env.CATALOG_NATIVE_SEARCH_ENABLED === 'true',
+  catalogNativeSearchCandidateLimit: Number(process.env.CATALOG_NATIVE_SEARCH_CANDIDATE_LIMIT ?? 40),
+  // A 3,000-product graph snapshot is materially larger than a normal cache
+  // entry. Bound resident tenant indexes so a busy store cannot evict every
+  // other request through memory pressure. Operators may raise this only after
+  // measuring the instance's memory headroom.
+  catalogIndexMaxCachedTenants: Number(process.env.CATALOG_INDEX_MAX_CACHED_TENANTS
+    ?? (process.env.NODE_ENV === 'production' ? 2 : 8)),
+  // Count alone is not a safe multitenant memory limit: catalogs can have
+  // very different sizes. The cache enforces this conservative resident
+  // budget in addition to the tenant count.
+  catalogIndexMaxCachedBytes: Number(process.env.CATALOG_INDEX_MAX_CACHED_BYTES
+    ?? (process.env.NODE_ENV === 'production' ? 64 * 1024 * 1024 : 256 * 1024 * 1024)),
   telemetryMaxSamples: Number(process.env.TELEMETRY_MAX_SAMPLES ?? 4000),
   telemetryMaxTraces: Number(process.env.TELEMETRY_MAX_TRACES ?? 1000),
   telemetrySlowThresholdMs: Number(process.env.TELEMETRY_SLOW_THRESHOLD_MS ?? 1000),

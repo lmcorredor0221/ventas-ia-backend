@@ -48,7 +48,13 @@ export class ToolRegistry {
     this.googleWorkspace = googleWorkspace;
     this.secretVault = secretVault;
     this.telemetry = telemetry;
-    this.catalogSearch = catalogSearch ?? new CatalogSearchService({ store, events, telemetry });
+    this.catalogSearch = catalogSearch ?? new CatalogSearchService({
+      store,
+      events,
+      telemetry,
+      maxCachedTenants: config?.catalogIndexMaxCachedTenants,
+      maxCachedBytes: config?.catalogIndexMaxCachedBytes,
+    });
     this.outbox = null;
     this.googleAccessTokenCache = new Map();
     this.liveCatalogCache = new Map();
@@ -138,56 +144,77 @@ export class ToolRegistry {
     let sourceRowCount = 0;
     let index = null;
     let catalogLoad = null;
+    let nativeCatalogResult = null;
+    let nativeManualPage = null;
+    let nativeMetadata = null;
     let source = live ? 'google_sheets_live' : 'local_test_fixture';
     if (readSource === 'postgres') {
-      catalogLoad = await this.catalogSearch?.loadPublishedIndex?.(tenantId);
-      index = catalogLoad?.index ?? await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
-      if (index?.products) {
-        this.catalogSearch?.hydrate(index);
-        sourceRowCount = Number(index.rowCount ?? Object.keys(index.products).length);
-        // A manual page is constructed directly from the immutable index.
-        // Avoid rebuilding an array with every catalog product for each UI
-        // refresh; confirmation asks for exact SKUs and remains bounded too.
-        rows = manualCatalogRead
-          ? requestedSkus.map((sku) => index.products[sku]).filter(Boolean).map((product) => ({
-            ...product,
-            productFamily: product.productFamily ?? product.family ?? '',
-          }))
-          : Object.values(index.products).map((product) => ({
-            ...product,
-            productFamily: product.productFamily ?? product.family ?? '',
-          }));
-      } else {
-        rows = [];
+      // Native retrieval keeps the existing staged catalog contract while
+      // moving the work to PostgreSQL.  It returns only relevant rows instead
+      // of hydrating the immutable JSON graph for every cold Render process.
+      if (this.config?.catalogNativeSearchEnabled === true) {
+        nativeMetadata = await this.store.getPublishedCatalogNativeSearchMetadata?.(tenantId);
+        if (nativeMetadata?.available) {
+          source = 'postgres_native_catalog';
+          sourceRowCount = Number(nativeMetadata.rowCount ?? nativeMetadata.projectionRowCount ?? 0);
+          const nativePayload = {
+            query: payload.query ?? payload.filters?.query ?? '',
+            semanticQuery: payload.semanticQuery ?? '',
+            filters: payload.filters ?? {},
+            retrievalHints: payload.retrievalHints ?? {},
+            limit: manualCatalogRead
+              ? payload.limit ?? 25
+              : Math.min(
+                Number(this.config?.catalogNativeSearchCandidateLimit ?? 40),
+                Math.max(Number(payload.limit ?? 25), 25),
+              ),
+            cursor: payload.cursor ?? null,
+          };
+          if (requestedSkus.length) {
+            nativeCatalogResult = await this.store.getPublishedCatalogProductsBySkus?.(tenantId, requestedSkus);
+          } else if (manualCatalogRead) {
+            nativeManualPage = await this.store.pagePublishedCatalogNative?.(tenantId, nativePayload);
+          } else {
+            nativeCatalogResult = await this.store.searchPublishedCatalogNative?.(tenantId, nativePayload);
+          }
+          rows = requestedSkus.length ? (nativeCatalogResult?.rows ?? []) : null;
+        }
       }
-      source = 'postgres_catalog';
-      if (!index?.products) {
-        return {
-          status: 'sync_required',
-          code: 'catalog_sync_required',
-          rows: [],
-          restrictedItems: [],
-          source,
-          source_revision: null,
-          catalog_version: null,
-          source_range: effectiveRange,
-          source_row_count: 0,
-          message: 'Esta tienda aún no tiene una versión publicada del catálogo.',
-        };
-      }
-      if (!index && this.config.catalogKnowledgeIndexEnabled !== false) {
-        return {
-          status: 'sync_required',
-          code: 'catalog_index_required',
-          rows: [],
-          restrictedItems: [],
-          source,
-          source_revision: null,
-          catalog_version: null,
-          source_range: effectiveRange,
-          source_row_count: rows.length,
-          message: 'El catálogo tiene productos, pero aún no tiene una versión de búsqueda publicada. Actualízalo antes de atender pedidos.',
-        };
+
+      // A migration or a tenant which has not explicitly synchronized yet is
+      // served by the previous immutable-index path.  This fallback is
+      // deliberately narrow and can be removed only after all tenants have a
+      // published native projection.
+      if (!nativeMetadata?.available) {
+        catalogLoad = await this.catalogSearch?.loadPublishedIndex?.(tenantId);
+        index = catalogLoad?.index ?? await this.store.getPublishedCatalogKnowledgeIndex?.(tenantId);
+        if (index?.products) {
+          this.catalogSearch?.hydrate(index);
+          sourceRowCount = Number(index.rowCount ?? Object.keys(index.products).length);
+          rows = manualCatalogRead
+            ? requestedSkus.map((sku) => index.products[sku]).filter(Boolean).map((product) => ({
+              ...product,
+              productFamily: product.productFamily ?? product.family ?? '',
+            }))
+            : null;
+        } else {
+          rows = [];
+        }
+        source = 'postgres_catalog';
+        if (!index?.products) {
+          return {
+            status: 'sync_required',
+            code: 'catalog_sync_required',
+            rows: [],
+            restrictedItems: [],
+            source,
+            source_revision: null,
+            catalog_version: null,
+            source_range: effectiveRange,
+            source_row_count: 0,
+            message: 'Esta tienda aún no tiene una versión publicada del catálogo.',
+          };
+        }
       }
     } else {
       rows = live
@@ -197,9 +224,10 @@ export class ToolRegistry {
     }
     // A manual catalog refresh publishes its index in this process. Reuse it for
     // reads instead of rebuilding the graph on each customer message.
-    index ??= this.catalogSearch?.getIndex?.(tenantId) ?? null;
+    index ??= nativeMetadata?.available ? null : this.catalogSearch?.getIndex?.(tenantId) ?? null;
     if (
       !index
+      && !nativeMetadata?.available
       && this.config.catalogKnowledgeIndexEnabled !== false
       && this.config.catalogAutoSyncOnRead !== false
     ) {
@@ -210,8 +238,10 @@ export class ToolRegistry {
         range: effectiveRange,
       });
     }
-    const indexed = !manualCatalogRead && index && this.config.catalogKnowledgeIndexEnabled !== false
-      ? this.catalogSearch?.search(tenantId, {
+    const indexed = !manualCatalogRead && nativeCatalogResult?.available
+      ? nativeCatalogResult
+      : !manualCatalogRead && index && this.config.catalogKnowledgeIndexEnabled !== false
+        ? this.catalogSearch?.search(tenantId, {
         // The planner may provide a category/attribute filter together with
         // the candidate query. Keeping both preserves the LLM's decomposition
         // of a broad request such as "arroz, aceite o huevos".
@@ -221,40 +251,29 @@ export class ToolRegistry {
         filters: payload.filters ?? {},
         retrievalHints: payload.retrievalHints ?? {},
         limit: Math.min(50, Math.max(Number(payload.limit ?? 25), 25)),
-      })
-      : null;
-    const manualPage = manualCatalogRead && !requestedSkus.length && index
-      ? this.catalogSearch?.page(tenantId, {
+        })
+        : null;
+    const manualPage = manualCatalogRead && !requestedSkus.length && nativeManualPage?.available
+      ? nativeManualPage
+      : manualCatalogRead && !requestedSkus.length && index
+        ? this.catalogSearch?.page(tenantId, {
         query: payload.query ?? payload.filters?.query ?? '',
         semanticQuery: payload.semanticQuery ?? '',
         filters: payload.filters ?? {},
         cursor: payload.cursor ?? null,
         limit: payload.limit ?? 25,
         productFilter: (product) => !catalogCommerceCategory(product),
-      })
-      : null;
+        })
+        : null;
     const matchingRows = (requestedSkus.length
-      ? rows.filter((row) => requestedSkus.includes(String(row.sku)))
+      ? (nativeCatalogResult?.rows ?? rows.filter((row) => requestedSkus.includes(String(row.sku))))
       : manualPage
         ? manualPage.rows
         : indexed
-      ? indexed.rows.map((row) => {
-        const sourceRow = rows.find((candidate) => candidate.sku === row.sku);
-        // Preserve the live/source row shape while carrying index evidence
-        // into the existing resolver contract.
-        return sourceRow
-          ? {
-            ...sourceRow,
-            matchScore: row.matchScore,
-            matchType: row.matchType,
-            semanticScore: row.semanticScore,
-            semanticEvidence: row.semanticEvidence,
-            family: row.family,
-            nodeId: row.nodeId,
-            graphEvidence: row.graphEvidence,
-          }
-          : row;
-      })
+      // Indexed rows already carry the immutable source product shape plus
+      // retrieval evidence. Rebuilding all rows and then doing an O(n*m)
+      // SKU lookup here made every customer query pay for the full catalog.
+      ? indexed.rows
       // Keep the retrieval contract identical while an index is being built
       // or temporarily unavailable. `query` belongs to the payload, whereas
       // the legacy fallback only understands it inside filters.
@@ -265,7 +284,7 @@ export class ToolRegistry {
     const acceptedRows = matchingRows.filter(row => !catalogCommerceCategory(row));
     this.telemetry?.record('catalog', 'read', {
       durationMs: performance.now() - startedAt,
-      status: rows.length ? 'ok' : 'empty',
+      status: sourceRowCount ? 'ok' : 'empty',
       tenantId,
       metadata: {
         source,
@@ -273,15 +292,17 @@ export class ToolRegistry {
         sourceRowCount,
         matchedRowCount: acceptedRows.length,
         restrictedRowCount: matchingRows.length - acceptedRows.length,
-        catalogVersion: index?.catalogVersion ?? null,
+        catalogVersion: nativeMetadata?.catalogVersion ?? index?.catalogVersion ?? null,
         directCandidateCount: indexed?.retrieval?.directCandidateCount ?? 0,
         graphCandidateCount: indexed?.retrieval?.graphCandidateCount ?? 0,
         semanticCandidateCount: indexed?.retrieval?.semanticCandidateCount ?? 0,
         manualCatalogRead,
         returnedRowCount: acceptedRows.length,
-        payloadBytes: catalogLoad?.cacheHit ? 0 : (index ? Buffer.byteLength(JSON.stringify(index), 'utf8') : 0),
+        // Native results are a bounded candidate set.  The legacy fallback
+        // retains this metric only while a tenant awaits its first projection.
+        payloadBytes: nativeMetadata?.available ? 0 : (catalogLoad?.cacheHit ? 0 : (index ? Buffer.byteLength(JSON.stringify(index), 'utf8') : 0)),
         responseBytes: Buffer.byteLength(JSON.stringify(acceptedRows), 'utf8'),
-        cacheHit: catalogLoad?.cacheHit ?? null,
+        cacheHit: nativeMetadata?.available ? null : catalogLoad?.cacheHit ?? null,
         cacheLoadWait: catalogLoad?.cacheLoadWait ?? false,
         pageTotalCount: manualPage?.totalCount ?? acceptedRows.length,
         pageNextCursor: Boolean(manualPage?.nextCursor),
@@ -296,11 +317,20 @@ export class ToolRegistry {
       rows: acceptedRows,
       restrictedItems: matchingRows.filter(row => catalogCommerceCategory(row)).map(row => ({ rawName: row.name, category: catalogCommerceCategory(row) })),
       source,
-      source_revision: index?.catalogVersion ?? `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:unindexed`,
-      catalog_version: index?.catalogVersion ?? null,
+      source_revision: nativeMetadata?.catalogVersion ?? index?.catalogVersion ?? `${live?.spreadsheetId ?? tenant?.config?.googleSheets?.spreadsheetIdRef ?? 'CATALOG_REF'}:unindexed`,
+      catalog_version: nativeMetadata?.catalogVersion ?? index?.catalogVersion ?? null,
       source_range: effectiveRange,
       source_row_count: sourceRowCount,
-      catalog_index: index
+      catalog_index: nativeMetadata?.available
+        ? {
+          status: 'published_native_projection',
+          node_count: null,
+          relation_count: null,
+          vector_count: null,
+          provider: 'postgres_fts_trgm_relations',
+          row_count: nativeMetadata.projectionRowCount,
+        }
+        : index
         ? { status: index.status, node_count: index.nodeCount, relation_count: index.relationCount, vector_count: index.vectorCount, provider: index.vectorProvider }
         : { status: 'unavailable' },
       // The browser receives product fields through ManualOrderService. Keep

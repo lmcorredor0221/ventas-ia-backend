@@ -88,4 +88,48 @@ assert.equal(durableStatus.published.rowCount, 2000);
 
 await worker.stop();
 
+const nativeCalls = [];
+const nativeState = {
+  tenants: [{ id: 'native-demo', config: { googleSheets: { catalogRange: 'Catalogo!A1:P1000' } } }],
+  catalogKnowledgeIndexesByTenant: { 'native-demo': { catalogVersion: 'stale-in-memory-document' } },
+};
+const nativeWorker = new CatalogSyncWorker({
+  store: {
+    getState: () => nativeState,
+    getTenant: async () => nativeState.tenants[0],
+    getPublishedCatalogKnowledgeIndexMetadata: async () => null,
+    mutate: (mutator) => mutator(nativeState),
+    persistTenantCritical: async (tenantId) => { nativeCalls.push(['tenant', tenantId]); },
+    persistCatalogSnapshot: async (payload) => {
+      nativeCalls.push(['snapshot', payload]);
+      return {
+        status: 'published',
+        catalogVersion: payload.index.catalogVersion,
+        nativeProjection: { productCount: rows.length, relationCount: 6 },
+      };
+    },
+  },
+  tools: {
+    liveGoogleContext: async () => ({ spreadsheetId: 'sheet-native-demo', accessToken: 'test' }),
+    readLiveCatalogRows: async () => rows,
+    catalogSearch: {
+      sync: async () => {
+        throw new Error('Native publication must not hydrate the legacy in-memory catalog index.');
+      },
+    },
+  },
+  config: { catalogSyncMode: 'on_demand', catalogSyncWorkerEnabled: true, catalogNativeSearchEnabled: true },
+  events: { emit: () => {} },
+});
+
+const nativeResult = await nativeWorker.syncTenant('native-demo', 'test-native');
+assert.equal(nativeResult.status, 'published');
+assert.equal(nativeResult.nativeProjection, true);
+assert.equal(nativeResult.nativeProjectionRows, rows.length);
+assert.equal(nativeCalls[0][0], 'snapshot');
+assert.equal(nativeState.catalogKnowledgeIndexesByTenant['native-demo'], undefined,
+  'A native publication must release an obsolete full in-memory catalog document.');
+assert.equal(nativeState.catalogIndexStatusByTenant['native-demo'].nativeProjection, true);
+await nativeWorker.stop();
+
 console.log('catalog-sync-worker: ok');
