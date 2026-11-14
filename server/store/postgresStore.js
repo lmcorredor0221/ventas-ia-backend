@@ -27,7 +27,7 @@ const MIGRATIONS_DIR = path.resolve(__dirname, '../db/migrations');
 const SNAPSHOT_IDLE_DELAY_MS = 10_000;
 
 export class PostgresStore {
-  constructor({ databaseUrl, ssl = 'auto', max = 5, incrementalPersistenceEnabled = false }) {
+  constructor({ databaseUrl, ssl = 'auto', max = 5, incrementalPersistenceEnabled = false, catalogRelationSearchV2Enabled = false }) {
     if (!databaseUrl) throw new Error('DATABASE_URL is required when STORAGE_DRIVER=postgres');
     this.pool = new Pool({
       connectionString: databaseUrl,
@@ -40,6 +40,7 @@ export class PostgresStore {
     // mutation serialize the entire app_state document again.
     this.incrementalPersistenceEnabled = true;
     this.legacyIncrementalPersistenceFlag = incrementalPersistenceEnabled === true;
+    this.catalogRelationSearchV2Enabled = catalogRelationSearchV2Enabled === true;
     this.state = null;
     this.saveQueue = Promise.resolve();
     // Tenant configuration must not wait behind unrelated operational writes.
@@ -378,12 +379,15 @@ export class PostgresStore {
       return result;
     }
 
-    const [direct, contextual, relational] = await Promise.all([
+    const needsClosedPackageLane = terms.saleMode === 'weight';
+    const [direct, contextual, relational, closedPackageDirect, closedPackageContextual] = await Promise.all([
       measureStage('direct', () => queryNativeProductCandidates(this.pool, {
         tenantId,
         catalogVersion: metadata.catalogVersion,
         queryText: terms.queryText,
         queryTokens: terms.queryTokens,
+        excludeSkus: payload.excludeSkus,
+        saleMode: terms.saleMode,
         limit,
       })),
       terms.semanticText && terms.semanticText !== terms.queryText
@@ -392,17 +396,49 @@ export class PostgresStore {
           catalogVersion: metadata.catalogVersion,
           queryText: terms.semanticText,
           queryTokens: terms.semanticTokens,
+          excludeSkus: payload.excludeSkus,
+          saleMode: terms.saleMode,
           limit,
         }))
         : Promise.resolve([]),
-      measureStage('relations', () => queryNativeRelationCandidates(this.pool, {
+      measureStage('relations', () => (this.catalogRelationSearchV2Enabled
+        ? queryNativeRelationCandidatesV2
+        : queryNativeRelationCandidates)(this.pool, {
         tenantId,
         catalogVersion: metadata.catalogVersion,
         relationKeys: terms.relationKeys,
         evidenceTokens: terms.evidenceTokens,
+        excludeSkus: payload.excludeSkus,
+        saleMode: terms.saleMode,
         limit,
       })),
+      needsClosedPackageLane
+        ? measureStage('closedPackageDirect', () => queryNativeProductCandidates(this.pool, {
+          tenantId,
+          catalogVersion: metadata.catalogVersion,
+          queryText: terms.queryText,
+          queryTokens: terms.queryTokens,
+          excludeSkus: payload.excludeSkus,
+          // A weight request may be fulfilled by an exact closed package.
+          // Retrieve those unit-sale rows here; the application keeps the
+          // final exact-presentation compatibility check.
+          saleMode: 'unit',
+          limit,
+        }))
+        : Promise.resolve([]),
+      needsClosedPackageLane && terms.semanticText && terms.semanticText !== terms.queryText
+        ? measureStage('closedPackageContextual', () => queryNativeProductCandidates(this.pool, {
+          tenantId,
+          catalogVersion: metadata.catalogVersion,
+          queryText: terms.semanticText,
+          queryTokens: terms.semanticTokens,
+          excludeSkus: payload.excludeSkus,
+          saleMode: 'unit',
+          limit,
+        }))
+        : Promise.resolve([]),
     ]);
+
 
     const bySku = new Map();
     const merge = (candidate, stage) => {
@@ -434,6 +470,11 @@ export class PostgresStore {
     direct.forEach((candidate) => merge(candidate, 'direct'));
     contextual.forEach((candidate) => merge(candidate, 'contextual'));
     relational.forEach((candidate) => merge(candidate, 'relation'));
+    // Keep closed-package candidates in the same ranked pool. The runtime's
+    // `catalogRowsForSaleMode` admits only an exact compatible package, so a
+    // related unit row cannot become a weight-sale option by itself.
+    closedPackageDirect.forEach((candidate) => merge(candidate, 'direct'));
+    closedPackageContextual.forEach((candidate) => merge(candidate, 'contextual'));
 
     const rows = [...bySku.values()]
       .sort((left, right) => Number(right.matchScore ?? 0) - Number(left.matchScore ?? 0)
@@ -452,8 +493,10 @@ export class PostgresStore {
         directCandidateCount: direct.length,
         semanticCandidateCount: contextual.length,
         graphCandidateCount: relational.length,
+        closedPackageCandidateCount: closedPackageDirect.length + closedPackageContextual.length,
         candidateCount: bySku.size,
         graphPaths: relationRows,
+        relationQueryVersion: this.catalogRelationSearchV2Enabled ? 'v2' : 'v1',
         stageDurations,
       }),
     });
@@ -472,6 +515,7 @@ export class PostgresStore {
         directCandidateCount: result?.retrieval?.directCandidateCount ?? 0,
         semanticCandidateCount: result?.retrieval?.semanticCandidateCount ?? 0,
         graphCandidateCount: result?.retrieval?.graphCandidateCount ?? 0,
+        relationQueryVersion: result?.retrieval?.relationQueryVersion ?? 'v1',
         stageDurations,
         // No full immutable graph or catalog document crosses the Postgres →
         // Render boundary in the native path; only bounded candidates do.
@@ -510,6 +554,7 @@ export class PostgresStore {
       queryTokens: terms.evidenceTokens,
       limit,
       offset,
+      saleMode: terms.saleMode,
     });
     const totalCount = Number(result.rows[0]?.total_count ?? 0);
     const rows = result.rows.map((row) => ({
@@ -1400,6 +1445,20 @@ export class PostgresStore {
       const existing = await this.pool.query('SELECT * FROM interaction_offers WHERE id = $1', [offer.id]);
       return interactionOfferRow(existing.rows[0]);
     }, 'interaction offer create');
+  }
+
+  getInteractionOffer(offerId) {
+    return this.pool.query('SELECT * FROM interaction_offers WHERE id = $1', [offerId])
+      .then(result => result.rows[0] ? interactionOfferRow(result.rows[0]) : null);
+  }
+
+  listInteractionOffers({ tenantId, conversationId, status = 'active' } = {}) {
+    return this.pool.query(
+      `SELECT * FROM interaction_offers
+       WHERE tenant_id = $1 AND conversation_id = $2 AND status = $3
+       ORDER BY created_at ASC`,
+      [tenantId, conversationId, status],
+    ).then(result => result.rows.map(interactionOfferRow));
   }
 
   consumeInteractionOffer({ offerId, optionId, tenantId, conversationId }) {
@@ -2794,8 +2853,10 @@ function nativeRetrievalMetadata({
   directCandidateCount = 0,
   semanticCandidateCount = 0,
   graphCandidateCount = 0,
+  closedPackageCandidateCount = 0,
   candidateCount = 0,
   graphPaths = [],
+  relationQueryVersion = 'v1',
   stageDurations = {},
 } = {}) {
   return {
@@ -2805,12 +2866,15 @@ function nativeRetrievalMetadata({
     directCandidateCount,
     semanticCandidateCount,
     graphCandidateCount,
+    closedPackageCandidateCount,
     candidateCount,
     graphPaths,
     stageDurations,
+    saleMode: terms.saleMode ?? null,
     retrievalHintKeys: terms.relationKeys ?? [],
     queryTokens: terms.queryTokens ?? [],
     semanticTokens: terms.semanticTokens ?? [],
+    relationQueryVersion,
   };
 }
 
@@ -2819,6 +2883,8 @@ async function queryNativeProductCandidates(pool, {
   catalogVersion,
   queryText,
   queryTokens = [],
+  excludeSkus = [],
+  saleMode = null,
   limit,
 } = {}) {
   if (!queryText && !queryTokens.length) return [];
@@ -2836,6 +2902,8 @@ async function queryNativeProductCandidates(pool, {
         WHERE p.tenant_id = $1
           AND p.catalog_version = $2
           AND p.active = TRUE
+          AND NOT (p.sku = ANY($5::text[]))
+          AND ${nativeSaleModePredicate('$7', 'p')}
           AND (
             p.search_tsv @@ websearch_to_tsquery('simple', $3)
             OR p.search_text % $3
@@ -2845,8 +2913,8 @@ async function queryNativeProductCandidates(pool, {
      SELECT sku, payload, stock, score
        FROM candidates
       ORDER BY score DESC, stock DESC NULLS LAST, sku ASC
-      LIMIT $5`,
-    [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, limit],
+      LIMIT $6`,
+    [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, excludeSkus ?? [], limit, saleMode],
   );
   return result.rows;
 }
@@ -2856,6 +2924,8 @@ async function queryNativeRelationCandidates(pool, {
   catalogVersion,
   relationKeys = [],
   evidenceTokens = [],
+  excludeSkus = [],
+  saleMode = null,
   limit,
 } = {}) {
   if (!relationKeys.length && !evidenceTokens.length) return [];
@@ -2869,15 +2939,22 @@ async function queryNativeRelationCandidates(pool, {
               array_agg(DISTINCT r.relation_type) AS relation_types,
               array_agg(DISTINCT r.anchor_key) AS anchors
          FROM catalog_search_relations AS r
+         JOIN catalog_search_products AS eligible
+           ON eligible.tenant_id = r.tenant_id
+          AND eligible.catalog_version = r.catalog_version
+          AND eligible.sku = r.product_sku
+          AND eligible.active = TRUE
+          AND ${nativeSaleModePredicate('$7', 'eligible')}
         WHERE r.tenant_id = $1
           AND r.catalog_version = $2
           AND (
             r.anchor_key = ANY($3::text[])
             OR r.anchor_tokens && $4::text[]
           )
+          AND NOT (r.product_sku = ANY($5::text[]))
         GROUP BY r.product_sku
         ORDER BY score DESC, r.product_sku
-        LIMIT $5
+        LIMIT $6
      )
      SELECT p.sku,
             p.payload,
@@ -2891,7 +2968,84 @@ async function queryNativeRelationCandidates(pool, {
         AND p.sku = relevant_relations.product_sku
       WHERE p.active = TRUE
       ORDER BY relevant_relations.score DESC, p.sku ASC`,
-    [tenantId, catalogVersion, relationKeys, evidenceTokens, limit],
+    [tenantId, catalogVersion, relationKeys, evidenceTokens, excludeSkus ?? [], limit, saleMode],
+  );
+  return result.rows;
+}
+
+/**
+ * Index-oriented relation retrieval. It preserves the v1 score and filters,
+ * but separates exact anchor matches from token-overlap matches so PostgreSQL
+ * can use the anchor B-tree and anchor-token GIN predicates before grouping.
+ * It is opt-in because v1 remains the authoritative production path until
+ * equivalence and latency checks have passed.
+ */
+async function queryNativeRelationCandidatesV2(pool, {
+  tenantId,
+  catalogVersion,
+  relationKeys = [],
+  evidenceTokens = [],
+  excludeSkus = [],
+  saleMode = null,
+  limit,
+} = {}) {
+  if (!relationKeys.length && !evidenceTokens.length) return [];
+  const result = await pool.query(
+    `WITH matched_relations AS (
+       SELECT r.product_sku,
+              8 + CASE WHEN r.anchor_tokens && $4::text[] THEN 3 ELSE 0 END AS score,
+              r.relation_type,
+              r.anchor_key
+         FROM catalog_search_relations AS r
+         JOIN catalog_search_products AS eligible
+           ON eligible.tenant_id = r.tenant_id
+          AND eligible.catalog_version = r.catalog_version
+          AND eligible.sku = r.product_sku
+          AND eligible.active = TRUE
+          AND ${nativeSaleModePredicate('$7', 'eligible')}
+        WHERE r.tenant_id = $1
+          AND r.catalog_version = $2
+          AND r.anchor_key = ANY($3::text[])
+          AND NOT (r.product_sku = ANY($5::text[]))
+       UNION ALL
+       SELECT r.product_sku,
+              3 AS score,
+              r.relation_type,
+              r.anchor_key
+         FROM catalog_search_relations AS r
+         JOIN catalog_search_products AS eligible
+           ON eligible.tenant_id = r.tenant_id
+          AND eligible.catalog_version = r.catalog_version
+          AND eligible.sku = r.product_sku
+          AND eligible.active = TRUE
+          AND ${nativeSaleModePredicate('$7', 'eligible')}
+        WHERE r.tenant_id = $1
+          AND r.catalog_version = $2
+          AND r.anchor_tokens && $4::text[]
+          AND NOT (r.product_sku = ANY($5::text[]))
+     ), relevant_relations AS (
+       SELECT product_sku,
+              MAX(score) AS score,
+              array_agg(DISTINCT relation_type) AS relation_types,
+              array_agg(DISTINCT anchor_key) AS anchors
+         FROM matched_relations
+        GROUP BY product_sku
+        ORDER BY score DESC, product_sku
+        LIMIT $6
+     )
+     SELECT p.sku,
+            p.payload,
+            relevant_relations.score,
+            relevant_relations.relation_types AS "relationTypes",
+            relevant_relations.anchors
+       FROM relevant_relations
+       JOIN catalog_search_products AS p
+         ON p.tenant_id = $1
+        AND p.catalog_version = $2
+        AND p.sku = relevant_relations.product_sku
+      WHERE p.active = TRUE
+      ORDER BY relevant_relations.score DESC, p.sku ASC`,
+    [tenantId, catalogVersion, relationKeys, evidenceTokens, excludeSkus ?? [], limit, saleMode],
   );
   return result.rows;
 }
@@ -2903,13 +3057,14 @@ async function queryNativeCatalogPage(pool, {
   queryTokens = [],
   limit,
   offset,
+  saleMode = null,
 } = {}) {
   const hasQuery = Boolean(queryText || queryTokens.length);
   const pageLimitParameter = hasQuery ? '$5' : '$3';
   const pageOffsetParameter = hasQuery ? '$6' : '$4';
   const values = hasQuery
-    ? [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, limit, offset]
-    : [tenantId, catalogVersion, limit, offset];
+    ? [tenantId, catalogVersion, queryText || queryTokens.join(' '), queryTokens, limit, offset, saleMode]
+    : [tenantId, catalogVersion, limit, offset, saleMode];
   const result = await pool.query(
     `WITH candidates AS (
        SELECT p.sku,
@@ -2923,6 +3078,7 @@ async function queryNativeCatalogPage(pool, {
         WHERE p.tenant_id = $1
           AND p.catalog_version = $2
           AND p.active = TRUE
+          AND ${nativeSaleModePredicate(hasQuery ? '$7' : '$5', 'p')}
           ${hasQuery ? `AND (
             p.search_tsv @@ websearch_to_tsquery('simple', $3)
             OR p.search_text % $3
@@ -2936,6 +3092,40 @@ async function queryNativeCatalogPage(pool, {
     values,
   );
   return result;
+}
+
+/**
+ * Applies the tenant's commercial contract before the candidate LIMIT. The
+ * JSONB payload remains the source of truth for compatibility with existing
+ * projections; the application still performs the final strict validation
+ * (including valid weight terms) after retrieval.
+ */
+function nativeSaleModePredicate(parameter, alias = 'p') {
+  const payload = `${alias}.payload`;
+  const commerce = `${payload}->'attributes'->'commerce'`;
+  const saleModes = `COALESCE(${commerce}->'saleModes', '[]'::jsonb)`;
+  return `(
+    ${parameter}::text IS NULL
+    OR (
+      ${parameter}::text = 'amount'
+      AND (
+        ${payload}->>'allowsSaleByAmount' = 'true'
+        OR ${saleModes} ?| ARRAY['amount', 'valor', 'presupuesto']
+      )
+    )
+    OR (
+      ${parameter}::text = 'weight'
+      AND ${saleModes} ?| ARRAY['weight', 'peso', 'granel', 'fraccionado', 'fraccionada']
+    )
+    OR (
+      ${parameter}::text = 'unit'
+      AND (
+        ${commerce} IS NULL
+        OR NOT (${commerce} ? 'saleModes')
+        OR ${saleModes} ?| ARRAY['unit', 'units', 'unidad', 'unidades']
+      )
+    )
+  )`;
 }
 
 function decodeNativeCatalogCursor(cursor, expectedCatalogVersion) {

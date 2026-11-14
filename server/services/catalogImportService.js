@@ -305,10 +305,12 @@ function weightCommerceIssue(row) {
   }
   const saleModes = commerce.saleModes;
   if (saleModes == null) return commerce.weight ? 'commerce.weight requiere saleModes:["weight"].' : null;
-  if (!Array.isArray(saleModes) || saleModes.some((mode) => String(mode).trim().toLowerCase() !== 'weight')) {
-    return 'commerce.saleModes solo admite "weight". La venta por presupuesto se configura en permite_venta_por_valor.';
+  const allowedModes = new Set(['unit', 'units', 'unidad', 'unidades', 'weight', 'peso', 'amount', 'presupuesto', 'valor']);
+  if (!Array.isArray(saleModes) || saleModes.length === 0 || saleModes.some((mode) => !allowedModes.has(String(mode).trim().toLowerCase()))) {
+    return 'commerce.saleModes admite unit, weight y amount (tambien sus alias en espanol).';
   }
-  if (!saleModes.map((mode) => String(mode).trim().toLowerCase()).includes('weight')) return null;
+  const normalizedModes = saleModes.map((mode) => String(mode).trim().toLowerCase());
+  if (!normalizedModes.some((mode) => ['weight', 'peso'].includes(mode))) return null;
   return supportsWeightSale(catalogRowToProduct(row))
     ? null
     : 'La venta por peso requiere commerce.weight con precioPorKg, stockGrams, minGrams e incrementoGrams enteros positivos (stockGrams puede ser 0).';

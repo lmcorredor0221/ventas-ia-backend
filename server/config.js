@@ -89,6 +89,9 @@ export const RUNTIME_CONFIG = {
   // safe rollback path while the migration is rolled out.
   catalogNativeSearchEnabled: process.env.CATALOG_NATIVE_SEARCH_ENABLED === 'true',
   catalogNativeSearchCandidateLimit: Number(process.env.CATALOG_NATIVE_SEARCH_CANDIDATE_LIMIT ?? 40),
+  // Index-oriented relation retrieval remains opt-in until equivalence tests
+  // prove that it preserves candidates and graph evidence for every tenant.
+  catalogRelationSearchV2Enabled: process.env.CATALOG_RELATION_SEARCH_V2_ENABLED === 'true',
   // A 3,000-product graph snapshot is materially larger than a normal cache
   // entry. Bound resident tenant indexes so a busy store cannot evict every
   // other request through memory pressure. Operators may raise this only after

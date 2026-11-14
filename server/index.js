@@ -56,6 +56,7 @@ function createStore(config) {
       databaseUrl: config.databaseUrl,
       ssl: config.databaseSsl,
       incrementalPersistenceEnabled: config.postgresIncrementalPersistenceEnabled,
+      catalogRelationSearchV2Enabled: config.catalogRelationSearchV2Enabled,
     });
   }
   return new JsonStore(config.dataFile);

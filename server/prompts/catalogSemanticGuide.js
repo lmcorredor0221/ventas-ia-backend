@@ -63,11 +63,12 @@ export function buildContextInterpreterPrompt({ text, customerProfile, conversat
   return [
     'Eres el intérprete contextual de una tienda colombiana por WhatsApp.',
     'Tu única responsabilidad es comprender el acto conversacional actual. No busques productos, no selecciones SKU y no calcules precios.',
-    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, explicitHumanRequest, handoffReason, customerDetails, pendingAction, lineUpdates, confidence, greetingReply, customerUnderstanding.',
+    'Devuelve exclusivamente JSON válido con: intent, dialogueAct, productRequestDetected, respondsToPendingQuestion, addsToExistingCart, modifiesExistingCart, explicitHumanRequest, handoffReason, customerDetails, pendingAction, catalogSelectionAction, lineUpdates, confidence, greetingReply, customerUnderstanding.',
     'Intents permitidos: greeting, delivery_order, order_clarification, order_confirmation, catalog_query, discount_request, payment_confirmation, human_handoff.',
     ...catalogSemanticGuide(),
     'Usa el historial reciente y el estado de la conversación. Una respuesta breve puede contestar una pregunta previa, seleccionar una variante, indicar pago, confirmar datos o agregar productos.',
     'pendingAction solo puede ser null, continue_checkout, select_payment, confirm_order, adjust_order o request_human. Elígela por el significado del mensaje junto con la última pregunta y el estado del pedido, no por una palabra aislada.',
+    'catalogSelectionAction solo puede ser null o {lineId, action, reason}. Úsala únicamente cuando el último mensaje del agente haya mostrado alternativas de catálogo para una línea pendiente y el mensaje actual responda contextualmente a esa oferta: action puede ser search_alternatives (buscar opciones distintas) o reject_presented (ninguna de las mostradas). Usa el lineId exacto del borrador. No la uses para una solicitud nueva ni por una palabra aislada; si el contexto no identifica la línea, déjala en null.',
     'Si la canasta ya está resuelta y el último mensaje de la tienda mostró el resumen con la pregunta de agregar o continuar, una aceptación contextual como «confirmado», «listo», «sí, así está», «con eso» o su equivalente debe usar intent:order_clarification y pendingAction:continue_checkout. Eso termina la recolección y permite preguntar el pago; todavía no confirma ni crea el pedido.',
     'Solo usa pendingAction:confirm_order cuando el medio de pago ya está definido y el cliente acepta el resumen final que pregunta si confirma el pedido. Si el cliente quiere cambiar o añadir productos, usa adjust_order; si pide una persona, request_human.',
     'Usa human_handoff únicamente cuando el cliente pida explícitamente hablar con una persona/tienda, exista un reclamo operativo que requiera intervención o una política obligatoria lo exija. Una baja confianza, un producto no encontrado o una ambigüedad de catálogo no son por sí solos una intención human_handoff: conserva la intención comercial y deja la duda para que el catálogo y el diálogo la resuelvan.',
@@ -87,6 +88,35 @@ export function buildContextInterpreterPrompt({ text, customerProfile, conversat
   ].join('\n');
 }
 
+export function buildCatalogAlternativesPrompt({ text, conversation, item, excludedSkus = [], config }) {
+  return [
+    'Eres el intérprete contextual que reformula una búsqueda de alternativas de catálogo para una tienda colombiana por WhatsApp.',
+    'La línea ya fue interpretada y el catálogo ya mostró opciones. Tu única tarea es proponer una consulta mejor enfocada para recuperar otras coincidencias reales.',
+    'Devuelve exclusivamente JSON válido con: query, semanticQuery, filters, retrievalHints, question.',
+    'No selecciones SKU, no inventes productos, no afirmes precio, stock ni disponibilidad y no copies los SKU excluidos en la consulta.',
+    'Conserva los atributos explícitos de la solicitud original (familia, marca, sabor, presentación o medida) como evidencia de búsqueda. Puedes reformular ortografía, modismos y sinónimos de forma contextual, pero no conviertas una hipótesis en un filtro destructivo.',
+    'filters y retrievalHints son objetos JSON pequeños; úsalos solo para evidencia contextual, no para fijar un SKU. question puede ser null; si la búsqueda debe volver a preguntar algo, formula una pregunta breve y específica.',
+    `Identidad y voz: ${JSON.stringify({ name: config?.agentName, tone: config?.tone, language: config?.responseLanguage })}.`,
+    JSON.stringify({
+      message: text ?? '',
+      conversationContext: conversationContextForStage(conversation),
+      orderDraft: conversation?.orderDraft ?? null,
+      pendingLine: {
+        lineId: item?.lineId ?? null,
+        rawName: item?.rawName ?? null,
+        catalogQuery: item?.catalogQuery ?? null,
+        requestedPresentation: item?.requestedPresentation ?? null,
+        requestedMeasure: item?.requestedMeasure ?? null,
+        requestedWeight: item?.requestedWeight ?? null,
+        explicitAttributes: item?.explicitAttributes ?? {},
+        inferredAttributes: item?.inferredAttributes ?? {},
+        priorSearchQueries: item?.catalogSelectionHistory?.searchQueries ?? [],
+      },
+      excludedSkus: [...new Set((excludedSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean))].slice(-100),
+    }),
+  ].join('\n');
+}
+
 export function buildProductInferencePrompt({ text, contextAnalysis, customerProfile, conversation, config, tenantCatalogVocabulary }) {
   return [
     'Eres el intérprete de productos de una tienda colombiana por WhatsApp.',
@@ -94,7 +124,7 @@ export function buildProductInferencePrompt({ text, contextAnalysis, customerPro
     'Devuelve exclusivamente JSON válido con: items, lineUpdates, customerDetails, orderSignals, missingInfo, confidence.',
     'No selecciones SKU, no afirmes disponibilidad y no inventes productos. Entrega hipótesis estructuradas para que una herramienta especializada busque en el catálogo.',
     'Cada item debe tener: lineId, rawText, familyHypothesis, productHypothesis, category, brand, quantity, quantityExplicit, budgetAmount, budgetAmountExplicit, requestedMeasure, requestedWeight, explicitAttributes, inferredAttributes, uncertainties, searchQuery, confidence, skuHint, skuHintSource.',
-    'quantityExplicit es true únicamente cuando el cliente expresó la cantidad en este turno. Si la respuesta solo elige una variante de una línea pendiente, no inventes ni cambies la cantidad: usa quantity:null y quantityExplicit:false.',
+    'quantityExplicit es true únicamente cuando el cliente expresó la cantidad en este turno. Si la respuesta solo elige una variante de una línea pendiente, no inventes ni cambies la cantidad: para una línea por valor conserva quantity:1 como cantidad lógica y para una línea por peso conserva quantity:null; en ambos casos quantityExplicit:false.',
     'budgetAmountExplicit es true únicamente cuando el cliente expresó un monto en este turno. Si la respuesta solo elige una variante de una línea pendiente que ya era por valor, no inventes ni elimines ese monto: usa budgetAmount:null y budgetAmountExplicit:false.',
     ...catalogSemanticGuide(),
     'Una presentación, marca, sabor o atributo escrito explícitamente es una restricción de búsqueda; lo inferido es evidencia, no filtro absoluto.',

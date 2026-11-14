@@ -150,9 +150,11 @@ export function buildCatalogNativeProjection({ tenantId, catalogVersion, product
  */
 export function buildCatalogNativeSearchTerms({ query = '', semanticQuery = '', retrievalHints = {}, filters = {} } = {}) {
   const explicitSku = String(filters?.sku ?? '').trim() || null;
-  const hintValues = flattenValues(retrievalHints);
+  const saleMode = normalizeCatalogSaleMode(retrievalHints?.saleMode ?? filters?.saleMode);
+  const { saleMode: _ignoredHintSaleMode, ...searchHints } = retrievalHints ?? {};
+  const hintValues = flattenValues(searchHints);
   const filterValues = Object.entries(filters ?? {})
-    .filter(([key]) => key !== 'sku')
+    .filter(([key]) => key !== 'sku' && key !== 'saleMode')
     .flatMap(([, value]) => flattenValues(value));
   const queryText = normalizeCatalogSearchText(query);
   const semanticText = normalizeCatalogSearchText(semanticQuery);
@@ -175,6 +177,7 @@ export function buildCatalogNativeSearchTerms({ query = '', semanticQuery = '', 
   ].filter(Boolean))].slice(0, 80);
   return {
     explicitSku,
+    saleMode,
     queryText,
     semanticText,
     evidenceText,
@@ -183,6 +186,20 @@ export function buildCatalogNativeSearchTerms({ query = '', semanticQuery = '', 
     evidenceTokens,
     relationKeys,
   };
+}
+
+/**
+ * Commercial mode is a retrieval constraint, not textual evidence. Keeping
+ * it separate prevents terms such as "weight" from changing lexical/graph
+ * ranking while still allowing PostgreSQL to exclude incompatible rows before
+ * its candidate LIMIT is applied.
+ */
+export function normalizeCatalogSaleMode(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['unit', 'units', 'unidad', 'unidades'].includes(normalized)) return 'unit';
+  if (['weight', 'peso', 'granel', 'fraccionado', 'fraccionada'].includes(normalized)) return 'weight';
+  if (['amount', 'valor', 'presupuesto', 'budget'].includes(normalized)) return 'amount';
+  return null;
 }
 
 export function compactCatalogVocabularyFromRows({ catalogVersion = null, rows = [] } = {}) {

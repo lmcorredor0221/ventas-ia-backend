@@ -1,3 +1,5 @@
+import { supportsAmountSale } from '../domain/catalogCommerce.js';
+
 /**
  * Reconciles catalog evidence after the existing parallel searches.
  *
@@ -203,11 +205,11 @@ function selectCandidate(item, selected, evidence) {
 // guard over catalog evidence, not text interpretation or a price/weight
 // conversion; distinct brands, flavours or varieties still require a choice.
 function isAmountSalePresentationVariantSet(candidates = [], selected, item = {}) {
-  if (!isPositiveAmount(item.budgetAmount) || !selected?.allowsSaleByAmount || candidates.length < 2) return false;
+  if (!isPositiveAmount(item.budgetAmount) || !supportsAmountSale(selected) || candidates.length < 2) return false;
   const selectedIdentity = amountSaleProductIdentity(selected);
   if (!selectedIdentity) return false;
   return candidates.every((candidate) => (
-    candidate?.allowsSaleByAmount === true
+    supportsAmountSale(candidate)
     && amountSaleProductIdentity(candidate) === selectedIdentity
   ));
 }
@@ -216,7 +218,7 @@ function canonicalAmountSaleReference(candidates = [], item = {}) {
   if (!isPositiveAmount(item.budgetAmount) || !candidates.length) return null;
   const firstIdentity = amountSaleProductIdentity(candidates[0]);
   if (!firstIdentity || !candidates.every((candidate) => (
-    candidate?.allowsSaleByAmount === true
+    supportsAmountSale(candidate)
     && amountSaleProductIdentity(candidate) === firstIdentity
   ))) return null;
   // The reference only supports the request while its catalog stock says it

@@ -66,9 +66,17 @@ export function buildCatalogKnowledgeIndex({ tenantId, rows = [], sourceRef = nu
     if (presentationNode) addRelation(relations, CATALOG_RELATION_TYPES.hasPresentation, productNode, presentationNode, {}, relationKeys);
     for (const [key, value] of Object.entries(product.attributes ?? {})) {
       if (key === 'commerce' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const modeLabels = { unit: 'unidad', units: 'unidad', unidad: 'unidad', unidades: 'unidad', weight: 'peso', peso: 'peso', amount: 'presupuesto', presupuesto: 'presupuesto', valor: 'presupuesto' };
         for (const mode of Array.isArray(value.saleModes) ? value.saleModes : []) {
-          if (String(mode).trim().toLowerCase() !== 'weight') continue;
-          const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, 'modalidad_venta:peso', { key: 'modalidad_venta', value: 'peso' });
+          const label = modeLabels[String(mode).trim().toLowerCase()];
+          if (!label) continue;
+          const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, `modalidad_venta:${label}`, { key: 'modalidad_venta', value: label });
+          addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode, {}, relationKeys);
+        }
+        const configuredModeKeys = new Set((Array.isArray(value.saleModes) ? value.saleModes : [])
+          .map((mode) => String(mode).trim().toLowerCase()));
+        if (product.allowsSaleByAmount === true && !['amount', 'presupuesto', 'valor'].some((mode) => configuredModeKeys.has(mode))) {
+          const attributeNode = addNode(CATALOG_NODE_TYPES.attribute, 'modalidad_venta:presupuesto', { key: 'modalidad_venta', value: 'presupuesto' });
           addRelation(relations, CATALOG_RELATION_TYPES.hasAttribute, productNode, attributeNode, {}, relationKeys);
         }
         continue;
@@ -283,6 +291,7 @@ export function searchCatalogKnowledgeIndex(index, {
   recommendation = false,
   filters = {},
   retrievalHints = {},
+  excludeSkus = [],
   limit = 25,
   includeRelations = true,
 } = {}) {
@@ -291,7 +300,7 @@ export function searchCatalogKnowledgeIndex(index, {
       catalogVersion: null,
       rows: [],
       relations: [],
-      retrieval: { directCandidateCount: 0, graphCandidateCount: 0, candidateCount: 0, graphPaths: [] },
+      retrieval: { directCandidateCount: 0, graphCandidateCount: 0, candidateCount: 0, excludedSkuCount: 0, graphPaths: [] },
     };
   }
   const normalizedQuery = normalizeText(query);
@@ -299,13 +308,15 @@ export function searchCatalogKnowledgeIndex(index, {
   const queryTokens = tokenize(normalizedQuery);
   const semanticTokens = tokenize(normalizedSemanticQuery);
   const runtime = prepareCatalogKnowledgeRuntime(index);
+  const excludedSkuSet = new Set((excludeSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean));
   // A semantic query is only additional evidence. It must not silently turn
   // an exact/product lookup into a recommendation search. The planner marks
   // recommendation intent explicitly so concrete requests keep their
   // presentation, attribute constraints and ranking behavior unchanged.
   const recommendationMode = Boolean(recommendation && semanticTokens.length);
   const compatibleProducts = runtime.products
-    .filter((product) => productMatchesFilters(product, filters));
+    .filter((product) => productMatchesFilters(product, filters))
+    .filter((product) => !excludedSkuSet.has(String(product?.sku ?? '').trim()));
   const directProducts = catalogDirectCandidates(runtime, {
     queryTokens,
     semanticTokens,
@@ -385,6 +396,7 @@ export function searchCatalogKnowledgeIndex(index, {
       compatibleProductCount: compatibleProducts.length,
       graphCandidateCount: graphEvidence.size,
       candidateCount: bySku.size,
+      excludedSkuCount: excludedSkuSet.size,
       semanticCandidateCount: directCandidates.filter((row) => row.semanticEvidence || row.semanticScore > 0).length,
       retrievalHintKeys: Object.keys(retrievalHints ?? {}).filter((key) => retrievalHints[key] !== undefined && retrievalHints[key] !== null && retrievalHints[key] !== ''),
       recommendation: recommendationMode,

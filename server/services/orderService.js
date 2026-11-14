@@ -3,7 +3,7 @@ import { EDITABLE_ORDER_STATUSES, assertOrderEditVersion, assertOrderEditPolicy,
 import { deliveryPolicyForTenant, evaluateDeliveryPolicy, assertDeliveryPricing, deliveryPolicyRevision, deliveryBasketRevision } from '../domain/deliveryPolicy.js';
 import { paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { catalogCommerceCategory, assertCommerceOrderAllowed } from '../domain/whatsappCommercePolicy.js';
-import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
+import { normalizeRequestedWeight, quoteWeightSale, supportsAmountSale, supportsUnitSale, supportsWeightSale } from '../domain/catalogCommerce.js';
 import { applyVariableFulfillmentAdjustment, effectiveLineTotal, initializeVariableEstimate } from '../domain/variablePricing.js';
 import { summarizeCustomerOrderChange, summarizeVariablePricingChange } from '../domain/orderCustomerChange.js';
 
@@ -107,20 +107,25 @@ export class OrderService {
       const amountSale = line.saleMode === 'amount';
       const weightSale = line.saleMode === 'weight';
       if (amountSale && weightSale) throw Object.assign(new Error('El producto no puede venderse por peso y por presupuesto a la vez.'), { code: 'invalid_sale_mode', statusCode: 422 });
-      const quantity = amountSale || weightSale ? null : Number(line.quantity);
+      // An amount-sale line has one logical line quantity. The requested
+      // amount remains the commercial total and is never converted to a
+      // physical quantity. Accept null for backward compatibility with old
+      // drafts, but persist the normalized contract as quantity=1.
+      const quantity = amountSale ? 1 : weightSale ? null : Number(line.quantity);
       const requestedAmount = amountSale ? Number(line.requestedAmount) : null;
       const requestedWeight = weightSale
         ? normalizeRequestedWeight(line.requestedWeight ?? (line.requestedWeightGrams != null
           ? { amount: line.requestedWeightGrams, unit: 'g' } : null))
         : null;
-      if (amountSale && (product.allowsSaleByAmount !== true || !Number.isSafeInteger(requestedAmount) || requestedAmount < 1 || line.quantity != null)) {
+      if (amountSale && (!supportsAmountSale(product) || !Number.isSafeInteger(requestedAmount) || requestedAmount < 1
+        || (line.quantity != null && Number(line.quantity) !== 1))) {
         throw Object.assign(new Error(`Este producto no permite solicitar un valor específico: ${product.name}.`), { code: 'invalid_sale_mode', statusCode: 422 });
       }
       const weightQuote = weightSale ? quoteWeightSale(product, requestedWeight) : null;
       if (weightSale && (!supportsWeightSale(product) || !weightQuote || !weightQuote.available)) {
         throw Object.assign(new Error(`Este producto no permite venderse por el peso solicitado: ${product.name}.`), { code: 'invalid_weight_sale', statusCode: 422 });
       }
-      if (!amountSale && !weightSale && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999)) throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'invalid_order_quantity', statusCode: 422 });
+      if (!amountSale && !weightSale && (!supportsUnitSale(product) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 999)) throw Object.assign(new Error(`Revisa la cantidad de ${product.name}.`), { code: 'invalid_order_quantity', statusCode: 422 });
       if (!Number.isInteger(product.price) || product.price <= 0 || !Number.isFinite(product.stock) || (!amountSale && !weightSale && product.stock < quantity)) throw Object.assign(new Error(`Revisa el precio o las existencias de ${product.name}.`), { code: 'invalid_order_product', statusCode: 422 });
       if (!weightSale && line.unitPrice !== undefined && Number(line.unitPrice) !== product.price) throw Object.assign(new Error(`Cambió el precio de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
       if (weightSale && line.unitPricePerKg !== undefined && Number(line.unitPricePerKg) !== weightQuote.pricePerKg) throw Object.assign(new Error(`Cambió el precio por kilo de ${product.name}. Recarga el pedido.`), { code: 'order_price_changed', statusCode: 409 });
@@ -667,13 +672,13 @@ function buildManualReviewOrderLine({ product, reviewLine = {}, input = {} }) {
       ?? (input.requestedWeightGrams != null ? { amount: input.requestedWeightGrams, unit: 'g' } : null),
   );
   const requestedAmount = Number(input.requestedAmount ?? reviewLine.budgetAmount ?? 0);
-  if (Number.isSafeInteger(requestedAmount) && requestedAmount > 0 && product.allowsSaleByAmount === true) {
+  if (Number.isSafeInteger(requestedAmount) && requestedAmount > 0 && supportsAmountSale(product)) {
     return initializeVariableEstimate({
       sku: product.sku,
       name: product.name,
       presentation: product.presentation,
       saleMode: 'amount',
-      quantity: null,
+      quantity: 1,
       requestedAmount,
       unitPrice: product.price,
       lineTotal: requestedAmount,

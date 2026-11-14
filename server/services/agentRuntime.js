@@ -7,8 +7,10 @@ import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant,
 import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
 import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
 import { CatalogResolutionService } from './catalogResolutionService.js';
-import { normalizeRequestedWeight, quoteWeightSale, supportsWeightSale } from '../domain/catalogCommerce.js';
+import { normalizeRequestedWeight, quoteWeightSale, supportsAmountSale, supportsUnitSale, supportsWeightSale, weightGramsForValue } from '../domain/catalogCommerce.js';
 import { VARIABLE_PRICE_NOTICE, basketHasVariablePricing } from '../domain/variablePricing.js';
+import { agentDisplayNameForTenant } from '../domain/agentIdentity.js';
+import { buildCatalogSemanticQuery } from './llmPlanner.js';
 
 export class AgentRuntime {
   constructor({ store, events, tools, planner, usage, config, orders = null, telemetry = null, catalogResolver = null }) {
@@ -277,6 +279,16 @@ export class AgentRuntime {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
         reason: 'Quedaron únicamente los productos permitidos. Usa «Continuar sin ellos» para revisarlos o «Cancelar solicitud».' });
     }
+    if (plan.catalogSelectionAction) {
+      const selectionResult = await this.handleCatalogSelectionTextAction({
+        tenantId,
+        conversationId,
+        normalized,
+        current: currentConversation,
+        action: plan.catalogSelectionAction,
+      });
+      if (selectionResult) return selectionResult;
+    }
     if (normalized.messageType === 'image' || normalized.mediaRef || plan.intent === 'human_handoff') {
       const handoff = await this.tools.call('human_handoff', tenantId, conversationId, {
         reason: normalized.messageType === 'image' || normalized.mediaRef ? 'Clasificar imagen enviada por cliente'
@@ -344,7 +356,15 @@ export class AgentRuntime {
   async handleGreeting({ tenantId, conversationId, normalized, plan, currentConversation }) {
     // The same interpretation call writes the greeting in the tenant's voice.
     // Keep any active draft, quote, pending interaction and stage untouched.
-    const text = plan.greetingReply || '¡Hola! ¿En qué te puedo ayudar?';
+    const tenant = await this.getTenant(tenantId);
+    const agentName = agentDisplayNameForTenant(tenant);
+    const firstIntroduction = !currentConversation?.agentIntroduction
+      && !(currentConversation?.messages ?? []).some((message) => message.role === 'agent');
+    const providerText = plan.greetingReply || '¡Hola! ¿En qué te puedo ayudar?';
+    const greetingSource = plan.greetingReply ? 'llm' : 'runtime_fallback';
+    const text = firstIntroduction && !containsName(providerText, agentName)
+      ? `¡Hola! Soy ${agentName}. ¿En qué te puedo ayudar?`
+      : providerText;
     if (!currentConversation?.orderDraft && !currentConversation?.orderId) {
       await this.patchConversation(conversationId, {
         status: 'live', stage: 'conversation', zone: 'agent',
@@ -354,9 +374,25 @@ export class AgentRuntime {
     await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
       action: 'send_session_message', wa_id: normalized.waId, text,
     });
+    if (firstIntroduction) {
+      await this.patchConversation(conversationId, {
+        agentIntroduction: { name: agentName, sentAt: new Date().toISOString(), source: greetingSource },
+      });
+    }
     this.events.emit({ type: 'agent.greeting.replied', tenantId, conversationId,
       detail: 'Saludo atendido sin buscar productos ni modificar el pedido.',
-      metadata: { traceId: normalized.traceId, executionMode: plan.executionMode } });
+      metadata: { traceId: normalized.traceId, executionMode: plan.executionMode, firstIntroduction, agentName } });
+    this.telemetry?.record('agent', 'greeting', {
+      tenantId,
+      traceId: normalized.traceId ?? null,
+      metadata: {
+        conversationId,
+        agentName,
+        firstIntroduction,
+        introductionIncluded: firstIntroduction,
+        replySource: greetingSource,
+      },
+    });
     return { summary: 'Greeting answered', plan };
   }
 
@@ -910,9 +946,19 @@ export class AgentRuntime {
       replacedLineIds: (plan.lineUpdates ?? []).filter((update) => update.operation === 'replace').map((update) => update.lineId),
     });
     const requiresHumanResolution = needsMandatoryHumanProductResolution(missingFields);
+    // A catalog line can be unresolved because the requested commercial mode
+    // is not supported by any retrieved reference (for example, a packaged
+    // rice product requested by weight). That is a terminal product gap for
+    // this turn even though it is represented as `commercial_review:*`, not
+    // `product:*`. Keep the explicit partial-order decision available while
+    // preserving the existing clarification path for ordinary ambiguities.
+    const hasTerminalCommercialGap = hasTerminalCommercialReviewGap(activeOrderItems, missingFields)
+      && !hasPendingCatalogSelection(activeOrderItems);
     const awaitsPartialOrderDecision = !requiresHumanResolution
-      && hasUnresolvedProductMissingField(missingFields)
-      && clarificationState?.exhausted === true;
+      && (
+        (hasUnresolvedProductMissingField(missingFields) && clarificationState?.exhausted === true)
+        || hasTerminalCommercialGap
+      );
     const manualProductReview = awaitsPartialOrderDecision
       ? buildManualProductReview({ previous: previousDraft?.manualProductReview, items: activeOrderItems, missingFields, clarificationState })
       : retainActiveManualReview(previousDraft?.manualProductReview, effectiveOrderItems);
@@ -1327,7 +1373,19 @@ export class AgentRuntime {
       if ((isPositiveUnitQuantity(item.quantity) || isWeightSaleRequest(item)) && item.available === false) draft.missingFields.push(`stock:${item.catalogQuery}`);
     }
     draft.missingFields = normalizeOperationalMissingFields(draft.missingFields);
-    if ((hasUnresolvedProductMissingField(draft.missingFields) || needsMandatoryHumanProductResolution(draft.missingFields)) && !preserveExistingCatalogSelections) {
+    // A catalog selection callback can preserve the rest of the basket while
+    // leaving a terminal commercial gap (for example a packaged product
+    // requested by weight).  That gap is not an ordinary product
+    // clarification, but it still must pass through the same checkout/partial
+    // decision orchestration so the customer can choose whether to continue
+    // with the resolved lines.  Keep the existing preservation behavior for
+    // ordinary pending product clarifications.
+    const hasTerminalCommercialGap = hasTerminalCommercialReviewGap(draft.items, draft.missingFields)
+      && !hasPendingCatalogSelection(draft.items);
+    if ((hasUnresolvedProductMissingField(draft.missingFields)
+      || needsMandatoryHumanProductResolution(draft.missingFields)
+      || hasTerminalCommercialGap)
+      && (!preserveExistingCatalogSelections || hasTerminalCommercialGap)) {
       return this.handleDeliveryOrder({ tenantId, conversationId, normalized, customerProfile: nextProfile,
         catalogTargetLineIds,
         plan: { ...plan, order: draft, missingFields: draft.missingFields },
@@ -1951,7 +2009,11 @@ export class AgentRuntime {
 
   async createCatalogSelectionOffer({ tenantId, conversationId, checkout, items }) {
     if (!this.store.createInteractionOffer || checkout?.phase !== 'collecting') return null;
-    const item = (items ?? []).find((candidate) => (
+    const currentConversation = await this.getConversation(conversationId);
+    const sourceItems = (items ?? []).length
+      ? items
+      : (currentConversation?.orderDraft?.items ?? []);
+    const item = sourceItems.find((candidate) => (
       candidate.selectionStatus === 'pending' && (candidate.catalogCandidates?.length ?? 0) > 0
     ));
     if (!item) return null;
@@ -1959,16 +2021,66 @@ export class AgentRuntime {
     // need their presentation and price to remain distinguishable, so using
     // reply buttons (whose title is capped at 20 characters) is unsuitable
     // even when there are only two or three variants.
-    const candidates = item.catalogCandidates.slice(0, 10);
+    const history = normalizeCatalogSelectionHistory(item.catalogSelectionHistory);
+    const previouslyShown = new Set(history.seenCandidateSkus);
+    const candidates = item.catalogCandidates
+      .filter((candidate) => !previouslyShown.has(String(candidate?.sku ?? '').trim()))
+      .slice(0, 8);
+    // A previously persisted offer can contain only candidates that have
+    // already been shown. In that case reusing them would create a loop; the
+    // caller must search for alternatives or continue with the pending line.
+    if (!candidates.length) return null;
     const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const optionTitles = catalogListOptionTitles(candidates);
-    const options = candidates.map((candidate, index) => ({
+    const productOptions = candidates.map((candidate, index) => ({
       id: `vi:${offerId}:${index + 1}`,
       title: optionTitles[index],
       description: catalogListOptionDescription(candidate),
       action: 'select_catalog_product',
       value: JSON.stringify({ basketKey: checkout.basketKey, lineId: item.lineId, sku: candidate.sku }),
     }));
+    const controlOptions = [
+      {
+        id: `vi:${offerId}:9`,
+        title: 'Buscar otras opciones',
+        action: 'search_catalog_alternatives',
+        value: JSON.stringify({
+          basketKey: checkout.basketKey,
+          lineId: item.lineId,
+          offeredSkus: candidates.map((candidate) => candidate.sku),
+        }),
+      },
+      {
+        id: `vi:${offerId}:10`,
+        title: 'Ninguna de estas',
+        action: 'reject_catalog_candidates',
+        value: JSON.stringify({
+          basketKey: checkout.basketKey,
+          lineId: item.lineId,
+          offeredSkus: candidates.map((candidate) => candidate.sku),
+        }),
+      },
+    ];
+    const options = [...productOptions, ...controlOptions];
+    const nextHistory = {
+      attempts: history.attempts + 1,
+      seenCandidateSkus: [...new Set([...history.seenCandidateSkus, ...candidates.map((candidate) => String(candidate.sku))])].slice(-100),
+      searchQueries: [...new Set([...history.searchQueries, String(item.catalogQuery ?? item.rawName ?? '').trim()].filter(Boolean))].slice(-10),
+      lastOfferId: offerId,
+      exhaustedAt: null,
+    };
+    // Keep the same object graph that handleOrderClarification persists below.
+    // Without this in-memory update, the later full-draft patch could overwrite
+    // the offer history and make the next response show the same candidates.
+    item.catalogSelectionHistory = nextHistory;
+    await this.patchConversation(conversationId, {
+      orderDraft: {
+        ...(currentConversation?.orderDraft ?? checkout?.orderDraft ?? {}),
+        items: sourceItems.map((candidate) => candidate.lineId === item.lineId
+          ? { ...candidate, catalogSelectionHistory: nextHistory }
+          : candidate),
+      },
+    });
     const offer = await this.store.createInteractionOffer({
       id: offerId,
       tenantId,
@@ -1976,6 +2088,24 @@ export class AgentRuntime {
       purpose: 'catalog_selection',
       options,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const offerMetadata = {
+      lineId: item.lineId,
+      candidateCount: candidates.length,
+      candidateSkus: candidates.map((candidate) => String(candidate.sku)),
+      attempt: nextHistory.attempts,
+      controlsIncluded: true,
+    };
+    this.events.emit({
+      type: 'catalog.selection_offer.created',
+      tenantId,
+      conversationId,
+      detail: 'Catalog selection offer created',
+      metadata: offerMetadata,
+    });
+    this.telemetry?.record('catalog', 'selection_offer', {
+      tenantId,
+      metadata: offerMetadata,
     });
     return {
       offer,
@@ -1987,6 +2117,42 @@ export class AgentRuntime {
         rows: options.map(({ id, title, description }) => ({ id, title, description })),
       },
     };
+  }
+
+  async handleCatalogSelectionTextAction({ tenantId, conversationId, normalized, current, action }) {
+    const lineId = String(action?.lineId ?? '').trim();
+    const item = (current?.orderDraft?.items ?? []).find((candidate) => candidate.lineId === lineId);
+    const offerId = String(item?.catalogSelectionHistory?.lastOfferId ?? '').trim();
+    if (!item || item.selectionStatus !== 'pending' || !offerId || typeof this.store.getInteractionOffer !== 'function') {
+      return null;
+    }
+    const offer = await this.store.getInteractionOffer(offerId);
+    if (!offer || offer.status !== 'active' || offer.purpose !== 'catalog_selection') return null;
+    const expectedAction = action.action === 'search_alternatives'
+      ? 'search_catalog_alternatives'
+      : action.action === 'reject_presented'
+        ? 'reject_catalog_candidates'
+        : null;
+    const option = (offer.options ?? []).find((candidate) => candidate.action === expectedAction);
+    if (!option) return null;
+    const consumed = await this.store.consumeInteractionOffer({
+      offerId,
+      optionId: option.id,
+      tenantId,
+      conversationId,
+    });
+    if (consumed.status !== 'consumed') {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: consumed.status === 'expired'
+          ? 'Esa lista ya venció. Te mostraré nuevamente las alternativas disponibles.'
+          : 'Esa lista ya fue usada. Te mostraré las alternativas disponibles para continuar.' });
+    }
+    const selection = parseCatalogSelectionValue(option.value);
+    if (!selection) return null;
+    if (expectedAction === 'reject_catalog_candidates') {
+      return this.rejectCatalogCandidates({ tenantId, conversationId, normalized, current, selection });
+    }
+    return this.searchCatalogAlternatives({ tenantId, conversationId, normalized, current, selection });
   }
 
   async createPartialOrderDecisionOffer({ tenantId, conversationId, checkout, items }) {
@@ -2086,7 +2252,7 @@ export class AgentRuntime {
       reason: 'El pedido cambió. Usa «Continuar sin ellos» para revisar únicamente los productos permitidos.' });
     if (result.option?.action === 'select_catalog_product') {
       const selection = parseCatalogSelectionValue(result.option.value);
-      const currentBasket = basketKey(current?.orderDraft);
+      const currentBasket = persistedBasketKey(current?.orderDraft);
       const selectedItem = current?.orderDraft?.items?.find((item) => item.lineId === selection?.lineId);
       const selectedProduct = selectedItem?.catalogCandidates?.find((candidate) => String(candidate.sku) === String(selection?.sku));
       if (!selection || selection.basketKey !== currentBasket || !selectedItem || !selectedProduct) {
@@ -2107,13 +2273,17 @@ export class AgentRuntime {
             // list is one package when the customer had not already stated a
             // unit quantity; it must not remain as "cantidad pendiente".
             // Conversely, amount and configured weight sales retain their
-            // original commercial instruction rather than becoming units.
+            // original commercial instruction. Amount sales use one logical
+            // line quantity; that is not a conversion of the budget into
+            // physical units, grams, or kilos.
             const requestedWeight = normalizeRequestedWeight(item.requestedWeight);
             const keepsWeightSale = Boolean(requestedWeight && supportsWeightSale(selectedProduct));
             const keepsAmountSale = isPositiveAmount(item.budgetAmount);
-            const quantity = keepsWeightSale || keepsAmountSale
+            const quantity = keepsWeightSale
               ? null
-              : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : 1;
+              : keepsAmountSale
+                ? 1
+                : isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : 1;
             return normalizeOperationalOrderItem({
               ...item,
               product: selectedProduct,
@@ -2137,8 +2307,27 @@ export class AgentRuntime {
         preserveExistingCatalogSelections: true,
         plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] } });
     }
+    if (['search_catalog_alternatives', 'reject_catalog_candidates'].includes(result.option?.action)) {
+      const selection = parseCatalogSelectionValue(result.option.value);
+      const currentBasket = persistedBasketKey(current?.orderDraft);
+      const selectedItem = current?.orderDraft?.items?.find((item) => item.lineId === selection?.lineId);
+      const offeredSkus = [...new Set((selection?.offeredSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean))];
+      const validOffer = selection
+        && selection.basketKey === currentBasket
+        && selectedItem?.selectionStatus === 'pending'
+        && offeredSkus.length > 0
+        && offeredSkus.every((sku) => (selectedItem.catalogCandidates ?? []).some((candidate) => String(candidate?.sku) === sku));
+      if (!validOffer) {
+        return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+          reason: 'El catálogo cambió desde esas opciones. Te mostraré nuevamente las alternativas disponibles.' });
+      }
+      if (result.option.action === 'reject_catalog_candidates') {
+        return this.rejectCatalogCandidates({ tenantId, conversationId, normalized, current, selection });
+      }
+      return this.searchCatalogAlternatives({ tenantId, conversationId, normalized, current, selection });
+    }
     if (['continue_checkout', 'confirm_order', 'continue_partial_order', 'continue_clarifying_products'].includes(result.option?.action)
-      && result.option.value !== basketKey(current?.orderDraft)) {
+      && result.option.value !== persistedBasketKey(current?.orderDraft)) {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
         reason: 'El pedido cambió desde ese resumen. Revisa el último total y usa sus opciones para continuar.' });
     }
@@ -2180,6 +2369,146 @@ export class AgentRuntime {
     await this.handleOrderClarification({ tenantId, conversationId, normalized, customerProfile: lookup.profile,
       plan: { intent: 'order_clarification', order: { paymentMethod: result.option.value } } });
     return { summary: 'Interactive payment method recorded', interaction: result.option };
+  }
+
+  async rejectCatalogCandidates({ tenantId, conversationId, normalized, current, selection }) {
+    const offeredSkus = [...new Set((selection?.offeredSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean))];
+    const updatedDraft = {
+      ...current.orderDraft,
+      items: (current.orderDraft.items ?? []).map((item) => item.lineId === selection.lineId
+        ? normalizeOperationalOrderItem({
+          ...item,
+          product: null,
+          catalogCandidates: [],
+          presentationOptions: [],
+          selectionQuestion: null,
+          selectionStatus: 'removed',
+          removedByCustomer: true,
+          catalogSelectionHistory: {
+            ...normalizeCatalogSelectionHistory(item.catalogSelectionHistory),
+            exhaustedAt: new Date().toISOString(),
+          },
+        })
+        : item),
+    };
+    this.events.emit({
+      type: 'catalog.selection_rejected',
+      tenantId,
+      conversationId,
+      detail: 'Customer rejected presented catalog candidates',
+      metadata: { lineId: selection?.lineId ?? null, offeredSkus },
+    });
+    this.telemetry?.record('catalog', 'selection_rejected', {
+      tenantId,
+      traceId: normalized?.traceId ?? null,
+      metadata: { lineId: selection?.lineId ?? null, offeredSkus },
+    });
+    const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+      wa_id: normalized.waId, profile_name: normalized.profileName,
+    });
+    return this.handleOrderClarification({
+      tenantId,
+      conversationId,
+      normalized,
+      customerProfile: lookup.profile,
+      preserveExistingCatalogSelections: true,
+      plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] },
+    });
+  }
+
+  async searchCatalogAlternatives({ tenantId, conversationId, normalized, current, selection }) {
+    const startedAt = performance.now();
+    const item = (current?.orderDraft?.items ?? []).find((candidate) => candidate.lineId === selection.lineId);
+    if (!item) return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+      reason: 'El producto pendiente ya no está disponible en este pedido. Escríbeme nuevamente lo que necesitas.' });
+    const history = normalizeCatalogSelectionHistory(item.catalogSelectionHistory);
+    const excludedSkus = history.seenCandidateSkus;
+    const reformulationStartedAt = performance.now();
+    const reformulated = typeof this.planner?.reformulateCatalogAlternatives === 'function'
+      ? await this.planner.reformulateCatalogAlternatives({
+        tenantId,
+        conversationId,
+        normalized,
+        conversation: current,
+        item,
+        excludedSkus,
+      })
+      : { query: item.catalogQuery ?? item.rawName ?? '', semanticQuery: item.catalogQuery ?? item.rawName ?? '' };
+    const reformulationDurationMs = performance.now() - reformulationStartedAt;
+    const retrievalStartedAt = performance.now();
+    const catalog = await this.tools.call('google_sheets_read_table', tenantId, conversationId, {
+      query: reformulated.query ?? item.catalogQuery ?? item.rawName ?? '',
+      semanticQuery: reformulated.semanticQuery ?? reformulated.query ?? item.catalogQuery ?? item.rawName ?? '',
+      filters: reformulated.filters ?? {},
+      retrievalHints: reformulated.retrievalHints ?? {},
+      excludeSkus: excludedSkus,
+      limit: 40,
+      cache_policy: 'short_ttl',
+    });
+    const retrievalDurationMs = performance.now() - retrievalStartedAt;
+    const excluded = new Set(excludedSkus);
+    const candidates = (catalog.rows ?? [])
+      .filter((candidate) => candidate?.sku && !excluded.has(String(candidate.sku)))
+      .slice(0, 40);
+    const searchMetadata = {
+      lineId: item.lineId,
+      excludedSkuCount: excluded.size,
+      candidateCount: candidates.length,
+      result: candidates.length ? 'offered' : 'exhausted',
+      reformulationDurationMs: Number(reformulationDurationMs.toFixed(2)),
+      retrievalDurationMs: Number(retrievalDurationMs.toFixed(2)),
+    };
+    this.events.emit({
+      type: 'catalog.selection_alternative_search',
+      tenantId,
+      conversationId,
+      detail: candidates.length ? 'New catalog alternatives recovered' : 'Catalog alternatives exhausted',
+      metadata: searchMetadata,
+    });
+    this.telemetry?.record('catalog', 'selection_alternative_search', {
+      durationMs: performance.now() - startedAt,
+      tenantId,
+      traceId: normalized?.traceId ?? null,
+      metadata: searchMetadata,
+    });
+    const now = new Date().toISOString();
+    const updatedHistory = {
+      attempts: history.attempts + 1,
+      // Candidates become "seen" only when createCatalogSelectionOffer
+      // actually presents them to the customer. Marking them here would make
+      // that offer filter its own fresh results and produce an empty list.
+      seenCandidateSkus: history.seenCandidateSkus,
+      searchQueries: [...new Set([...history.searchQueries, String(reformulated.query ?? '').trim()].filter(Boolean))].slice(-10),
+      lastOfferId: null,
+      exhaustedAt: candidates.length ? null : now,
+    };
+    const updatedDraft = {
+      ...current.orderDraft,
+      items: (current.orderDraft.items ?? []).map((candidate) => candidate.lineId === item.lineId
+        ? {
+          ...candidate,
+          product: null,
+          catalogCandidates: candidates,
+          presentationOptions: [],
+          selectionStatus: candidates.length ? 'pending' : 'not_found',
+          selectionQuestion: candidates.length
+            ? (reformulated.question ?? candidate.selectionQuestion ?? null)
+            : null,
+          catalogSelectionHistory: updatedHistory,
+        }
+        : candidate),
+    };
+    const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
+      wa_id: normalized.waId, profile_name: normalized.profileName,
+    });
+    return this.handleOrderClarification({
+      tenantId,
+      conversationId,
+      normalized,
+      customerProfile: lookup.profile,
+      preserveExistingCatalogSelections: true,
+      plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] },
+    });
   }
 
   async confirmOrderChangeFromInteraction({ tenantId, conversationId, normalized, option }) {
@@ -2250,6 +2579,12 @@ export class AgentRuntime {
         intent: 'order_clarification',
         order: {
           ...draft,
+          // Selecting "Continuar parcial" is an explicit transition into
+          // the delivery checkout. The original product turn may not have
+          // carried `delivery: true`, so preserve the basket but establish
+          // the checkout contract here; otherwise checkoutProgress jumps
+          // straight to confirmation and skips name, address and payment.
+          delivery: true,
           items: resolvedItems,
           missingFields,
           manualProductReview,
@@ -2542,7 +2877,10 @@ export function catalogSearchesFromPlan(plan, catalogItems, text) {
         { category: inferredCandidateCategory },
         retrievalHintsForCatalogItem(item),
       );
-      const semanticQuery = step.semanticQuery ?? item.semanticQuery ?? item.recommendationNeed ?? null;
+      const semanticQuery = step.semanticQuery
+        ?? item.semanticQuery
+        ?? item.recommendationNeed
+        ?? buildCatalogSemanticQuery(item);
       return {
         query,
         ...(semanticQuery ? { semanticQuery } : {}),
@@ -2572,7 +2910,9 @@ export function catalogSearchesFromPlan(plan, catalogItems, text) {
     );
     return {
       query,
-      ...(item.semanticQuery || item.recommendationNeed ? { semanticQuery: item.semanticQuery ?? item.recommendationNeed } : {}),
+      ...(item.semanticQuery || item.recommendationNeed || buildCatalogSemanticQuery(item)
+        ? { semanticQuery: item.semanticQuery ?? item.recommendationNeed ?? buildCatalogSemanticQuery(item) }
+        : {}),
       ...(recommendation ? { recommendation: true } : {}),
       filters,
       ...(Object.keys(retrievalHints).length ? { retrievalHints } : {}),
@@ -2583,6 +2923,7 @@ export function catalogSearchesFromPlan(plan, catalogItems, text) {
 }
 
 function retrievalHintsForCatalogItem(item = {}) {
+  const saleMode = requestedCatalogSaleMode(item);
   return {
     category: item.category ?? null,
     brand: item.brand ?? null,
@@ -2590,7 +2931,24 @@ function retrievalHintsForCatalogItem(item = {}) {
     product: item.productHypothesis ?? null,
     presentation: item.requestedPresentation ?? item.presentationHint ?? null,
     attributes: item.requestedAttributes ?? item.inferredAttributes ?? null,
+    ...(saleMode ? { saleMode } : {}),
   };
+}
+
+function requestedCatalogSaleMode(item = {}) {
+  const explicit = normalizeCatalogSaleMode(item.requestedMode ?? item.saleMode);
+  if (explicit) return explicit;
+  if (isAmountSaleRequest(item)) return 'amount';
+  if (isWeightSaleRequest(item)) return 'weight';
+  return null;
+}
+
+function normalizeCatalogSaleMode(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['unit', 'units', 'unidad', 'unidades'].includes(normalized)) return 'unit';
+  if (['weight', 'peso', 'granel', 'fraccionado', 'fraccionada'].includes(normalized)) return 'weight';
+  if (['amount', 'valor', 'presupuesto', 'budget'].includes(normalized)) return 'amount';
+  return null;
 }
 
 function mergeRetrievalHints(...sources) {
@@ -2601,7 +2959,7 @@ function mergeRetrievalHints(...sources) {
       if (key === 'query' || key === 'sku' || value === undefined || value === null || value === '') continue;
       if (key === 'attributes' && typeof value === 'object' && !Array.isArray(value)) {
         result.attributes = { ...(result.attributes ?? {}), ...value };
-      } else if (['category', 'brand', 'family', 'product', 'presentation'].includes(key)) {
+      } else if (['category', 'brand', 'family', 'product', 'presentation', 'saleMode'].includes(key)) {
         result[key] = value;
       }
     }
@@ -2721,7 +3079,7 @@ function reconcileCatalogSelectionItems({ previousItems = [], incomingItems = []
       && isPositiveUnitQuantity(previous?.quantity)
       && incoming?.quantityExplicit !== true;
     const quantity = isPositiveAmount(budgetAmount)
-      ? null
+      ? 1
       : preserveQuantity ? Number(previous.quantity) : isPositiveUnitQuantity(incoming.quantity) ? Number(incoming.quantity) : null;
     const product = isRemovedOrderItem(incoming) ? null
       : Object.hasOwn(incoming, 'product') ? incoming.product : previous.product ?? null;
@@ -3240,9 +3598,44 @@ function isWeightSaleRequest(item = {}) {
 }
 
 function catalogRowsForSaleMode(rows = [], item = {}) {
-  if (isAmountSaleRequest(item)) return rows.filter((row) => row?.allowsSaleByAmount === true);
-  if (isWeightSaleRequest(item)) return rows.filter((row) => supportsWeightSale(row));
+  if (isAmountSaleRequest(item)) return rows.filter((row) => supportsAmountSale(row));
+  if (isWeightSaleRequest(item)) {
+    // A weight request can be fulfilled either by an approved bulk SKU or by
+    // an exact closed package (for example, one pound of rice -> 500 g). The
+    // package remains a unit sale; it is only admitted as compatible evidence
+    // and is converted to a normal unit line after selection.
+    const bulkRows = rows.filter((row) => supportsWeightSale(row));
+    const packagedRows = rows.filter((row) => isExactClosedPackageForWeight(row, item));
+    return [...bulkRows, ...packagedRows.filter((row) => !bulkRows.some((bulk) => bulk.sku === row.sku))];
+  }
+  if (item?.requestedMode === 'unit') return rows.filter((row) => supportsUnitSale(row));
   return rows;
+}
+
+function isExactClosedPackageForWeight(product = {}, item = {}) {
+  const requested = normalizeRequestedWeight(item.requestedWeight);
+  if (!requested || supportsWeightSale(product) || !supportsUnitSale(product)) return false;
+  return productPresentationWeightGrams(product) === requested.grams;
+}
+
+function productPresentationWeightGrams(product = {}) {
+  // An unresolved catalog candidate is represented as null while the
+  // conversation continues through clarification/manual review. Weight
+  // normalization must preserve that state instead of crashing the whole
+  // inbound turn while inspecting presentation metadata.
+  product = product ?? {};
+  const measure = product?.attributes?.measure;
+  if (measure && typeof measure === 'object' && !Array.isArray(measure)
+    && normalizeText(measure.dimension) === 'weight') {
+    const grams = weightGramsForValue(measure.amount, measure.unit);
+    if (grams) return grams;
+  }
+  const source = [product.presentation, product.normalizedPresentation, product.name]
+    .filter(Boolean).join(' ');
+  const normalized = normalizeText(source);
+  const match = normalized.match(/\b(\d+(?:[.,]\d+)?)\s*(g|gr|gramos?|kg|kilo(?:s|gramo|gramos)?|lb|libras?)\b/);
+  if (!match) return null;
+  return weightGramsForValue(Number(match[1].replace(',', '.')), match[2]);
 }
 
 function normalizeAmountSaleItem(item = {}) {
@@ -3259,16 +3652,18 @@ function normalizeAmountSaleItem(item = {}) {
       available: quantity === null ? null : Boolean(product && product.stock >= quantity),
     };
   }
-  const product = item.product?.allowsSaleByAmount === true ? item.product : null;
+  const product = supportsAmountSale(item.product) ? item.product : null;
   const amountSaleUnavailable = item.amountSaleUnavailable === true || Boolean(item.product && !product);
   return {
     ...item,
     product,
-    quantity: null,
+    // One is the logical quantity of an amount-sale line. It does not mean
+    // one physical unit; the requested budget remains the line total.
+    quantity: 1,
     saleMode: 'amount',
     requestedAmount: Number(item.budgetAmount),
     amountSaleUnavailable,
-    lineTotal: quotedLineTotal({ ...item, product, quantity: null }),
+    lineTotal: quotedLineTotal({ ...item, product, quantity: 1 }),
     // The catalogue records whether the store permits selling this reference
     // by amount. It does not expose a weight conversion, so stock only means
     // that the reference is currently available.
@@ -3282,7 +3677,20 @@ function normalizeOperationalOrderItem(item = {}) {
       lineTotal: null, available: null, catalogCandidates: [], presentationOptions: [], selectionQuestion: null };
   }
   if (isWeightSaleRequest(item)) {
-    const product = supportsWeightSale(item.product) ? item.product : null;
+    const bulkProduct = supportsWeightSale(item.product) ? item.product : null;
+    const packagedProduct = !bulkProduct && isExactClosedPackageForWeight(item.product, item) ? item.product : null;
+    if (packagedProduct) {
+      return normalizeAmountSaleItem({
+        ...item,
+        product: packagedProduct,
+        quantity: isPositiveUnitQuantity(item.quantity) ? Number(item.quantity) : 1,
+        requestedWeight: null,
+        requestedWeightGrams: null,
+        unitPricePerKg: null,
+        weightSaleUnavailable: false,
+      });
+    }
+    const product = bulkProduct;
     const quote = product ? quoteWeightSale(product, item.requestedWeight) : null;
     return {
       ...item,
@@ -3553,8 +3961,16 @@ function buildPartialOrderDecisionReply({ orderItems = [], missingFields = [] })
   const unresolvedQueries = new Set((missingFields ?? [])
     .filter((field) => field.startsWith('product:'))
     .map((field) => normalizeText(field.slice('product:'.length))));
+  const unresolvedLineIds = new Set((missingFields ?? [])
+    .filter((field) => field.startsWith('commercial_review:'))
+    .map((field) => String(field.slice('commercial_review:'.length)).trim())
+    .filter(Boolean));
   const unresolved = unresolvedProductItems(orderItems)
-    .filter((item) => !unresolvedQueries.size || unresolvedQueries.has(normalizeText(item.catalogQuery)))
+    .filter((item) => {
+      if (!unresolvedQueries.size && !unresolvedLineIds.size) return true;
+      return unresolvedQueries.has(normalizeText(item.catalogQuery))
+        || unresolvedLineIds.has(String(item.lineId ?? item.catalogQuery));
+    })
     .map((item) => requestedProductName(item, item.catalogQuery))
     .filter(Boolean);
   const resolvedCount = (orderItems ?? []).filter((item) => item?.product && !isRemovedOrderItem(item)).length;
@@ -3568,7 +3984,8 @@ function buildPartialOrderDecisionReply({ orderItems = [], missingFields = [] })
 function buildManualProductReview({ previous = null, items = [], missingFields = [], clarificationState = null, status = 'awaiting_customer' }) {
   const priorLines = new Map((previous?.lines ?? []).map((line) => [String(line.lineId ?? line.catalogQuery), line]));
   const unresolved = unresolvedProductItems(items).filter((item) => (
-    (missingFields ?? []).includes(`product:${item.catalogQuery}`)
+    (missingFields ?? []).some((field) => field === `product:${item.catalogQuery}`
+      || field === `commercial_review:${item.lineId ?? item.catalogQuery}`)
   ));
   const lines = unresolved.map((item) => {
     const key = String(item.lineId ?? item.catalogQuery);
@@ -3584,7 +4001,9 @@ function buildManualProductReview({ previous = null, items = [], missingFields =
       requestedWeight: item.requestedWeight ?? prior.requestedWeight ?? null,
       budgetAmount: item.budgetAmount ?? prior.budgetAmount ?? null,
       status,
-      reason: 'catalog_product_not_found',
+      reason: item.amountSaleUnavailable || item.weightSaleUnavailable
+        ? 'catalog_product_sale_mode_unavailable'
+        : 'catalog_product_not_found',
       clarificationAttempts: Number(clarificationState?.attempts ?? prior.clarificationAttempts ?? 0),
       updatedAt: new Date().toISOString(),
     };
@@ -3610,6 +4029,28 @@ function needsMandatoryHumanProductResolution(missingFields = []) {
 
 function hasUnresolvedProductMissingField(missingFields = []) {
   return missingFields.some((field) => field.startsWith('product:'));
+}
+
+function hasTerminalCommercialReviewGap(items = [], missingFields = []) {
+  const commercialReviewLineIds = new Set((missingFields ?? [])
+    .filter((field) => String(field).startsWith('commercial_review:'))
+    .map((field) => String(field).slice('commercial_review:'.length).trim())
+    .filter(Boolean));
+  return (items ?? []).some((item) => {
+    const lineId = String(item?.lineId ?? item?.catalogQuery ?? '').trim();
+    return Boolean(lineId)
+      && commercialReviewLineIds.has(lineId)
+      && !isRemovedOrderItem(item)
+      && !item?.product
+      && item?.selectionStatus !== 'pending';
+  });
+}
+
+function hasPendingCatalogSelection(items = []) {
+  return (items ?? []).some((item) => !isRemovedOrderItem(item)
+    && !item?.product
+    && item?.selectionStatus === 'pending'
+    && (item?.catalogCandidates?.length ?? 0) > 0);
 }
 
 function deriveClarificationState({ previous, items = [], missingFields = [], maxAttempts = 2, attemptedLineIds = null, replacedLineIds = [] }) {
@@ -3659,6 +4100,18 @@ function normalizeOperationalMissingFields(fields = []) {
   return [...new Set((Array.isArray(fields) ? fields : [])
     .map((field) => String(field ?? '').trim())
     .filter(isOperationalMissingField))];
+}
+
+// Interactive offers persist the basket key that was used to create them.
+// Prefer that persisted contract after a process restart: rebuilding the key
+// from hydrated JSON can differ because serialization normalizes optional
+// values and array/object shapes. Keep the computed fallback for older drafts
+// that predate the persisted checkout key.
+function persistedBasketKey(draft = {}) {
+  const persisted = draft?.checkout?.basketKey;
+  return typeof persisted === 'string' && persisted.trim()
+    ? persisted
+    : basketKey(draft);
 }
 
 // The interpreter may omit checkout fields because it correctly focused on a
@@ -3772,15 +4225,17 @@ function catalogListOptionTitle(product, commonNameTokens = new Set()) {
   const brand = String(product?.brand ?? '').trim();
   const presentation = compactCatalogListText(product?.presentation ?? '');
   const residualName = compactCatalogOptionName(name, commonNameTokens);
-  // If every candidate shares the same product name, repeating it uses the
-  // entire WhatsApp title budget. The brand remains a truthful compact label;
-  // the presentation then distinguishes the actual selectable variants.
+  // If every candidate shares the same family name, keep the residual
+  // variety/product word first. A supplier or brand may be useful evidence,
+  // but it must not consume the title budget before the attribute that
+  // distinguishes the alternatives.
   const compactBrand = compactCatalogListText(brand);
-  const base = residualName
-    ? (compactBrand && !normalizeText(residualName).includes(normalizeText(compactBrand))
-      ? `${compactBrand} ${residualName}`
-      : residualName)
-    : (compactBrand || compactCatalogListText(name));
+  const baseParts = [];
+  if (residualName) baseParts.push(residualName);
+  if (compactBrand && !normalizeText(residualName).includes(normalizeText(compactBrand))) {
+    baseParts.push(compactBrand);
+  }
+  const base = baseParts.join(' · ') || compactCatalogListText(name);
   return joinCatalogOptionTitle(base, presentation);
 }
 
@@ -3844,8 +4299,26 @@ function duplicateCatalogOptionTitleIndexes(titles = []) {
 
 function appendCatalogOptionReference(title, sku, index) {
   const rawReference = String(sku ?? index).replace(/[^a-z0-9]/gi, '').slice(-4) || String(index);
-  const suffix = ` #${rawReference}`;
-  return `${String(title).slice(0, Math.max(1, 24 - suffix.length)).trim()}${suffix}`;
+  const reference = `#${rawReference}`;
+  const rawTitle = String(title ?? '').trim();
+  const separator = ' · ';
+  const separatorIndex = rawTitle.lastIndexOf(separator);
+  const base = separatorIndex >= 0 ? rawTitle.slice(0, separatorIndex).trim() : rawTitle;
+  const presentation = separatorIndex >= 0 ? rawTitle.slice(separatorIndex + separator.length).trim() : '';
+  const presentationSuffix = presentation ? `${separator}${presentation}` : '';
+  const availableBase = 24 - reference.length - 1 - presentationSuffix.length;
+  if (availableBase >= 1) {
+    const compactBase = availableBase <= 3
+      ? base.slice(0, availableBase)
+      : base.length <= availableBase
+        ? base
+        : `${base.slice(0, availableBase - 3).trim()}...`;
+    return `${compactBase} ${reference}${presentationSuffix}`.slice(0, 24).trim();
+  }
+  // If the presentation itself consumes the title budget, preserve the most
+  // useful catalog evidence rather than replacing it with a supplier/SKU-only
+  // label. The full SKU remains in the interaction value and audit state.
+  return truncateWhatsAppText(`${presentation || base} ${reference}`, 24, 'Opción');
 }
 
 function catalogListOptionDescription(product) {
@@ -3870,11 +4343,30 @@ function truncateWhatsAppText(value, limit, fallback) {
 function parseCatalogSelectionValue(value) {
   try {
     const parsed = JSON.parse(String(value ?? '{}'));
-    if (!parsed?.basketKey || !parsed?.lineId || !parsed?.sku) return null;
+    if (!parsed?.basketKey || !parsed?.lineId) return null;
+    if (!parsed?.sku && !Array.isArray(parsed?.offeredSkus)) return null;
     return parsed;
   } catch {
     return null;
   }
+}
+
+function normalizeCatalogSelectionHistory(history) {
+  return {
+    attempts: Math.max(0, Number(history?.attempts ?? 0) || 0),
+    seenCandidateSkus: [...new Set((Array.isArray(history?.seenCandidateSkus) ? history.seenCandidateSkus : [])
+      .map((sku) => String(sku ?? '').trim()).filter(Boolean))].slice(-100),
+    searchQueries: [...new Set((Array.isArray(history?.searchQueries) ? history.searchQueries : [])
+      .map((query) => String(query ?? '').trim()).filter(Boolean))].slice(-10),
+    lastOfferId: String(history?.lastOfferId ?? '').trim() || null,
+    exhaustedAt: history?.exhaustedAt ?? null,
+  };
+}
+
+function containsName(text, name) {
+  const normalizedText = String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const normalizedName = String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+  return Boolean(normalizedName && normalizedText.includes(normalizedName));
 }
 
 function isOrderChangeConfirmationInteraction(state, optionId, tenantId, conversationId) {

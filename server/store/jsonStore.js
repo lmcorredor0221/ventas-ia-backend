@@ -225,6 +225,20 @@ export class JsonStore {
     return { ...saved };
   }
 
+  getInteractionOffer(offerId) {
+    const offer = this.state.interactionOffersById?.[offerId];
+    return offer ? { ...offer, options: [...(offer.options ?? [])] } : null;
+  }
+
+  listInteractionOffers({ tenantId, conversationId, status = 'active' } = {}) {
+    return Object.values(this.state.interactionOffersById ?? {})
+      .filter((offer) => offer.tenantId === tenantId
+        && offer.conversationId === conversationId
+        && offer.status === status)
+      .sort((left, right) => String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? '')))
+      .map((offer) => ({ ...offer, options: [...(offer.options ?? [])] }));
+  }
+
   consumeInteractionOffer({ offerId, optionId, tenantId, conversationId }) {
     let outcome = { status: 'not_found', offer: null };
     this.mutate((state) => {

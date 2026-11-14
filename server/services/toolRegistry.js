@@ -162,6 +162,7 @@ export class ToolRegistry {
             semanticQuery: payload.semanticQuery ?? '',
             filters: payload.filters ?? {},
             retrievalHints: payload.retrievalHints ?? {},
+            excludeSkus: [...new Set((payload.excludeSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean))].slice(0, 100),
             limit: manualCatalogRead
               ? payload.limit ?? 25
               : Math.min(
@@ -250,6 +251,7 @@ export class ToolRegistry {
         recommendation: payload.recommendation === true,
         filters: payload.filters ?? {},
         retrievalHints: payload.retrievalHints ?? {},
+        excludeSkus: [...new Set((payload.excludeSkus ?? []).map((sku) => String(sku ?? '').trim()).filter(Boolean))].slice(0, 100),
         limit: Math.min(50, Math.max(Number(payload.limit ?? 25), 25)),
         })
         : null;
