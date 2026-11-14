@@ -5,7 +5,8 @@ import { isClosedConversation, isDispatchedConversation } from '../domain/conver
 import { hasOpenHumanRequest } from './pendingRequestPolicy.js';
 import { paymentMethodLabel, paymentMethodOptionsLabel, paymentMethodsForTenant, resolvePaymentMethod } from './paymentMethods.js';
 import { assessCommerceItems, WHATSAPP_COMMERCE_NOTICE } from '../domain/whatsappCommercePolicy.js';
-import { basketKey, checkoutProgress } from '../domain/orderCheckout.js';
+import { basketKey, checkoutBasketKey, checkoutProgress } from '../domain/orderCheckout.js';
+import { ORDER_STATUSES } from '../domain/orderStatus.js';
 import { CatalogResolutionService } from './catalogResolutionService.js';
 import { normalizeRequestedWeight, quoteWeightSale, supportsAmountSale, supportsUnitSale, supportsWeightSale, weightGramsForValue } from '../domain/catalogCommerce.js';
 import { VARIABLE_PRICE_NOTICE, basketHasVariablePricing } from '../domain/variablePricing.js';
@@ -920,6 +921,11 @@ export class AgentRuntime {
     }
     const isDelivery = Boolean(plan.order?.delivery || previousDraft?.delivery);
     const subtotal = activeOrderItems.reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    const checkoutDraft = { items: activeOrderItems, subtotal, delivery: isDelivery };
+    const previousCheckoutDraft = previousDraft
+      ? { items: previousDraft.items ?? [], subtotal: previousDraft.subtotal, delivery: previousDraft.delivery }
+      : null;
+    const basketChanged = Boolean(previousCheckoutDraft && basketKey(checkoutDraft) !== basketKey(previousCheckoutDraft));
     // Customer details belong to checkout only after the buyer accepts the
     // completed basket. Before then we keep the conversation focused on
     // products and the review action, regardless of an omitted LLM field.
@@ -928,14 +934,15 @@ export class AgentRuntime {
       customerProfile: nextProfile,
       paymentMethod: selectedPaymentMethod?.id ?? null,
       checkoutAccepted: checkoutBasketAccepted({
-        draft: { items: activeOrderItems, subtotal, delivery: isDelivery },
+        draft: checkoutDraft,
         previous: previousDraft?.checkout,
         collectionComplete: plan.order?.collectionComplete,
+        basketChanged,
       }),
     });
     const checkout = checkoutProgress({
-      draft: { items: activeOrderItems, missingFields, subtotal, delivery: isDelivery, paymentMethod: selectedPaymentMethod?.id },
-      previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete,
+      draft: { ...checkoutDraft, missingFields, paymentMethod: selectedPaymentMethod?.id },
+      previous: previousDraft?.checkout, collectionComplete: plan.order?.collectionComplete, basketChanged,
     });
     const clarificationState = deriveClarificationState({
       previous: previousDraft?.clarificationState ?? currentConversation?.clarificationState,
@@ -1392,6 +1399,10 @@ export class AgentRuntime {
       });
     }
     draft.subtotal = (draft.items ?? []).reduce((sum, item) => sum + (item.lineTotal ?? 0), 0);
+    const previousCheckoutDraft = conversation?.orderDraft
+      ? { items: conversation.orderDraft.items ?? [], subtotal: conversation.orderDraft.subtotal, delivery: conversation.orderDraft.delivery }
+      : null;
+    const basketChanged = Boolean(previousCheckoutDraft && basketKey(draft) !== basketKey(previousCheckoutDraft));
     draft.missingFields = reconcileCheckoutMissingFields(draft.missingFields, {
       delivery: draft.delivery,
       customerProfile: nextProfile,
@@ -1400,9 +1411,10 @@ export class AgentRuntime {
         draft,
         previous: conversation?.orderDraft?.checkout,
         collectionComplete: plan.order?.collectionComplete,
+        basketChanged,
       }),
     });
-    draft.checkout = checkoutProgress({ draft, previous: conversation?.orderDraft?.checkout, collectionComplete: plan.order?.collectionComplete });
+    draft.checkout = checkoutProgress({ draft, previous: conversation?.orderDraft?.checkout, collectionComplete: plan.order?.collectionComplete, basketChanged });
     if (!(draft.items ?? []).some((item) => !isRemovedOrderItem(item) && !item.product)) {
       const previousClarification = draft.clarificationState ?? conversation?.clarificationState;
       draft.clarificationState = previousClarification
@@ -2245,6 +2257,16 @@ export class AgentRuntime {
     if (result.option?.action === 'confirm_order_change') {
       return this.confirmOrderChangeFromInteraction({ tenantId, conversationId, normalized, option: result.option });
     }
+    if (['adjust_order', 'human_handoff', 'cancel_order'].includes(result.option?.action)
+      && result.option?.value) {
+      const stale = await this.validateOrderChangeInteraction({
+        tenantId,
+        conversationId,
+        normalized,
+        option: result.option,
+      });
+      if (stale) return stale;
+    }
     const current = await this.getConversation(conversationId);
     const commerceResult = await this.enforceCommercePolicy({ tenantId, conversationId, normalized, items: current?.orderDraft?.items ?? [] });
     if (commerceResult) return commerceResult;
@@ -2356,6 +2378,9 @@ export class AgentRuntime {
     }
     if (result.option?.action === 'human_handoff') {
       return this.requestStoreHandoff({ tenantId, conversationId, normalized, option: result.option });
+    }
+    if (result.option?.action === 'cancel_order') {
+      return this.cancelOrderFromInteraction({ tenantId, conversationId, normalized, option: result.option });
     }
     if (result.option?.action !== 'set_payment_method') {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized, reason: 'Recibí tu selección. Escríbeme si quieres ajustar algo más.' });
@@ -2511,6 +2536,26 @@ export class AgentRuntime {
     });
   }
 
+  async validateOrderChangeInteraction({ tenantId, conversationId, normalized, option }) {
+    let reference;
+    try {
+      reference = JSON.parse(String(option?.value ?? ''));
+    } catch {
+      reference = null;
+    }
+    if (!reference?.orderId || !Number.isSafeInteger(Number(reference.version))) {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: 'Ese resumen ya no identifica una versión válida del pedido. Pide a la tienda que lo actualice.' });
+    }
+    const order = this.orders?.findOrder?.(reference.orderId, tenantId);
+    if (!order || order.conversationId !== conversationId || Number(order.version) !== Number(reference.version)
+      || order.customerReconfirmation?.status !== 'required') {
+      return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
+        reason: 'Ese resumen ya cambió o ya fue resuelto. Usa las opciones del último resumen enviado por la tienda.' });
+    }
+    return null;
+  }
+
   async confirmOrderChangeFromInteraction({ tenantId, conversationId, normalized, option }) {
     if (!this.orders) throw Object.assign(new Error('El servicio de pedidos no está disponible.'), { code: 'order_service_unavailable', statusCode: 503 });
     let reference;
@@ -2523,7 +2568,7 @@ export class AgentRuntime {
       return this.replyToInvalidInteraction({ tenantId, conversationId, normalized,
         reason: 'Ese resumen ya no identifica una versión válida del pedido. Pide a la tienda que lo actualice.' });
     }
-    const confirmed = await this.orders.confirmVariablePricing({
+    const confirmed = await this.orders.confirmCustomerReconfirmation({
       orderId: reference.orderId,
       tenantId,
       input: { expectedVersion: Number(reference.version) },
@@ -2536,6 +2581,39 @@ export class AgentRuntime {
       text,
     });
     return { summary: 'Customer confirmed updated order', order: confirmed.order };
+  }
+
+  async cancelOrderFromInteraction({ tenantId, conversationId, normalized, option }) {
+    if (!this.orders) throw Object.assign(new Error('El servicio de pedidos no está disponible.'), { code: 'order_service_unavailable', statusCode: 503 });
+    let reference;
+    try {
+      reference = JSON.parse(String(option?.value ?? ''));
+    } catch {
+      reference = null;
+    }
+    const cancelled = await this.orders.transition({
+      orderId: reference.orderId,
+      tenantId,
+      nextStatus: ORDER_STATUSES.CANCELLED,
+      actorId: `customer:${normalized.waId}`,
+      source: 'customer',
+      traceId: normalized.traceId ?? null,
+      allowPendingRequest: true,
+    });
+    const text = `Cancelé el pedido ${cancelled.order.id} como solicitaste. Si deseas, puedes iniciar un nuevo pedido cuando quieras.`;
+    this.events?.emit?.({
+      type: 'order.customer_reconfirmation_cancelled',
+      tenantId,
+      conversationId,
+      detail: `El cliente canceló el pedido ${cancelled.order.id}.`,
+      metadata: { orderId: cancelled.order.id, actorId: `customer:${normalized.waId}`, version: cancelled.order.version },
+    });
+    await this.tools.call('whatsapp_business_messaging', tenantId, conversationId, {
+      action: 'send_session_message',
+      wa_id: normalized.waId,
+      text,
+    });
+    return { summary: 'Customer cancelled edited order', order: cancelled.order };
   }
 
   async continuePartialOrder({ tenantId, conversationId, normalized, option }) {
@@ -2664,6 +2742,12 @@ export class AgentRuntime {
 
   async requestOrderAdjustment({ tenantId, conversationId, normalized, option }) {
     const current = await this.getConversation(conversationId);
+    let orderReference = null;
+    try {
+      orderReference = JSON.parse(String(option?.value ?? '{}'));
+    } catch {
+      orderReference = null;
+    }
     await this.patchConversation(conversationId, {
       orderDraft: { ...current?.orderDraft, checkout: { phase: 'review', reviewedKey: null } },
       stage: 'clarification',
@@ -2677,6 +2761,13 @@ export class AgentRuntime {
       action: 'send_session_message',
       wa_id: normalized.waId,
       text: 'Claro. Dime qué quieres ajustar del pedido y actualizo el total antes de confirmarlo.',
+    });
+    this.events?.emit?.({
+      type: 'order.customer_reconfirmation_adjustment_requested',
+      tenantId,
+      conversationId,
+      detail: 'El cliente solicitó ajustar el pedido antes de confirmarlo.',
+      metadata: { orderId: orderReference?.orderId ?? null, actorId: `customer:${normalized.waId}` },
     });
     return { summary: 'Order adjustment requested', interaction: option };
   }
@@ -4131,10 +4222,11 @@ function reconcileCheckoutMissingFields(fields, { delivery, customerProfile, pay
   return normalizeOperationalMissingFields(next);
 }
 
-function checkoutBasketAccepted({ draft, previous, collectionComplete }) {
+function checkoutBasketAccepted({ draft, previous, collectionComplete, basketChanged = false }) {
   if (collectionComplete === true) return true;
+  if (basketChanged) return false;
   if (!previous?.reviewedKey) return false;
-  return previous.reviewedKey === basketKey(draft);
+  return previous.reviewedKey === checkoutBasketKey({ draft, previous, collectionComplete, basketChanged });
 }
 
 function isOperationalMissingField(field) {
@@ -4375,7 +4467,9 @@ function isOrderChangeConfirmationInteraction(state, optionId, tenantId, convers
   const offer = state.interactionOffersById?.[offerId];
   if (!offer || offer.status !== 'active' || offer.purpose !== 'order_change_confirmation') return false;
   if (offer.tenantId !== tenantId || offer.conversationId !== conversationId) return false;
-  return offer.options?.some(option => option.id === optionId && option.action === 'confirm_order_change') === true;
+  return offer.options?.some(option => option.id === optionId && [
+    'confirm_order_change', 'adjust_order', 'human_handoff', 'cancel_order',
+  ].includes(option.action)) === true;
 }
 
 function requestedProductName(item, fallback) {

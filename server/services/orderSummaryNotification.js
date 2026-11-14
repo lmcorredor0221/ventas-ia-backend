@@ -16,33 +16,42 @@ export function createOrderSummaryNotification({ store, tools, events }) {
     const conversation = store.getState().conversations?.find(item => item.id === order.conversationId && item.tenantId === order.tenantId);
     const recipient = order.waId ?? conversation?.waId ?? null;
     if (!recipient) return { status: 'not_sent', reason: 'recipient_missing', version: order.version };
-    const text = whatsappOrderSummary(order, { stage: entry.payload?.stage ?? 'confirmed' });
+    const stage = entry.payload?.stage ?? 'confirmed';
+    const text = whatsappOrderSummary(order, { stage });
     const pendingReviewLines = (order.manualProductReview?.lines ?? [])
       .filter(line => ['pending', 'awaiting_customer'].includes(line.status));
     let interactive;
-    if (['manual_review_found', 'manual_review_unavailable'].includes(entry.payload?.stage)
+    if (['updated', 'manual_review_found', 'manual_review_unavailable'].includes(stage)
       && order.customerReconfirmation?.status === 'required'
       && pendingReviewLines.length === 0
       && store.createInteractionOffer) {
       const offerId = `io-${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
-      const option = {
-        id: `vi:${offerId}:1`,
-        title: 'Confirmar ajuste',
-        action: 'confirm_order_change',
-        value: JSON.stringify({ orderId: order.id, version: order.version }),
-      };
+      const reference = JSON.stringify({ orderId: order.id, version: order.version });
+      const optionDefinitions = [
+        { title: 'Confirmar pedido', description: 'Acepto el resumen actualizado.', action: 'confirm_order_change' },
+        { title: 'Ajustar pedido', description: 'Quiero solicitar otro cambio.', action: 'adjust_order' },
+        { title: 'Hablar con la tienda', description: 'Necesito atención del tendero.', action: 'human_handoff' },
+        { title: 'Cancelar pedido', description: 'No deseo continuar con este pedido.', action: 'cancel_order' },
+      ];
+      const options = optionDefinitions.map((definition, index) => ({
+        id: `vi:${offerId}:${index + 1}`,
+        ...definition,
+        value: reference,
+      }));
       await store.createInteractionOffer({
         id: offerId,
         tenantId: order.tenantId,
         conversationId: order.conversationId,
         purpose: 'order_change_confirmation',
-        options: [option],
+        options,
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       });
       interactive = {
-        kind: 'button',
+        kind: 'list',
         body: text,
-        buttons: [{ id: option.id, title: option.title }],
+        buttonLabel: 'Revisar pedido',
+        sectionTitle: 'Acciones del pedido',
+        rows: options.map(({ id, title, description }) => ({ id, title, description })),
       };
     }
     try {

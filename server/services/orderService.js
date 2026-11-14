@@ -160,19 +160,59 @@ export class OrderService {
     const candidate = { ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing,
       paymentMethod: payment.id, paymentMethodLabel: payment.label };
     const customerChangeSummary = summarizeCustomerOrderChange(current, candidate, { reason: editReason || exceptionReason });
+    const previousTotal = Number(current.pricing?.total ?? current.subtotal ?? 0);
+    const totalDelta = pricing.total - previousTotal;
+    const customerReconfirmation = customerChangeSummary.hasChanges
+      ? {
+        status: 'required',
+        reason: 'manual_order_edit',
+        previousTotal,
+        total: pricing.total,
+        difference: totalDelta,
+        requestedAt: now,
+        requestedBy: actorId,
+      }
+      : current.customerReconfirmation ?? null;
     const order = { ...structuredClone(current), ...candidate,
       paymentMethod: payment.id, paymentMethodLabel: payment.label, version: Number(current.version ?? 0) + 1, updatedAt: now,
+      customerReconfirmation,
       customerChangeSummary: customerChangeSummary.hasChanges ? customerChangeSummary : null,
       sheetSyncStatus: this.outbox ? 'pending' : 'not_queued', editHistory: [...(current.editHistory ?? []), {
         at: now, actorId, reason: editReason || exceptionReason || 'Ajuste manual antes de alistamiento', version: Number(current.version ?? 0) + 1,
-        before: orderCommercialFields(current), after: orderCommercialFields({ ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing, paymentMethod: payment.id, paymentMethodLabel: payment.label }),
+        before: orderCommercialFields(current), after: orderCommercialFields({ ...current, customerName, deliveryAddress, delivery, items, subtotal, pricing, paymentMethod: payment.id, paymentMethodLabel: payment.label, customerReconfirmation }),
       }] };
     const entries = [this.outbox?.createEntry({ tenantId, kind: 'order.sheet_edit', aggregateType: 'order', aggregateId: orderId,
       idempotencyKey: `order-sheet-edit:${orderId}:${order.version}`, payload: { tenantId, orderId, version: order.version } }),
     customerChangeSummary.hasChanges && this.outbox?.createEntry({ tenantId, kind: 'order.summary_notification', aggregateType: 'order', aggregateId: orderId,
       idempotencyKey: `order-summary:${orderId}:${order.version}`, payload: { tenantId, orderId, conversationId: order.conversationId, version: order.version, stage: 'updated' } })].filter(Boolean);
     await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion, entries, catalogProducts: products });
-    return { order, notification: entries.some(entry => entry.kind === 'order.summary_notification') ? 'queued' : 'not_queued' };
+    this.events?.emit?.({
+      type: 'order.edited',
+      tenantId,
+      conversationId: order.conversationId,
+      detail: `El pedido ${order.id} fue editado por ${actorId}.`,
+      metadata: { orderId: order.id, actorId, version: order.version, previousVersion: Number(current.version ?? 0), totalDelta },
+    });
+    if (customerReconfirmation?.status === 'required') {
+      this.events?.emit?.({
+        type: 'order.customer_reconfirmation_required',
+        tenantId,
+        conversationId: order.conversationId,
+        detail: `El pedido ${order.id} requiere reconfirmación del cliente.`,
+        metadata: { orderId: order.id, actorId, version: order.version, previousTotal, total: pricing.total, difference: totalDelta },
+      });
+    }
+    if (entries.some(entry => entry.kind === 'order.summary_notification')) {
+      this.events?.emit?.({
+        type: 'order.summary_notification_queued',
+        tenantId,
+        conversationId: order.conversationId,
+        detail: `Se encoló el resumen actualizado del pedido ${order.id}.`,
+        metadata: { orderId: order.id, version: order.version },
+      });
+    }
+    return { order, notification: entries.some(entry => entry.kind === 'order.summary_notification') ? 'queued' : 'not_queued',
+      customerReconfirmationRequired: customerReconfirmation?.status === 'required' };
   }
 
   async adjustVariablePricing({ orderId, tenantId, input, actorId = 'local-owner' }) {
@@ -259,7 +299,7 @@ export class OrderService {
     }
   }
 
-  async confirmVariablePricing({ orderId, tenantId, input, actorId = 'local-owner' }) {
+  async confirmCustomerReconfirmation({ orderId, tenantId, input, actorId = 'local-owner' }) {
     const current = this.store.getOrder
       ? await this.store.getOrder(tenantId, orderId)
       : this.findOrder(orderId, tenantId);
@@ -278,7 +318,19 @@ export class OrderService {
         before: orderCommercialFields(current), after: orderCommercialFields({ ...current, manualProductReview, customerReconfirmation: { ...current.customerReconfirmation, status: 'confirmed', confirmedAt: now, actorId } }) }],
     };
     await this.store.commitOrderEdit({ order, expectedVersion: input.expectedVersion });
+    this.events?.emit?.({
+      type: 'order.customer_reconfirmation_confirmed',
+      tenantId,
+      conversationId: order.conversationId,
+      detail: `El cliente confirmó la versión ${order.version} del pedido ${order.id}.`,
+      metadata: { orderId: order.id, actorId, version: order.version, previousVersion: Number(current.version ?? 0) },
+    });
     return { order };
+  }
+
+  // Backward-compatible API name for the existing variable-pricing route.
+  async confirmVariablePricing(args) {
+    return this.confirmCustomerReconfirmation(args);
   }
 
   async resolveManualProductFound({ orderId, tenantId, lineId, input, actorId = 'local-owner' }) {
