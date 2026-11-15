@@ -1023,19 +1023,20 @@ export class AgentRuntime {
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
       : undefined;
+    const checkoutMetadata = deriveCheckoutConversationMetadata(checkout);
 
     await this.patchConversation(conversationId, {
-      stage: requiresHumanResolution ? 'handoff' : canQuote ? 'quote' : 'clarification',
-      zone: requiresHumanResolution ? 'approval' : canQuote ? 'quote' : 'agent',
+      stage: requiresHumanResolution ? 'handoff' : awaitsPartialOrderDecision ? 'clarification' : checkoutMetadata.stage,
+      zone: requiresHumanResolution ? 'approval' : awaitsPartialOrderDecision ? 'agent' : checkoutMetadata.zone,
       status: requiresHumanResolution ? 'blocked' : 'live',
       value: subtotal > 0 ? formatCurrency(subtotal) : 'Pendiente',
-      progress: requiresHumanResolution ? 58 : canQuote ? 64 : 42,
+      progress: requiresHumanResolution ? 58 : awaitsPartialOrderDecision ? 42 : checkoutMetadata.progress,
       need: normalized.text,
       nextStep: requiresHumanResolution
         ? 'Humano valida disponibilidad, sustituto o decision comercial.'
         : awaitsPartialOrderDecision
           ? 'Esperar si el cliente continúa con el pedido parcial, aporta más datos o pide hablar con la tienda.'
-          : canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
+          : checkoutMetadata.nextStep,
       lastTool: collected.name || collected.defaultAddress
         ? 'google_sheets_customer_profile_upsert'
         : drive.status === 'not_applicable' ? 'google_sheets_read_table' : 'google_drive_file_picker',
@@ -1472,14 +1473,15 @@ export class AgentRuntime {
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
       : undefined;
+    const checkoutMetadata = deriveCheckoutConversationMetadata(draft.checkout, { fallbackProgress: 48 });
 
     await this.patchConversation(conversationId, {
-      stage: canQuote ? 'quote' : 'clarification',
-      zone: canQuote ? 'quote' : 'agent',
+      stage: checkoutMetadata.stage,
+      zone: checkoutMetadata.zone,
       status: 'live',
       value: canQuote ? formatCurrency(draft.subtotal) : 'Pendiente',
-      progress: canQuote ? 64 : 48,
-      nextStep: canQuote ? 'Esperar confirmacion del pedido.' : 'Solicitar datos faltantes antes de cotizar.',
+      progress: checkoutMetadata.progress,
+      nextStep: checkoutMetadata.nextStep,
       lastTool: collected.name || collected.defaultAddress ? 'google_sheets_customer_profile_upsert' : 'llm_core',
       customerCapture: {
         nameSource: collected.nameSource,
@@ -4048,6 +4050,31 @@ function isCheckoutDataCollectionPhase(checkout, missingFields = []) {
   if (!['collecting', 'payment'].includes(checkout?.phase)) return false;
   const checkoutFields = new Set(['customer_name', 'delivery_address', 'payment_method']);
   return [...new Set(missingFields)].every((field) => checkoutFields.has(field));
+}
+
+function deriveCheckoutConversationMetadata(checkout, { fallbackProgress = 42 } = {}) {
+  if (checkout?.phase === 'review') {
+    return {
+      stage: 'quote',
+      zone: 'quote',
+      progress: 56,
+      nextStep: 'Esperar que el cliente agregue productos o continúe con el pedido.',
+    };
+  }
+  if (checkout?.phase === 'confirmation') {
+    return {
+      stage: 'quote',
+      zone: 'quote',
+      progress: 64,
+      nextStep: 'Esperar confirmacion del pedido.',
+    };
+  }
+  return {
+    stage: 'clarification',
+    zone: 'agent',
+    progress: fallbackProgress,
+    nextStep: 'Solicitar datos faltantes antes de cotizar.',
+  };
 }
 
 function buildStructuredOrderSummary({ orderItems, customerProfile, subtotal, payment, checkout, address }) {

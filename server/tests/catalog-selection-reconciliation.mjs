@@ -290,6 +290,64 @@ try {
     runtime.tools.call = rejectionContinuationToolsCall;
   }
 
+  // A rejected line can leave a valid basket with no unresolved fields. The
+  // checkout state machine must expose the review phase in the conversation
+  // metadata instead of leaving the stale clarification label and next step.
+  const metadataAlignmentConversationId = 'catalog-selection-checkout-metadata';
+  store.mutate((state) => {
+    state.conversations.unshift({
+      id: metadataAlignmentConversationId,
+      tenantId: 'andina',
+      waId: '573000000895',
+      messages: [],
+      status: 'live',
+      orderDraft: {
+        delivery: true,
+        paymentMethod: null,
+        missingFields: ['selection:coca:metadata'],
+        checkout: { phase: 'collecting', reviewedKey: null },
+        items: [
+          {
+            lineId: 'coca:metadata',
+            rawName: 'Coca-Cola',
+            catalogQuery: 'coca cola',
+            quantity: 1,
+            selectionStatus: 'pending',
+            catalogCandidates: products.slice(0, 2),
+            product: null,
+          },
+          {
+            lineId: 'pan:metadata',
+            rawName: 'Pan tajado blanco',
+            catalogQuery: 'pan tajado blanco',
+            quantity: 1,
+            selectionStatus: 'selected',
+            product: products.find((item) => item.sku === 'PAN-TAJADO-BLANCO'),
+            available: true,
+            lineTotal: 7600,
+          },
+        ],
+        subtotal: 7600,
+      },
+    });
+  });
+  const metadataAlignmentConversation = () => store.getState().conversations
+    .find((item) => item.id === metadataAlignmentConversationId);
+  await runtime.rejectCatalogCandidates({
+    tenantId: 'andina',
+    conversationId: metadataAlignmentConversationId,
+    normalized: { waId: '573000000895', text: 'Ninguna de estas', traceId: 'trace-checkout-metadata' },
+    current: metadataAlignmentConversation(),
+    selection: {
+      lineId: 'coca:metadata',
+      offeredSkus: products.slice(0, 2).map((item) => item.sku),
+    },
+  });
+  assert.deepEqual(metadataAlignmentConversation().orderDraft.missingFields, []);
+  assert.equal(metadataAlignmentConversation().orderDraft.checkout.phase, 'review');
+  assert.equal(metadataAlignmentConversation().stage, 'quote');
+  assert.equal(metadataAlignmentConversation().nextStep, 'Esperar que el cliente agregue productos o continúe con el pedido.');
+
   const alternativeConversationId = 'catalog-selection-alternatives';
   const alternativeProduct = {
     sku: 'COKE-CHERRY-15',
