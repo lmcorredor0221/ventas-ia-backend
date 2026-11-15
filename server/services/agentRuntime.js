@@ -1013,8 +1013,12 @@ export class AgentRuntime {
         requiredTerms: selectedPaymentMethod?.label ? [selectedPaymentMethod.label] : [],
       },
     });
+    const continuationNotice = String(plan.continuationNotice ?? '').trim();
+    const customerReplyWithNotice = continuationNotice
+      ? `${continuationNotice}\n\n${customerReplyBase}`
+      : customerReplyBase;
     const variablePricingNotice = shouldSendVariablePricingNotice({ previous: previousDraft, draft: { items: effectiveOrderItems, paymentMethod: selectedPaymentMethod?.id }, checkout });
-    const customerReply = variablePricingNotice ? `${customerReplyBase}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyBase;
+    const customerReply = variablePricingNotice ? `${customerReplyWithNotice}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyWithNotice;
     const interactiveOffer = catalogSelectionOffer ?? partialOrderDecisionOffer ?? checkoutOffer;
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
@@ -1457,9 +1461,13 @@ export class AgentRuntime {
         requiredTerms: draft.paymentMethod ? [paymentMethodLabel(draft.paymentMethod, paymentMethods)] : [],
       },
     });
+    const continuationNotice = String(plan.continuationNotice ?? '').trim();
+    const customerReplyWithNotice = continuationNotice
+      ? `${continuationNotice}\n\n${customerReplyBase}`
+      : customerReplyBase;
     const variablePricingNotice = shouldSendVariablePricingNotice({ previous: conversation?.orderDraft, draft, checkout: draft.checkout });
     if (variablePricingNotice) draft.variablePricingNoticeSentAt = new Date().toISOString();
-    const customerReply = variablePricingNotice ? `${customerReplyBase}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyBase;
+    const customerReply = variablePricingNotice ? `${customerReplyWithNotice}\n\n${VARIABLE_PRICE_NOTICE}` : customerReplyWithNotice;
     const interactiveOffer = catalogSelectionOffer ?? checkoutOffer;
     const checkoutInteractive = interactiveOffer?.interactive
       ? { ...interactiveOffer.interactive, body: customerReply }
@@ -2431,13 +2439,42 @@ export class AgentRuntime {
     const lookup = await this.tools.call('google_sheets_customer_profile_lookup', tenantId, conversationId, {
       wa_id: normalized.waId, profile_name: normalized.profileName,
     });
+    // Rejecting one offer must not end the product-resolution cycle. Keep the
+    // rejected line as an auditable removed item, then continue with the first
+    // remaining unresolved line. If that line has no stored candidates, run a
+    // targeted catalog search for it; selected lines and the rejected line are
+    // preserved by handleDeliveryOrder's target-line isolation.
+    const nextPendingLine = (updatedDraft.items ?? []).find((item) => (
+      !isRemovedOrderItem(item) && !item.product
+    ));
+    const continuationNotice = 'Entiendo 😊. Por ahora no encontramos otras opciones para ese producto, así que lo retiraré de tu pedido. Continuemos con los demás productos.';
+    if (nextPendingLine?.lineId && !(nextPendingLine.catalogCandidates?.length)) {
+      return this.handleDeliveryOrder({
+        tenantId,
+        conversationId,
+        normalized,
+        customerProfile: lookup.profile,
+        catalogTargetLineIds: [nextPendingLine.lineId],
+        plan: {
+          intent: 'order_clarification',
+          continuationNotice,
+          order: updatedDraft,
+          missingFields: updatedDraft.missingFields ?? [],
+        },
+      });
+    }
     return this.handleOrderClarification({
       tenantId,
       conversationId,
       normalized,
       customerProfile: lookup.profile,
       preserveExistingCatalogSelections: true,
-      plan: { intent: 'order_clarification', order: updatedDraft, missingFields: updatedDraft.missingFields ?? [] },
+      plan: {
+        intent: 'order_clarification',
+        continuationNotice,
+        order: updatedDraft,
+        missingFields: updatedDraft.missingFields ?? [],
+      },
     });
   }
 

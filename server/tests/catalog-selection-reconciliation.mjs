@@ -124,11 +124,13 @@ try {
   assert.ok(offer, 'The ambiguous line should expose a product-selection offer');
   const catalogSelectionMessage = conversation().messages.filter((message) => message.role === 'agent').at(-1);
   assert.equal(catalogSelectionMessage.interactive?.kind, 'list', 'Catalog variants use a native WhatsApp list, not ambiguous reply buttons');
-  assert.equal(catalogSelectionMessage.interactive?.rows?.length, 2);
-  assert.ok(catalogSelectionMessage.interactive.rows.every((row) => row.title.length <= 24 && row.description?.includes('$')),
+  assert.equal(catalogSelectionMessage.interactive?.rows?.length, 4,
+    'Catalog selection must include product rows plus controls for other options and rejection');
+  assert.ok(catalogSelectionMessage.interactive.rows.slice(0, 2).every((row) => row.title.length <= 24 && row.description?.includes('$')),
     'Every catalog row exposes a readable product/presentation title and price description');
   assert.notEqual(catalogSelectionMessage.interactive.rows[0].title, catalogSelectionMessage.interactive.rows[1].title,
     'Variants must remain distinguishable to the customer');
+  assert.deepEqual(offer.options.slice(-2).map((option) => option.action), ['search_catalog_alternatives', 'reject_catalog_candidates']);
   const choice = offer.options.find((item) => item.value.includes('COKE-ORIGINAL-15'));
   assert.ok(choice);
   await runtime.handleInteractiveReply({
@@ -182,6 +184,171 @@ try {
   assert.ok(confirmationOffer, 'Selecting payment must proactively offer final order actions');
   assert.deepEqual(confirmationOffer.options.map((item) => item.title), ['Confirmar pedido', 'Ajustar pedido', 'Hablar con la tienda']);
 
+  const rejectedConversationId = 'catalog-selection-rejects-one-line';
+  store.mutate((state) => {
+    state.conversations.unshift({ id: rejectedConversationId, tenantId: 'andina', waId: '573000000892', messages: [], status: 'live' });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId: 'andina',
+    conversationId: rejectedConversationId,
+    normalized: { waId: '573000000892', text: 'Una Coca-Cola', traceId: 'trace-catalog-reject' },
+    customerProfile: { name: 'Cliente local', defaultAddress: 'Calle de prueba 10' },
+    plan: {
+      intent: 'delivery_order',
+      customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
+      order: {
+        delivery: true,
+        items: [{ lineId: 'coca:1', rawName: 'Coca-Cola', catalogQuery: 'coca cola', quantity: 1 }],
+      },
+      missingFields: [],
+    },
+  });
+  const rejectConversation = () => store.getState().conversations.find((item) => item.id === rejectedConversationId);
+  const rejectOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === rejectedConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+  assert.ok(rejectOffer, 'Una línea ambigua debe generar una oferta de selección descartable');
+  const rejectOption = rejectOffer.options.find((item) => item.action === 'reject_catalog_candidates');
+  assert.ok(rejectOption);
+  await runtime.handleInteractiveReply({
+    tenantId: 'andina',
+    conversationId: rejectedConversationId,
+    normalized: { waId: '573000000892', text: 'Ninguna de estas', interactive: { optionId: rejectOption.id }, traceId: 'trace-catalog-reject-choice' },
+  });
+  const rejectedDraft = rejectConversation().orderDraft;
+  assert.equal(rejectedDraft.items.length, 1, 'Rechazar alternativas no debe crear ni eliminar otras líneas');
+  assert.equal(rejectedDraft.items[0].selectionStatus, 'removed');
+  assert.equal(rejectedDraft.items[0].removedByCustomer, true);
+  assert.equal(rejectedDraft.items[0].catalogSelectionHistory.exhaustedAt !== null, true);
+  assert.equal(Object.values(store.getState().interactionOffersById ?? {})
+    .some((item) => item.conversationId === rejectedConversationId && item.purpose === 'catalog_selection' && item.status === 'active'), false);
+
+  // Rejection must continue with another unresolved line. The second line is
+  // deliberately absent on the first pass, then becomes searchable only when
+  // the rejected first line advances the flow. This reproduces the production
+  // case where preserveExistingCatalogSelections had skipped the next search.
+  const rejectionContinuationConversationId = 'catalog-selection-rejects-and-continues';
+  const rejectionContinuationQueries = [];
+  const panCandidates = products.filter((item) => item.sku.startsWith('PAN-TAJADO-'));
+  let initialPanLookup = true;
+  store.mutate((state) => {
+    state.conversations.unshift({ id: rejectionContinuationConversationId, tenantId: 'andina', waId: '573000000894', messages: [], status: 'live' });
+  });
+  const rejectionContinuationToolsCall = runtime.tools.call.bind(runtime.tools);
+  runtime.tools.call = async (toolName, tenantId, conversationId, payload) => {
+    if (toolName === 'google_sheets_read_table' && String(payload?.query ?? '').toLowerCase().includes('pan tajado')) {
+      rejectionContinuationQueries.push(String(payload.query));
+      if (initialPanLookup) {
+        initialPanLookup = false;
+        return { status: 'success', rows: [], source: 'test_pending_line' };
+      }
+      return { status: 'success', rows: panCandidates, source: 'test_rejection_continuation' };
+    }
+    return rejectionContinuationToolsCall(toolName, tenantId, conversationId, payload);
+  };
+  try {
+    await runtime.handleDeliveryOrder({
+      tenantId: 'andina',
+      conversationId: rejectionContinuationConversationId,
+      normalized: { waId: '573000000894', text: 'Una Coca-Cola y un pan tajado', traceId: 'trace-catalog-reject-continue' },
+      customerProfile: { name: 'Cliente local', defaultAddress: 'Calle de prueba 10' },
+      plan: {
+        intent: 'delivery_order',
+        customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
+        order: {
+          delivery: true,
+          items: [
+            { lineId: 'coca:reject-continue', rawName: 'Coca-Cola', catalogQuery: 'coca cola', quantity: 1 },
+            { lineId: 'pan:reject-continue', rawName: 'pan tajado', catalogQuery: 'pan tajado', quantity: 1 },
+          ],
+        },
+        missingFields: [],
+      },
+    });
+    const rejectionContinuationConversation = () => store.getState().conversations.find((item) => item.id === rejectionContinuationConversationId);
+    const firstOffer = Object.values(store.getState().interactionOffersById ?? {})
+      .find((item) => item.conversationId === rejectionContinuationConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+    assert.ok(firstOffer, 'La primera línea ambigua debe ofrecerse antes de avanzar a la siguiente');
+    const firstRejectOption = firstOffer.options.find((item) => item.action === 'reject_catalog_candidates');
+    assert.ok(firstRejectOption);
+    const queriesBeforeReject = rejectionContinuationQueries.length;
+    await runtime.handleInteractiveReply({
+      tenantId: 'andina',
+      conversationId: rejectionContinuationConversationId,
+      normalized: { waId: '573000000894', text: 'Ninguna de estas', interactive: { optionId: firstRejectOption.id }, traceId: 'trace-catalog-reject-continue-choice' },
+    });
+    const continuationDraft = rejectionContinuationConversation().orderDraft;
+    assert.equal(continuationDraft.items.find((item) => item.lineId === 'coca:reject-continue')?.selectionStatus, 'removed');
+    assert.equal(continuationDraft.items.find((item) => item.lineId === 'pan:reject-continue')?.selectionStatus, 'pending');
+    assert.deepEqual(rejectionContinuationQueries.slice(queriesBeforeReject).length, 1,
+      'Tras rechazar una línea solo debe ejecutarse la búsqueda dirigida de la siguiente línea');
+    const continuationOffer = Object.values(store.getState().interactionOffersById ?? {})
+      .find((item) => item.conversationId === rejectionContinuationConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+    assert.ok(continuationOffer, 'El flujo debe presentar alternativas para la siguiente línea pendiente');
+    assert.ok(continuationOffer.options.some((item) => item.value.includes('PAN-TAJADO-BLANCO')));
+    assert.ok(rejectionContinuationConversation().messages.at(-1)?.text.includes('lo retiraré de tu pedido'));
+  } finally {
+    runtime.tools.call = rejectionContinuationToolsCall;
+  }
+
+  const alternativeConversationId = 'catalog-selection-alternatives';
+  const alternativeProduct = {
+    sku: 'COKE-CHERRY-15',
+    name: 'Coca-Cola Cherry',
+    brand: 'Coca-Cola',
+    presentation: '1.5 L',
+    description: 'Gaseosa sabor cereza',
+    price: 7600,
+    stock: 8,
+    category: 'Bebidas',
+  };
+  store.mutate((state) => {
+    state.conversations.unshift({ id: alternativeConversationId, tenantId: 'andina', waId: '573000000893', messages: [], status: 'live' });
+  });
+  await runtime.handleDeliveryOrder({
+    tenantId: 'andina',
+    conversationId: alternativeConversationId,
+    normalized: { waId: '573000000893', text: 'Una Coca-Cola', traceId: 'trace-catalog-alternatives' },
+    customerProfile: { name: 'Cliente local', defaultAddress: 'Calle de prueba 10' },
+    plan: {
+      intent: 'delivery_order',
+      customerDetails: { name: 'Cliente local', deliveryAddress: 'Calle de prueba 10' },
+      order: {
+        delivery: true,
+        items: [{ lineId: 'coca:alternative', rawName: 'Coca-Cola', catalogQuery: 'coca cola', quantity: 1 }],
+      },
+      missingFields: [],
+    },
+  });
+  const alternativeConversation = () => store.getState().conversations.find((item) => item.id === alternativeConversationId);
+  const initialAlternativeOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === alternativeConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+  assert.ok(initialAlternativeOffer);
+  const alternativeOption = initialAlternativeOffer.options.find((item) => item.action === 'search_catalog_alternatives');
+  assert.ok(alternativeOption);
+  const originalToolsCall = runtime.tools.call.bind(runtime.tools);
+  runtime.tools.call = async (toolName, tenantId, conversationId, payload) => {
+    if (toolName === 'google_sheets_read_table' && (payload?.excludeSkus ?? []).includes('COKE-ORIGINAL-15')) {
+      return { status: 'success', rows: [alternativeProduct], source: 'test_alternative_catalog' };
+    }
+    return originalToolsCall(toolName, tenantId, conversationId, payload);
+  };
+  try {
+    await runtime.handleInteractiveReply({
+      tenantId: 'andina',
+      conversationId: alternativeConversationId,
+      normalized: { waId: '573000000893', text: 'Buscar otras opciones', interactive: { optionId: alternativeOption.id }, traceId: 'trace-catalog-alternatives-choice' },
+    });
+  } finally {
+    runtime.tools.call = originalToolsCall;
+  }
+  const alternativeOffer = Object.values(store.getState().interactionOffersById ?? {})
+    .find((item) => item.conversationId === alternativeConversationId && item.purpose === 'catalog_selection' && item.status === 'active');
+  assert.ok(alternativeOffer, 'Buscar otras opciones debe crear una nueva oferta cuando existen candidatos nuevos');
+  assert.ok(alternativeOffer.options.some((item) => item.value.includes('COKE-CHERRY-15')));
+  assert.equal(alternativeOffer.options.some((item) => item.value.includes('COKE-ORIGINAL-15') || item.value.includes('COKE-ZERO-15')), false,
+    'La oferta alternativa no debe repetir SKU ya mostrados');
+  assert.equal(alternativeConversation().orderDraft.items[0].catalogSelectionHistory.seenCandidateSkus.includes('COKE-ORIGINAL-15'), true);
+
   const amountConversationId = 'catalog-amount-selection';
   store.mutate((state) => {
     state.conversations.unshift({ id: amountConversationId, tenantId: 'andina', waId: '573000000889', messages: [], status: 'live' });
@@ -217,7 +384,7 @@ try {
   });
   const amountDraft = store.getState().conversations.find((item) => item.id === amountConversationId).orderDraft;
   assert.equal(amountDraft.items[0].product.sku, 'LIMON-500G', 'A single amount-sale commercial identity binds a supporting catalog reference even when the LLM asks about package variants');
-  assert.equal(amountDraft.items[0].quantity, null, 'A monetary request never becomes a physical quantity');
+  assert.equal(amountDraft.items[0].quantity, 1, 'A monetary request uses one logical line quantity and never becomes a physical quantity');
   assert.equal(amountDraft.items[0].budgetAmount, 5000);
   assert.equal(amountDraft.items[0].lineTotal, 5000, 'The requested amount stays as the quoted line total');
   assert.equal(amountDraft.missingFields.some((field) => /^(quantity|presentation|stock):limón$/.test(field)), false,
@@ -327,8 +494,8 @@ try {
     }],
   });
   const compactTitles = compactList.interactive.rows.map((row) => row.title);
-  assert.deepEqual(compactTitles, ['Margarita · 25 g', 'Margarita · 105 g']);
-  assert.ok(compactTitles.every((title) => title.length <= 24));
+  assert.deepEqual(compactTitles, ['Margarita · 25 g', 'Margarita · 105 g', 'Buscar otras opciones', 'Ninguna de estas']);
+  assert.ok(compactTitles.slice(0, 2).every((title) => title.length <= 24));
   assert.equal(new Set(compactTitles).size, compactTitles.length,
     'Every catalog option must remain visibly distinguishable in WhatsApp');
   console.log('Catalog selection reconciliation passed: contextual ambiguity, offer, selection and structured summary.');
